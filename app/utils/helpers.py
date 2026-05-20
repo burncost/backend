@@ -7,8 +7,8 @@ from app.config import settings
 import logging
 
 # from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
-from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
+# from bs4 import BeautifulSoup
+# from fake_useragent import UserAgent
 import random
 
 import sib_api_v3_sdk
