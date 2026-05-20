@@ -12,7 +12,7 @@ from app.core.security import verify_email_token, create_email_verification_toke
 from app.crud import user as user_crud
 from app.config import settings
 
-from app.utils.helpers import send_mail_via_brevo, send_mail_via_spacemail, verify_business
+from app.utils.helpers import send_mail_via_brevo, send_mail_via_spacemail
 
 logger = logging.getLogger(__name__)
 
