@@ -1,0 +1,94 @@
+# Web Framework
+fastapi
+uvicorn
+starlette
+python-multipart
+gunicorn
+
+# Data Validation & Configuration
+pydantic
+pydantic-settings
+email-validator
+
+# Database - PostgreSQL
+sqlalchemy
+asyncpg
+alembic
+
+# Database - MongoDB
+motor
+pymongo
+# bson
+
+# Redis & Caching
+redis
+
+# Celery
+celery
+flower
+
+# Security & Authentication
+python-jose
+pwdlib[argon2]
+bcrypt
+cryptography
+
+# Cloud Storage
+google-cloud-storage
+boto3
+cloudinary
+
+# HTTP Client
+httpx
+aiohttp
+requests
+
+# Data Processing
+pandas
+openpyxl
+
+# PDF Processing
+PyPDF2
+pdfplumber
+pdf2image
+
+# CAD Processing
+ezdxf
+# aspose-cad
+
+# Image Processing
+Pillow
+
+# Validation
+phonenumbers
+
+# Utilities
+python-dotenv
+pytz
+
+# Web Scraping
+selenium
+beautifulsoup4
+webdriver-manager
+fake-useragent
+
+# Cloud & Analytics
+google-cloud-bigquery
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+
+# Monitoring
+sentry-sdk
+
+# Testing
+pytest
+pytest-asyncio
+pytest-cov
+
+# Code Quality
+black
+flake8
+mypy
+
+resend

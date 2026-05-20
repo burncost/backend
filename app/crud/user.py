@@ -1,0 +1,109 @@
+from typing import Optional, Any
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from datetime import datetime
+
+from app.crud.base import CRUDBase
+from app.models.user import User, UserProfile
+from app.schemas.user import UserCreate, UserUpdate
+from app.core.security import get_password_hash
+
+## Get user by ID with profile loaded
+class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
+    async def get(self, db: AsyncSession, id: Any) -> Optional[User]:
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.profile))
+            .where(User.id == id)
+        )
+        return result.scalar_one_or_none()
+
+    ###Get user by email
+    async def get_by_email(self, db: AsyncSession, *, email: str) -> Optional[User]:
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.profile))
+            .where(User.email == email)
+        )
+        return result.scalar_one_or_none()
+
+    ### Get user by phone number
+    async def get_by_phone(self, db: AsyncSession, *, phone: str) -> Optional[User]:
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.profile))
+            .where(User.phone_number == phone)
+        )
+        return result.scalar_one_or_none()
+
+    ### Create new user with hashed password and profile
+    async def create(self, db: AsyncSession, *, obj_in: UserCreate) -> User:
+        db_obj = User(
+            email=obj_in.email,
+            phone_number=obj_in.phone_number,
+            password_hash=get_password_hash(obj_in.password),
+            role=obj_in.role,
+            status="pending_verification",
+        )
+        db.add(db_obj)
+        await db.commit()
+        await db.refresh(db_obj)
+        
+        # Create user profile
+        profile = UserProfile(
+            user_id=db_obj.id,
+            first_name=obj_in.first_name,
+            other_name=obj_in.other_name,
+            last_name=obj_in.last_name,
+            business_name=obj_in.business_name,
+            location  = obj_in.location
+        )
+        db.add(profile)
+        await db.commit()
+        
+        # Reload user with profile
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.profile))
+            .where(User.id == db_obj.id)
+        )
+        return result.scalar_one()
+
+    ### Update user's last login timestamp
+    async def update_last_login(self, db: AsyncSession, *, user_id: Any) -> User:
+        user = await self.get(db, id=user_id)
+        if user:
+            user.last_login = datetime.utcnow()
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        return user
+
+    ### Mark user's email as verified
+    async def verify_email(self, db: AsyncSession, *, user_id: Any) -> User:
+        user = await self.get(db, id=user_id)
+        if user:
+            user.email_verified = True
+            user.status = "active"
+            # if user.phone_verified:
+            #     user.status = "active"
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        return user
+
+    ### Mark user's phone as verified
+    async def verify_phone(self, db: AsyncSession, *, user_id: Any) -> User:
+        user = await self.get(db, id=user_id)
+        if user:
+            user.phone_verified = True
+            if user.email_verified:
+                user.status = "active"
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        return user
+
+
+user = CRUDUser(User)
