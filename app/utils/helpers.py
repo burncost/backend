@@ -9,12 +9,12 @@ import logging
 # from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 # from bs4 import BeautifulSoup
 # from fake_useragent import UserAgent
-import random
+# import random
 
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
 
-import os
+# import os
 
 # os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "./playwright_browsers"
 logger = logging.getLogger(__name__)

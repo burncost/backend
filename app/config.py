@@ -40,8 +40,7 @@ class Settings(BaseSettings):
     @property
     def DATABASE_URL(self) -> str:
         if settings.DEBUG==False:
-            # return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@/myappdb?host=/cloudsql/{self.POSTGRES_SERVER}"
-            return f"postgresql+asyncpg://{self.DEV_POSTGRES_USER}:{self.DEV_POSTGRES_PASSWORD}@{self.DEV_POSTGRES_SERVER}:{self.DEV_POSTGRES_PORT}/{self.DEV_POSTGRES_DB}"
+            return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@/{self.POSTGRES_DB}?host=/cloudsql/{self.POSTGRES_SERVER}"
         else:
             return f"postgresql+asyncpg://{self.DEV_POSTGRES_USER}:{self.DEV_POSTGRES_PASSWORD}@{self.DEV_POSTGRES_SERVER}:{self.DEV_POSTGRES_PORT}/{self.DEV_POSTGRES_DB}"
         
