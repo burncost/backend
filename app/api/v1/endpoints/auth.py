@@ -26,8 +26,6 @@ from app.services.auth_service import AuthService
 from app.core.security import get_password_hash
 from app.config import settings
 
-# from app.utils.helpers import verify_business
-# import redis
 import redis.asyncio as airedis
 
 if settings.DEBUG:
