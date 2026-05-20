@@ -221,6 +221,7 @@ async def detailed_health_check():
     mongo_healthy = await test_mongo_connection()
     
     return {
+        "Project": settings.PROJECT_NAME,
         "status": "healthy" if (postgres_healthy and mongo_healthy) else "degraded",
         "timestamp": time.time(),
         "version": settings.VERSION,
