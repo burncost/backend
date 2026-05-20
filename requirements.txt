@@ -51,13 +51,17 @@ openpyxl
 PyPDF2
 pdfplumber
 pdf2image
+pymupdf
 
 # CAD Processing
-ezdxf
+# ezdxf
 # aspose-cad
 
 # Image Processing
 Pillow
+opencv-python-headless
+paddlepaddle
+paddleocr
 
 # Validation
 phonenumbers
@@ -67,10 +71,11 @@ python-dotenv
 pytz
 
 # Web Scraping
-selenium
-beautifulsoup4
-webdriver-manager
-fake-useragent
+# selenium
+# beautifulsoup4
+# webdriver-manager
+# fake-useragent
+# playwright
 
 # Cloud & Analytics
 google-cloud-bigquery
@@ -92,3 +97,16 @@ flake8
 mypy
 
 resend
+
+xlrd
+
+openai
+json-repair
+
+anthropic
+
+upstash-redis
+
+sib-api-v3-sdk
+
+sendgrid

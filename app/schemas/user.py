@@ -66,6 +66,7 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     phone_number: Optional[str] = None
     first_name: Optional[str] = Field(None, min_length=2, max_length=100)
+    other_name: Optional[str] = Field(None, min_length=0, max_length=100)
     last_name: Optional[str] = Field(None, min_length=2, max_length=100)
     business_name: Optional[str] = Field(None, max_length=255)
     avatar_url: Optional[str] = None
@@ -73,6 +74,7 @@ class UserUpdate(BaseModel):
     location: Optional[str] = Field(None, min_length=2, max_length=100)
     role: Optional[str] = Field(None, max_length=50)
     
+
     @field_validator('phone_number')
     @classmethod
     def validate_phone_update(cls, v: Optional[str]) -> Optional[str]:
@@ -132,7 +134,7 @@ class UserLogin(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
-    token_type: str = "bearer"
+    token_type: str = ""
     expires_in: int
     role: str
     vendorverification: Optional[str]
@@ -143,3 +145,8 @@ class TokenResponse(BaseModel):
 
 class TokenRefresh(BaseModel):
     refresh_token: str
+
+
+class PasswordUpdateRequest(BaseModel):
+    currentPassword: str
+    newPassword: str

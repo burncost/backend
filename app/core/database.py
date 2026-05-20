@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import text
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
 from typing import AsyncGenerator
 import logging
 
@@ -63,9 +63,21 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 # Dependency to get MongoDB database
-async def get_mongodb():
+# async def get_mongodb():
+#     return mongodb
+def get_mongo_db() -> AsyncIOMotorDatabase:
+    if mongoclient is None:
+        raise RuntimeError("MongoDB not connected. Ensure connect_to_mongo() ran at startup.")
     return mongodb
 
+
+def get_collection(name: str) -> AsyncIOMotorCollection:
+    return get_mongo_db()[name]
+
+
+# Optional FastAPI dependency version
+async def get_mongodb() -> AsyncGenerator[AsyncIOMotorDatabase, None]:
+    yield mongodb
 
 # Health check functions
 async def test_db_connection() -> bool:

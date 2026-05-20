@@ -1,3 +1,4 @@
+import uvicorn   
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -244,12 +245,11 @@ async def root():
     }
 
 
-if __name__ == "__main__":
-    import uvicorn    
+if __name__ == "__main__":     
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=settings.UVIPORT,
         reload=settings.DEBUG,
         workers=4 if not settings.DEBUG else 1,
         log_level=settings.LOG_LEVEL.lower()

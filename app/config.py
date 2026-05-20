@@ -8,7 +8,9 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Burncost"
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
-    DEBUG: bool = False
+    DEBUG: bool
+
+    PORT: int = 8080
     
     # Security
     SECRET_KEY: str
@@ -18,14 +20,19 @@ class Settings(BaseSettings):
     
     # CORS
     ALLOWED_ORIGINS: List[str] = [
-        "*",
-        # "http://localhost:5173",
-        # "http://localhost:8000",
+        "http://localhost:5173",
+        "http://localhost:8000",
         # "https://www.burncost.com/",
         # "https://burncost.com/"
     ]
     
     # PostgreSQL Database
+    DEV_POSTGRES_SERVER: str
+    DEV_POSTGRES_USER: str
+    DEV_POSTGRES_PASSWORD: str
+    DEV_POSTGRES_DB: str
+    DEV_POSTGRES_PORT: str
+
     POSTGRES_SERVER: str
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str
@@ -34,8 +41,13 @@ class Settings(BaseSettings):
     
     @property
     def DATABASE_URL(self) -> str:
-        return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-    
+        if settings.DEBUG==False:
+            # return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@/myappdb?host=/cloudsql/{self.POSTGRES_SERVER}"
+            return f"postgresql+asyncpg://{self.DEV_POSTGRES_USER}:{self.DEV_POSTGRES_PASSWORD}@{self.DEV_POSTGRES_SERVER}:{self.DEV_POSTGRES_PORT}/{self.DEV_POSTGRES_DB}"
+        else:
+            return f"postgresql+asyncpg://{self.DEV_POSTGRES_USER}:{self.DEV_POSTGRES_PASSWORD}@{self.DEV_POSTGRES_SERVER}:{self.DEV_POSTGRES_PORT}/{self.DEV_POSTGRES_DB}"
+        
+
     # MongoDB Database
     MONGO_HOST: str
     MONGO_PORT: int = 27017
@@ -45,19 +57,28 @@ class Settings(BaseSettings):
     
     @property
     def MONGODB_URL(self) -> str:
-        if self.MONGO_USER and self.MONGO_PASSWORD:
-            # return f"mongodb://{self.MONGO_USER}:{self.MONGO_PASSWORD}@{self.MONGO_HOST}:{self.MONGO_PORT}/{self.MONGO_DB}"
-            return f"mongodb+srv://{self.MONGO_USER}:{self.MONGO_PASSWORD}@testcluster.3huakj3.mongodb.net/{self.MONGO_DB}"
-        return f"mongodb://{self.MONGO_HOST}:{self.MONGO_PORT}"
+        if self.MONGO_USER and self.MONGO_PASSWORD and settings.DEBUG==False:
+            return f"mongodb+srv://{self.MONGO_USER}:{self.MONGO_PASSWORD}@burncost.cpm6qy5.mongodb.net/{self.MONGO_DB}?retryWrites=true&w=majority"
+        else:
+            return f"mongodb://{self.MONGO_USER}:{self.MONGO_PASSWORD}@{self.MONGO_HOST}:{self.MONGO_PORT}/{self.MONGO_DB}"
+        # return f"mongodb://{self.MONGO_HOST}:{self.MONGO_PORT}"
     
     # Redis
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
+    REDIS_EMAIL: str
+    REDIS_PASSWORD: str
     
+    UPSTASH_REDIS_REST_URL: Optional[str] = None
+    UPSTASH_REDIS_REST_TOKEN: Optional[str] = None
+
     @property
     def REDIS_URL(self) -> str:
-        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        if self.UPSTASH_REDIS_REST_URL and self.UPSTASH_REDIS_REST_TOKEN and settings.DEBUG==False:
+            return f"rediss://default:{self.UPSTASH_REDIS_REST_TOKEN}@{self.UPSTASH_REDIS_REST_URL}:6379"
+        else:
+            return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
     
     # Celery
     CELERY_BROKER_URL: Optional[str] = None
@@ -94,6 +115,8 @@ class Settings(BaseSettings):
     # AI/ML Service
     AI_SERVICE_URL: Optional[str] = None
     AI_SERVICE_API_KEY: Optional[str] = None
+    AI_MODEL: Optional[str] = None
+    AI_BASE_URL: Optional[str] = None
     
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
@@ -137,6 +160,8 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "https://burncost.com"
 
     RESEND_API_KEY: Optional[str]
+
+    BREVO_API_KEY: Optional[str]
     
     class Config:
         env_file = ".env"

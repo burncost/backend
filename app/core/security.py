@@ -2,14 +2,13 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 # from passlib.context import CryptContext
 from pwdlib import PasswordHash
-from jose import JWTError, jwt
-from fastapi import Depends, HTTPException, status
+from jose import JWTError, jwt, ExpiredSignatureError
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.config import settings
 
 ### Security utilities: JWT, password hashing, authentication
-
 
 # Password hashing
 # pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -79,18 +78,29 @@ def decode_token(token: str) -> Dict[str, Any]:
             algorithms=[settings.ALGORITHM]
         )
         return payload
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+        )
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Invalid Auth Token",
         )
 
 
 async def get_current_user_id(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
+    request: Request
 ) -> str:
-    token = credentials.credentials
+    token = request.cookies.get("access_token")
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not Authenticated",
+        )
+    
     payload = decode_token(token)
     
     user_id: str = payload.get("sub")

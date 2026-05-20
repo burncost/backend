@@ -24,12 +24,12 @@ class CustomerAddress(Base):
         SQLEnum(AddressType, native_enum=False, length=10),
         default=AddressType.HOME
     )
-    contact_name = Column(String(255), nullable=False)
-    contact_phone = Column(String(20), nullable=False)
-    address_line1 = Column(Text, nullable=False)
+    contact_name = Column(String(255))
+    contact_phone = Column(String(20))
+    address_line1 = Column(Text)
     address_line2 = Column(Text)
-    city = Column(String(100), nullable=False)
-    state = Column(String(100), nullable=False)
+    city = Column(String(100))
+    state = Column(String(100))
     lga = Column(String(100))
     postal_code = Column(String(20))
     landmark = Column(Text)
