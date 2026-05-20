@@ -75,7 +75,7 @@ pytz
 # beautifulsoup4
 # webdriver-manager
 # fake-useragent
-playwright
+# playwright
 
 # Cloud & Analytics
 google-cloud-bigquery
