@@ -62,6 +62,7 @@ class Product(Base):
     vendor = relationship("Vendor", back_populates="products")
     images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
     specifications = relationship("ProductSpecification", back_populates="product", cascade="all, delete-orphan")
+    reviews = relationship("Review", back_populates="product", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Product {self.name}>"
@@ -104,3 +105,17 @@ class ProductVariant(Base):
     quantity = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class Review(Base):
+    __tablename__ = "reviews"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    product_id=Column(UUID(as_uuid=True), ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id=Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    rating=Column(Integer, nullable=False)
+    title=Column(String(255), nullable=False)
+    comment=Column(Text)
+    created_at=Column(DateTime, default=datetime.utcnow)
+    updated_at=Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    product = relationship("Product", back_populates="reviews")
+    user = relationship("User")

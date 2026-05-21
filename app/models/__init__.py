@@ -1,6 +1,6 @@
 from app.models.user import User, UserProfile
 from app.models.vendor import Vendor
-from app.models.product import Product, ProductImage, ProductSpecification, ProductVariant
+from app.models.product import Product, ProductImage, ProductSpecification, ProductVariant, Review
 from app.models.category import Category
 from app.models.brand import Brand
 from app.models.order import Order, OrderItem

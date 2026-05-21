@@ -20,8 +20,10 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: List[str] = [
         "http://localhost:5173",
         "http://localhost:8000",
-        # "https://www.burncost.com/",
-        # "https://burncost.com/"
+
+        "https://burncost.com",
+        "https://www.burncost.com",
+        "https://demo.burncost.com",
     ]
     
     # PostgreSQL Database
@@ -54,7 +56,7 @@ class Settings(BaseSettings):
     
     @property
     def MONGODB_URL(self) -> str:
-        if self.MONGO_USER and self.MONGO_PASSWORD and settings.DEBUG==False:
+        if settings.DEBUG==False:
             return f"mongodb+srv://{self.MONGO_USER}:{self.MONGO_PASSWORD}@burncost.cpm6qy5.mongodb.net/{self.MONGO_DB}?retryWrites=true&w=majority"
         else:
             return f"mongodb://{self.MONGO_USER}:{self.MONGO_PASSWORD}@{self.MONGO_HOST}:{self.MONGO_PORT}/{self.MONGO_DB}"
@@ -72,7 +74,7 @@ class Settings(BaseSettings):
 
     @property
     def REDIS_URL(self) -> str:
-        if self.UPSTASH_REDIS_REST_URL and self.UPSTASH_REDIS_REST_TOKEN and settings.DEBUG==False:
+        if settings.DEBUG==False:
             return f"rediss://default:{self.UPSTASH_REDIS_REST_TOKEN}@{self.UPSTASH_REDIS_REST_URL}:6379"
         else:
             return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
