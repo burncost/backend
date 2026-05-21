@@ -36,12 +36,14 @@ class AuthService:
         logger.info(f"\n\n\nSending verification email to {email} with link: {verification_link}\n\n")
         # self.send_email(email, verification_link)
 
-        success = await send_mail_via_spacemail(verification_link, email, "Verify your email")
-        if success:
-            logger.info(f"Mail delivered successfully to {email} via Spacemail")
-        else:
-            await send_mail_via_brevo(verification_link, email, "Verify your email")
-            logger.info(f"Mail delivered successfully to {email} via Brevo API")
+        # success = await send_mail_via_spacemail(verification_link, email, "Verify your email")
+        # logger.info(f"\n\nPrinting logger success: {success}\n\n")
+        # if success:
+        #     pass
+        # else:
+        #     await send_mail_via_brevo(verification_link, email, "Verify your email")
+        await send_mail_via_brevo(verification_link, email, "Verify your email")
+        # logger.info(f"\n\nPrinting logger success: {success}\n\n")
 
     async def verify_email(self, db: AsyncSession, token: str) -> bool:
         email = verify_email_token(token)

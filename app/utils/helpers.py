@@ -85,12 +85,17 @@ async def send_mail_via_brevo(_link: str, recipient: str, subject: str):
             to=[{"email": recipient}],
             subject=subject,
             html_content=html_content,
-        )
-
-        logger.info(f"Email sent successfully to {recipient} with Resend API. Response: {response}")
-        return True
+        )        
+        try:
+            res = api_instance.send_transac_email(response)
+            logger.info(f"Email sent successfully to {recipient} with Brevo API.")
+            return True
+        except ApiException as e:
+            print(f"Error Sending email: {e}")
+            raise
+        
     except Exception as e:
-        logger.error(f"Failed to send email to {recipient} with Resend API: {str(e)}")
+        logger.error(f"Failed to send email to {recipient} with Brevo API: {str(e)}")
         return False
 
 async def send_mail_via_spacemail(_link: str, recipient: str, subject: str):
@@ -154,7 +159,7 @@ async def send_mail_via_spacemail(_link: str, recipient: str, subject: str):
         with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
             server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             server.send_message(message)
-        logger.info(f"Email sent successfully to {recipient}")
+        logger.info(f"Email sent successfully to {recipient} via SPacemail")
 
         return True
 
