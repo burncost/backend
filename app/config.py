@@ -41,11 +41,13 @@ class Settings(BaseSettings):
     
     @property
     def DATABASE_URL(self) -> str:
-        if settings.DEBUG==False:
-            return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@/{self.POSTGRES_DB}?host=/cloudsql/{self.POSTGRES_SERVER}"
+        if self.DEBUG==False:
+            # return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@/{self.POSTGRES_DB}?host=/cloudsql/{self.POSTGRES_SERVER}"
+            return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}?ssl=require"
         else:
             return f"postgresql+asyncpg://{self.DEV_POSTGRES_USER}:{self.DEV_POSTGRES_PASSWORD}@{self.DEV_POSTGRES_SERVER}:{self.DEV_POSTGRES_PORT}/{self.DEV_POSTGRES_DB}"
-        
+            # return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}?ssl=require"
+
 
     # MongoDB Database
     MONGO_HOST: str
@@ -56,11 +58,11 @@ class Settings(BaseSettings):
     
     @property
     def MONGODB_URL(self) -> str:
-        if settings.DEBUG==False:
+        if self.DEBUG==False:
             return f"mongodb+srv://{self.MONGO_USER}:{self.MONGO_PASSWORD}@burncost.cpm6qy5.mongodb.net/{self.MONGO_DB}?retryWrites=true&w=majority"
         else:
-            return f"mongodb://{self.MONGO_USER}:{self.MONGO_PASSWORD}@{self.MONGO_HOST}:{self.MONGO_PORT}/{self.MONGO_DB}"
-        # return f"mongodb://{self.MONGO_HOST}:{self.MONGO_PORT}"
+            # return f"mongodb://{self.MONGO_USER}:{self.MONGO_PASSWORD}@{self.MONGO_HOST}:{self.MONGO_PORT}/{self.MONGO_DB}"
+            return f"mongodb://{self.MONGO_HOST}:{self.MONGO_PORT}"
     
     # Redis
     REDIS_HOST: str = "localhost"
@@ -74,10 +76,11 @@ class Settings(BaseSettings):
 
     @property
     def REDIS_URL(self) -> str:
-        if settings.DEBUG==False:
+        if self.DEBUG==False:
             return f"rediss://default:{self.UPSTASH_REDIS_REST_TOKEN}@{self.UPSTASH_REDIS_REST_URL}:6379"
         else:
             return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+            # return f"rediss://default:{self.UPSTASH_REDIS_REST_TOKEN}@{self.UPSTASH_REDIS_REST_URL}:6379"
     
     # Celery
     CELERY_BROKER_URL: Optional[str] = None
