@@ -59,10 +59,6 @@ async def send_mail_via_brevo(_link: str, recipient: str, subject: str):
                         style="background:#0d6efd; color:#fff; padding:12px 20px; text-decoration:none; border-radius:5px;">
                         Verify Email
                         </a>
-                    </p>
-
-                    <p>{_link}</p>
-                    </td>
                 </tr>
 
                 <tr>
@@ -130,10 +126,6 @@ async def send_mail_via_spacemail(_link: str, recipient: str, subject: str):
                         style="background:#0d6efd; color:#fff; padding:12px 20px; text-decoration:none; border-radius:5px;">
                         Verify Email
                         </a>
-                    </p>
-
-                    <p>{_link}</p>
-                    </td>
                 </tr>
 
                 <tr>
