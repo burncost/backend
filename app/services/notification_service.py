@@ -116,7 +116,7 @@ class NotificationService:
 
     async def send_verification_email(self, email: str, verification_token: str, full_name: str) -> bool:
         """Send email verification link."""
-        verify_link = f"{os.getenv('FRONTEND_URL', 'http://localhost:5173')}/auth/verify-email?token={verification_token}"
+        verify_link = f"{settings.API_URL}/auth/verify-email?token={verification_token}"
         html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
         <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;"><div style="text-align:center;margin-bottom:20px;">
             <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
@@ -127,16 +127,13 @@ class NotificationService:
         <div style="text-align:center;margin:24px 0;">
             <a href="{verify_link}" style="background:#FF6B00;color:white;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:bold;">Verify Email</a>
         </div>
-        # <p>Or copy this link into your browser:</p>
-        # <p style="font-size:12px;color:#666;word-break:break-all;">{verify_link}</p>
-        <p>This link expires in 24 hours.</p>
         <p style="color:#888;font-size:12px;">© 2026 Burncost. All rights reserved.</p>
         </div></body></html>"""
         return await self.send_email(email, "Verify your Burncost email address", html)
 
     async def send_password_reset_email(self, email: str, reset_token: str, full_name: str) -> bool:
         """Send password reset email."""
-        reset_link = f"{os.getenv('FRONTEND_URL', 'http://localhost:5173')}/auth/reset-password?token={reset_token}"
+        reset_link = f"{settings.FRONTEND_URL}/auth/reset-password?token={reset_token}"
         html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
         <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
         <div style="text-align:center;margin-bottom:20px;">
@@ -155,7 +152,7 @@ class NotificationService:
 
     async def send_vendor_approval_email(self, email: str, business_name: str) -> bool:
         """Send vendor approval notification."""
-        dashboard_link = f"{os.getenv('FRONTEND_URL', 'http://localhost:5173')}/supplier-dashboard"
+        dashboard_link = f"{settings.FRONTEND_URL)}/supplier-dashboard"
         html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
         <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
         <div style="text-align:center;margin-bottom:20px;">
