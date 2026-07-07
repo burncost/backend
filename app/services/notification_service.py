@@ -152,7 +152,7 @@ class NotificationService:
 
     async def send_vendor_approval_email(self, email: str, business_name: str) -> bool:
         """Send vendor approval notification."""
-        dashboard_link = f"{settings.FRONTEND_URL)}/supplier-dashboard"
+        dashboard_link = f"{settings.FRONTEND_URL}/supplier-dashboard"
         html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
         <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
         <div style="text-align:center;margin-bottom:20px;">
