@@ -1,168 +1,98 @@
+"""Helper utilities for the Burncost API."""
+from typing import Dict, Any, Optional
+import re
+import uuid
 from datetime import datetime
-from email.utils import formataddr
-from typing import Any
-from email.mime.text import MIMEText
-import smtplib 
-from app.config import settings
-import logging
 
-import sib_api_v3_sdk
-from sib_api_v3_sdk.rest import ApiException
 
-logger = logging.getLogger(__name__)
+def generate_order_number() -> str:
+    """Generate a unique order number."""
+    date_part = datetime.utcnow().strftime("%y%m")
+    unique_part = str(uuid.uuid4())[:4].upper()
+    return f"ORD-{date_part}-{unique_part}"
 
-API_URL = settings.API_URL
 
-configuration = sib_api_v3_sdk.Configuration()
-configuration.api_key["api-key"] = settings.BREVO_API_KEY
+def generate_reference(prefix: str = "REF") -> str:
+    """Generate a unique reference string."""
+    date_part = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    unique_part = str(uuid.uuid4())[:6].upper()
+    return f"{prefix}-{date_part}-{unique_part}"
 
-api_instance = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
 
-### Generate unique code with timestam
-def generate_unique_code(prefix: str = "") -> str:
-    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-    return f"{prefix}{timestamp}" if prefix else timestamp
-
-### Format currency amount
 def format_currency(amount: float, currency: str = "NGN") -> str:
-    return f"{currency} {amount:,.2f}"
+    """Format an amount as currency string."""
+    symbols = {"NGN": "₦", "USD": "$", "EUR": "€", "GBP": "£"}
+    symbol = symbols.get(currency, "")
+    return f"{symbol}{amount:,.2f}"
 
-async def send_mail_via_brevo(_link: str, recipient: str, subject: str):
-    try:
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <body style="margin:0; padding:0; background-color:#f4f4f4; font-family: Arial, sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
-            <tr>
-            <td align="center">
 
-                <table width="600" style="background:#ffffff; border-radius:8px; overflow:hidden;">
+def parse_phone_number(phone: str) -> Optional[str]:
+    """Parse and validate a Nigerian phone number."""
+    cleaned = re.sub(r"[^\d+]", "", phone)
+    if cleaned.startswith("+234") and len(cleaned) == 14:
+        return cleaned
+    if cleaned.startswith("0") and len(cleaned) == 11:
+        return f"+234{cleaned[1:]}"
+    if cleaned.startswith("234") and len(cleaned) == 13:
+        return f"+{cleaned}"
+    return None
 
-                <tr>
-                    <td align="center" style="padding:20px; background:#;">
-                    <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png"
-                        alt="Logo"
-                        width="150"
-                        style="display:block; max-width:150px; height:auto;"/>
-                    </td>
-                </tr>
 
-                <tr>
-                    <td style="padding:30px; color:#333;">
-                    <h2>{subject}</h2>
+def validate_email(email: str) -> bool:
+    """Validate an email address format."""
+    pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    return bool(re.match(pattern, email))
 
-                    <p>Please click below:</p>
 
-                    <p style="text-align:center;">
-                        <a href="{_link}" 
-                        style="background:#0d6efd; color:#fff; padding:12px 20px; text-decoration:none; border-radius:5px;">
-                        Verify Email
-                        </a>
-                </tr>
+def sanitize_filename(filename: str) -> str:
+    """Sanitize a filename for safe storage."""
+    # Remove path separators
+    filename = filename.replace("/", "_").replace("\\", "_")
+    # Remove null bytes
+    filename = filename.replace("\x00", "")
+    # Keep only safe characters
+    filename = re.sub(r"[^\w\.\-]", "_", filename)
+    # Limit length
+    if len(filename) > 200:
+        name, ext = filename.rsplit(".", 1) if "." in filename else (filename, "")
+        filename = f"{name[:190]}.{ext}"
+    return filename
 
-                <tr>
-                    <td style="text-align:center; padding:20px; font-size:12px; color:#888;">
-                    © 2026 BurnCost. All rights reserved.
-                    </td>
-                </tr>
 
-                </table>
+def paginate_results(
+    items: list,
+    page: int = 1,
+    page_size: int = 20
+) -> Dict[str, Any]:
+    """Paginate a list of items."""
+    total = len(items)
+    total_pages = (total + page_size - 1) // page_size
+    start = (page - 1) * page_size
+    end = start + page_size
 
-            </td>
-            </tr>
-        </table>
-        </body>
-        </html>
-        """
+    return {
+        "items": items[start:end],
+        "total": total,
+        "page": page,
+        "pageSize": page_size,
+        "totalPages": total_pages,
+        "hasNext": page < total_pages,
+        "hasPrev": page > 1,
+    }
 
-        response = sib_api_v3_sdk.SendSmtpEmail(
-            sender={"name": "Burncost", "email": settings.EMAILS_FROM_EMAIL},
-            to=[{"email": recipient}],
-            subject=subject,
-            html_content=html_content,
-        )        
-        try:
-            res = api_instance.send_transac_email(response)
-            logger.info(f"Email sent successfully to {recipient} with Brevo API.")
-            return True
-        except ApiException as e:
-            print(f"Error Sending email: {e}")
-            raise
-        
-    except Exception as e:
-        logger.error(f"Failed to send email to {recipient} with Brevo API: {str(e)}")
-        return False
 
-async def send_mail_via_spacemail(_link: str, recipient: str, subject: str):
-    try:
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <body style="margin:0; padding:0; background-color:#f4f4f4; font-family: Arial, sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
-            <tr>
-            <td align="center">
+def calculate_vat(amount: float, vat_rate: float = 0.075) -> float:
+    """Calculate VAT for a given amount (Nigeria: 7.5%)."""
+    return round(amount * vat_rate, 2)
 
-                <table width="600" style="background:#ffffff; border-radius:8px; overflow:hidden;">
 
-                <tr>
-                    <td align="center" style="padding:20px; background:#;">
-                    <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png"
-                        alt="Logo"
-                        width="150"
-                        style="display:block; max-width:150px; height:auto;"/>
-                    </td>
-                </tr>
+def calculate_contingency(amount: float, rate: float = 0.05) -> float:
+    """Calculate contingency allowance."""
+    return round(amount * rate, 2)
 
-                <tr>
-                    <td style="padding:30px; color:#333;">
-                    <h2>{subject}</h2>
 
-                    <p>Please click below:</p>
-
-                    <p style="text-align:center;">
-                        <a href="{ _link}" 
-                        style="background:#0d6efd; color:#fff; padding:12px 20px; text-decoration:none; border-radius:5px;">
-                        Verify Email
-                        </a>
-                </tr>
-
-                <tr>
-                    <td style="text-align:center; padding:20px; font-size:12px; color:#888;">
-                    © 2026 BurnCost. All rights reserved.
-                    </td>
-                </tr>
-
-                </table>
-
-            </td>
-            </tr>
-        </table>
-        </body>
-        </html>
-        """
-
-        message = MIMEText(html_content, 'html')
-        message["Subject"] = subject
-        message["From"] = formataddr(("Burncost", settings.EMAILS_FROM_EMAIL))
-        message["To"] = recipient
-
-        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
-            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            server.send_message(message)
-        logger.info(f"Email sent successfully to {recipient} via SPacemail")
-
-        return True
-
-    except smtplib.SMTPAuthenticationError as e:
-        logger.error(f"SMTP auth failed for {recipient}: {str(e)}")
-        return False
-
-    except smtplib.SMTPException as e:
-        logger.error(f"SMTP error sending email to {recipient}: {str(e)}")
-        return False
-
-    except Exception as e:
-        logger.exception(f"Unexpected error sending email to {recipient}")
-        return False
+def safe_divide(numerator: float, denominator: float, default: float = 0.0) -> float:
+    """Safe division that returns default instead of ZeroDivisionError."""
+    if denominator == 0:
+        return default
+    return numerator / denominator

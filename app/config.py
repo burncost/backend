@@ -15,12 +15,13 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
+
+    PORT: int
     
     # CORS
     ALLOWED_ORIGINS: List[str] = [
         "http://localhost:5173",
         "http://localhost:8000",
-
         "https://burncost.com",
         "https://www.burncost.com",
         "https://demo.burncost.com",
@@ -100,6 +101,7 @@ class Settings(BaseSettings):
     PAYSTACK_PUBLIC_KEY: Optional[str] = None
     FLUTTERWAVE_SECRET_KEY: Optional[str] = None
     FLUTTERWAVE_PUBLIC_KEY: Optional[str] = None
+    MOCK_PAYMENT_GATEWAY: Optional[bool] = None
     
     # Email Configuration
     SMTP_HOST: Optional[str] = None
@@ -145,7 +147,6 @@ class Settings(BaseSettings):
     ENABLE_EMAIL_NOTIFICATIONS: bool = True
     ENABLE_AI_BOQ_GENERATION: bool = True
     
-    MOCK_PAYMENT_GATEWAY: bool = False
     BYPASS_EMAIL_VERIFICATION: bool = False
     TESTING: bool = False
 
@@ -159,11 +160,13 @@ class Settings(BaseSettings):
     
     LOG_LEVEL: str = "INFO"
     # FRONTEND_URL: str = "http://localhost:5173"
-    FRONTEND_URL: str = "https://burncost.com"
+    FRONTEND_URL: str = "https://demo.burncost.com"
 
     RESEND_API_KEY: Optional[str]
 
     BREVO_API_KEY: Optional[str]
+
+    UPLOAD_DIR: Optional[str]
     
     class Config:
         env_file = ".env"

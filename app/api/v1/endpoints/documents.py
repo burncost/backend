@@ -110,7 +110,7 @@ async def upload_document(
 
 ### Upload a CAD or PDF document
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
-async def upload_document(
+async def upload_cad_document(
     file: UploadFile = File(...),
     project_id: str = None,
     document_category: str = "other",

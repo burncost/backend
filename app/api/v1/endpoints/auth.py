@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, Request
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, Request, Body, Query
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
+from datetime import datetime, timedelta
 import logging
 
 from app.api.deps import get_current_user
@@ -12,6 +13,7 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    get_password_hash,
 )
 from app.schemas.user import (
     PasswordUpdateRequest,
@@ -23,18 +25,13 @@ from app.schemas.user import (
 )
 from app.crud import user as user_crud, vendor as vendor_crud
 from app.services.auth_service import AuthService
-from app.core.security import get_password_hash
-from app.config import settings
+from app.services.notification_service import NotificationService
 
 import redis.asyncio as airedis
 
 if settings.DEBUG:
-    redis_client = airedis.Redis(
-        host=settings.REDIS_HOST,
-        port=settings.REDIS_PORT,
-        db=settings.REDIS_DB,
-        decode_responses=True
-    )
+    redis_client = airedis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=settings.REDIS_DB, decode_responses=True)
+    # redis_client=airedis.from_url(settings.REDIS_URL, ssl_cert_reqs=None, decode_responses=True)
 else:
     redis_client=airedis.from_url(settings.REDIS_URL, ssl_cert_reqs=None, decode_responses=True)
 
@@ -67,18 +64,28 @@ async def register(
         # Create user
         user = await user_crud.create(db, obj_in=user_in)
         
-        if (user.role == "vendor"):
-            rediread_dashboard = "/supplier-dashboard"
-        else:
-            rediread_dashboard = "/dashboard"
-
-        # Send verification email in background
-        auth_service = AuthService()
+        # Send welcome and verification emails in background
+        notification_service = NotificationService()
+        full_name = user.profile.first_name if user and user.profile else user_in.email.split('@')[0]
+        
+        # Send welcome email
         background_tasks.add_task(
-            auth_service.send_verification_email,
+            notification_service.send_welcome_email,
             email=user.email,
-            # redirect_dashboard=rediread_dashboard
-            # user_id=str(user.id)
+            full_name=full_name,
+            role=user.role or "customer"
+        )
+        
+        # Send verification email
+        verification_token = create_access_token(
+            data={"sub": str(user.id), "type": "email_verification"},
+            expires_delta=timedelta(hours=48)
+        )
+        background_tasks.add_task(
+            notification_service.send_verification_email,
+            email=user.email,
+            verification_token=verification_token,
+            full_name=full_name
         )
         
         logger.info(f"New user registered: {user.email}")
@@ -123,7 +130,6 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
-            headers="Token expired" if settings.DEBUG else "Could not validate credentials",
         )
     
     # Verify password
@@ -131,7 +137,6 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
-            headers="Token expired" if settings.DEBUG else "Could not validate credentials",
         )
     
     # Check if user is active
@@ -149,10 +154,17 @@ async def login(
     
     # Only allow verified accounts to login
     if user.status == "pending_verification":
-        auth_service = AuthService()
+        notification_service = NotificationService()
+        full_name = user.profile.first_name if user and user.profile else user.email.split('@')[0]
+        verification_token = create_access_token(
+            data={"sub": str(user.id), "type": "email_verification"},
+            expires_delta=timedelta(hours=48)
+        )
         background_tasks.add_task(
-            auth_service.send_verification_email,
-            email=user.email
+            notification_service.send_verification_email,
+            email=user.email,
+            verification_token=verification_token,
+            full_name=full_name
         )
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -181,11 +193,11 @@ async def login(
     )
 
     response_body = TokenResponse(
-        access_token="",
-        refresh_token="",
-        expires_in=0,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         role=role,
-        vendorverification=vendor_verified,
+        vendor_verification=vendor_verified,
         name=user.profile.first_name if user.profile else "",
         business_name=user.profile.business_name if user.profile else ""
     )
@@ -428,6 +440,7 @@ async def verify_email(
 @router.post("/resend-verification")
 async def resend_verification(
     email: str,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
     user = await user_crud.get_by_email(db, email=email)
@@ -442,27 +455,32 @@ async def resend_verification(
             detail="Email already verified"
         )
     
-    if (user.role == "vendor"):
-        rediread_dashboard = "/supplier-dashboard"
-    else:
-        rediread_dashboard = "/dashboard"
-
-    # background_tasks.add_task(
-    #    verify_n_log, "9436936"        
-    # )
+    # Send verification email
+    notification_service = NotificationService()
+    full_name = user.profile.first_name if user and user.profile else email.split('@')[0]
+    verification_token = create_access_token(
+        data={"sub": str(user.id), "type": "email_verification"},
+        expires_delta=timedelta(hours=48)
+    )
+    background_tasks.add_task(
+        notification_service.send_verification_email,
+        email=user.email,
+        verification_token=verification_token,
+        full_name=full_name
+    )
     
     return {"message": "Verification email sent"}
 
 ##logout
 @router.post("/logout")
-async def logut(request: Request, response: Response):
+async def logout(request: Request, response: Response):
     refresh_token = request.cookies.get("refresh_token")
 
     if refresh_token:
         try:
             payload = decode_token(refresh_token)
             user_id = payload["sub"]
-            redis_client.delete(f"refresh:{user_id}")
+            await redis_client.delete(f"refresh:{user_id}")
         except:
             pass
         response.delete_cookie("access_token")
@@ -470,34 +488,112 @@ async def logut(request: Request, response: Response):
 
         return {"message": "Logged out."}
     
+    return {"message": "No active session found."}
+
+### Forgot password - send reset link
+@router.post("/forgot-password")
+async def forgot_password(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    email: str = Query(...),
+):
+    user = await user_crud.get_by_email(db, email=email)
+
+    # Don't reveal if email exists or not (security)
+    if not user:
+        return {"message": "If the email exists, a password reset link has been sent"}
+
+    # Generate password reset token
+    reset_token = create_access_token(
+        data={"sub": str(user.id), "type": "password_reset"},
+        expires_delta=timedelta(minutes=30)  # 30 minutes
+    )
+
+    # Send password reset email
+    full_name = user.profile.first_name if user and user.profile else user.email.split('@')[0]
+    background_tasks.add_task(
+        NotificationService().send_password_reset_email,
+        email=user.email,
+        reset_token=reset_token,
+        full_name=full_name
+    )
+
+    logger.info(f"Password reset requested for: {user.email}")
+
+    return {"message": "If the email exists, a password reset link has been sent"}
+
+
+### Reset password with token
+@router.post("/reset-password")
+async def reset_password(
+    token: str,
+    new_password: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        payload = decode_token(token)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token"
+        )
+
+    if payload.get("type") != "password_reset":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid token type"
+        )
+
+    user_id = payload.get("sub")
+    user = await user_crud.get(db, id=user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    # Update password via CRUD
+    await user_crud.update_password(db, user_id=user_id, new_password=new_password)
+
+    # Send password changed confirmation email
+    full_name = user.profile.first_name if user and user.profile else user.email.split('@')[0]
+    background_tasks.add_task(
+        NotificationService().send_email,
+        to=user.email,
+        subject="Your Burncost password was changed",
+        html_content=f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+<div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
+<div style="text-align:center;margin-bottom:20px;">
+    <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
+</div>
+<h2 style="color:#FF6B00;">Password Changed Successfully</h2>
+<p>Hi {full_name},</p>
+<p>Your Burncost account password was just changed.</p>
+<p>If you made this change, you can ignore this email. If you did not, please contact our support team immediately.</p>
+<p style="color:#888;font-size:12px;">© 2026 Burncost. All rights reserved.</p>
+</div></body></html>"""
+    )
+
+    logger.info(f"Password reset completed for user {user_id}")
+    return {"message": "Password has been reset successfully"}
+
 
 @router.post("/change-password")
 async def update_password(
     payload: PasswordUpdateRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    user = await user_crud.get(db, id=current_user["id"])
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
-
     # verify current password
-    if not verify_password(payload.currentPassword, user.password_hash):
+    if not verify_password(payload.currentPassword, current_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect current password",
         )
 
-    # hash new password
-    new_hash = get_password_hash(payload.newPassword)
-
-    # update DB
-    user.password_hash = new_hash
-    db.add(user)
-    await db.commit()
+    # update password via CRUD
+    await user_crud.update_password(db, user_id=current_user.id, new_password=payload.newPassword)
 
     return {"message": "Password updated successfully"}

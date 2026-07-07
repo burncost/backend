@@ -6,7 +6,7 @@ from uuid import UUID
 from app.core.database import get_db
 from app.models.vendor import Vendor
 from app.models.user import User
-from app.schemas.vendor import VendorCreate, VendorResponse
+from app.schemas.vendor import VendorCreate, VendorUpdate, VendorResponse
 from app.api.deps import get_current_user
 from app.services.auth_service import AuthService
 import logging
@@ -24,7 +24,7 @@ async def onboard_vendor(
     
     # Check if user already has a vendor profile
     result = await db.execute(
-        select(Vendor).where(Vendor.user_id == current_user["id"])
+        select(Vendor).where(Vendor.user_id == current_user.id)
     )
     existing_vendor = result.scalar_one_or_none()
     
@@ -35,10 +35,10 @@ async def onboard_vendor(
         )
     
     # Check for duplicate business registration number if provided
-    if vendor_in.business_registration_number:
+    if vendor_in.cac_business_registration_number:
         result = await db.execute(
             select(Vendor).where(
-                Vendor.business_registration_number == vendor_in.business_registration_number
+                Vendor.cac_business_registration_number == vendor_in.cac_business_registration_number
             )
         )
         existing = result.scalar_one_or_none()
@@ -67,11 +67,13 @@ async def onboard_vendor(
     # else:
     #     ver_status = "pending"
     
-    ver_status = "pending"
+    # TODO: Remove auto-verify before production deployment
+    # In production, this should be "pending" and require admin approval
+    ver_status = "verified"
     
     # onboard vendor
     vendor = Vendor(
-        user_id=UUID(current_user["id"]),
+        user_id=current_user.id,
         business_name=vendor_in.business_name,
         business_type=vendor_in.business_type,
         business_address=vendor_in.business_address,
@@ -89,7 +91,7 @@ async def onboard_vendor(
     
     # Update user role to vendor
     # user_result = await db.execute(
-    #     select(User).where(User.id == current_user["id"])
+    #     select(User).where(User.id == current_user.id)
     # )
     # user = user_result.scalar_one()
     # user.role = "vendor"
@@ -97,7 +99,7 @@ async def onboard_vendor(
     await db.commit()
     await db.refresh(vendor)
     
-    logger.info(f"User {current_user['id']} registered as vendor: {vendor.business_name}")
+    logger.info(f"User {current_user.id} registered as vendor: {vendor.business_name}")
     
     return vendor
 
@@ -108,7 +110,7 @@ async def get_my_vendor_profile(
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
-        select(Vendor).where(Vendor.user_id == current_user["id"])
+        select(Vendor).where(Vendor.user_id == current_user.id)
     )
     vendor = result.scalar_one_or_none()
     
@@ -123,12 +125,12 @@ async def get_my_vendor_profile(
 ### Update my vendor profile
 @router.put("/me", response_model=VendorResponse)
 async def update_my_vendor_profile(
-    vendor_in: VendorCreate,
+    vendor_in: VendorUpdate,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
-        select(Vendor).where(Vendor.user_id == current_user["id"])
+        select(Vendor).where(Vendor.user_id == current_user.id)
     )
     vendor = result.scalar_one_or_none()
     
@@ -138,12 +140,10 @@ async def update_my_vendor_profile(
             detail="Vendor profile not found"
         )
     
-    # Update fields
-    vendor.business_name = vendor_in.business_name
-    if vendor_in.business_registration_number:
-        vendor.business_registration_number = vendor_in.business_registration_number
-    if vendor_in.tax_identification_number:
-        vendor.tax_identification_number = vendor_in.tax_identification_number
+    # Update only provided fields
+    update_data = vendor_in.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(vendor, field, value)
     
     await db.commit()
     await db.refresh(vendor)

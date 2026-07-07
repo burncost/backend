@@ -24,30 +24,22 @@ class Vendor(Base):
         ForeignKey("users.id", ondelete="CASCADE"), 
         unique=True, 
         nullable=False)
-    business_name = Column(String(255), nullable=True)
-    business_type = Column(String(100), nullable=True)
-    business_address = Column(String(255), nullable=True)
-    city = Column(String(100), nullable=True)
-    state = Column(String(50), nullable=True)
-
-    cac_business_registration_number = Column(String(20), default=0, nullable=True)
-    tax_identification_number = Column(String(20), default=0, nullable=True)
+    business_name = Column(String(255), nullable=False)
+    business_type = Column(String(255), nullable=False)
+    city = Column(String(255), nullable=False)
+    state = Column(String(255), nullable=False)
+    business_address = Column(String(255), nullable=False)
+    cac_business_registration_number = Column(String(100), unique=True, nullable=True)
+    tax_identification_number = Column(String(50), nullable=True)
     verification_status = Column(
         SQLEnum(VendorVerificationStatus, native_enum=False, length=20),
         default=VendorVerificationStatus.PENDING
     )
-
-    # documents
-    cac_certificate = Column(String(255), nullable=True)
-    tax_clearance = Column(String(255), nullable=True)
-    business_license = Column(String(255), nullable=True)
-    utility_bill = Column(String(255), nullable=True)
-
-    bank_account_name = Column(String(255), nullable=False)
-    bank_account_number = Column(String(50), default=0, nullable=False)
-    bank_name = Column(String(100), nullable=False)
     verification_date = Column(DateTime, nullable=True)
     verified_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    bank_name = Column(String(255), nullable=False)
+    bank_account_number = Column(String(255), nullable=False)
+    bank_account_name = Column(String(255), nullable=False)
     commission_rate = Column(Numeric(5, 2), default=10.00)
     rating = Column(Numeric(3, 2), default=0.00)
     total_reviews = Column(Integer, default=0)
@@ -64,7 +56,7 @@ class Vendor(Base):
     verifier = relationship(
         "User",
         foreign_keys=[verified_by],
-        backref="vendors_verified"
+        back_populates="vendors_verified"
     )
     products = relationship("Product", back_populates="vendor", cascade="all, delete-orphan")
 

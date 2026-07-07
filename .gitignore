@@ -61,7 +61,8 @@ Thumbs.db
 storage/
 uploads/
 media/
-alembic/
+# alembic/ is tracked in version control for migration history
+# alembic/
 bruno_api_testing/
 exported_pdfs/
 cads/

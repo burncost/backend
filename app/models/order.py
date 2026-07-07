@@ -64,6 +64,8 @@ class Order(Base):
     )
     customer_notes = Column(Text)
     admin_notes = Column(Text)
+    driver_name = Column(String(255))
+    driver_phone = Column(String(20))
     estimated_delivery_date = Column(DateTime)
     delivered_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
@@ -106,3 +108,4 @@ class OrderItem(Base):
     order = relationship("Order", back_populates="items")
     product = relationship("Product", backref="order_items")
     vendor = relationship("Vendor", backref="order_items")
+    

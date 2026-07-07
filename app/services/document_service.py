@@ -1,232 +1,213 @@
-from motor.motor_asyncio import AsyncIOMotorDatabase
-from fastapi import UploadFile
-from typing import Dict, Any, Optional
-from bson import ObjectId
-from datetime import datetime
+"""Document Service - Real document processing with CAD/PDF parsing and AI analysis."""
+from typing import Dict, Any, Optional, List
 import logging
-import io
+import os
+from datetime import datetime
 
-from app.repositories.document_repository import DocumentRepository
 from app.services.cad_parser import CADParser
 from app.services.pdf_extractor import PDFExtractor
 from app.services.ai_service import AIService
 from app.utils.storage import StorageService
 
-### Document Service - CAD/PDF processing and storage
-
 logger = logging.getLogger(__name__)
 
 
 class DocumentService:
-    def __init__(self, db: AsyncIOMotorDatabase):
-        self.db = db
-        self.document_repo = DocumentRepository(db)
-        self.storage_service = StorageService()
+    """Service for processing uploaded construction documents."""
+
+    def __init__(self):
         self.cad_parser = CADParser()
         self.pdf_extractor = PDFExtractor()
         self.ai_service = AIService()
-    
-    ###  Upload document to cloud storage and create database record
-    async def upload_document(
-        self,
-        file: UploadFile,
-        project_id: str,
-        document_category: str,
-        uploaded_by: str
-    ) -> Dict[str, Any]:
-        # Determine file type
-        file_ext = file.filename.split('.')[-1].lower()
-        file_type_map = {
-            'dwg': 'dwg',
-            'dxf': 'dxf',
-            'rvt': 'rvt',
-            'ifc': 'ifc',
-            'pdf': 'pdf'
-        }
-        file_type = file_type_map.get(file_ext, 'other')
-        
-        # Upload to cloud storage
-        content = await file.read()
-        file_size = len(content)
-        
-        storage_path = f"documents/{project_id}/{file.filename}"
-        file_url = await self.storage_service.upload_bytes(
-            content=content,
-            path=storage_path,
-            content_type=file.content_type
-        )
-        
-        # Generate document number
-        doc_number = await self._generate_document_number(file_type)
-        
-        # Create document record
-        document_data = {
-            "projectId": ObjectId(project_id),
-            "documentNumber": doc_number,
-            "fileName": file.filename,
-            "originalFileName": file.filename,
-            "fileType": file_type,
-            "documentCategory": document_category,
-            "version": 1,
-            "fileSize": file_size,
-            "mimeType": file.content_type,
-            "storageLocation": {
-                "url": file_url,
-                "path": storage_path
-            },
-            "status": "uploaded",
-            "uploadedBy": ObjectId(uploaded_by),
-            "uploadedAt": datetime.utcnow()
-        }
-        
-        document = await self.document_repo.create(document_data)
-        
-        logger.info(f"Document uploaded: {document['_id']} - {file.filename}")
-        
-        return document
-    
-    ### Process document: extract metadata and run AI analysis
-    ### This is a background task
-    async def process_document(self, document_id: str):
-        try:
-            # Get document
-            document = await self.document_repo.get_by_id(document_id)
-            if not document:
-                logger.error(f"Document not found: {document_id}")
-                return
-            
-            # Update status to processing
-            await self.document_repo.update(
-                document_id,
-                {"status": "processing"}
-            )
-            
-            # Download file from storage
-            file_content = await self.storage_service.download_file(
-                document["storageLocation"]["url"]
-            )
-            
-            # Extract metadata based on file type
-            extracted_metadata = {}
-            
-            if document["fileType"] in ['dwg', 'dxf', 'rvt', 'ifc']:
-                # Parse CAD file
-                extracted_metadata = await self.cad_parser.parse(
-                    file_content,
-                    document["fileType"]
-                )
-            elif document["fileType"] == 'pdf':
-                # Extract from PDF
-                extracted_metadata = await self.pdf_extractor.extract(
-                    file_content
-                )
-            
-            # Run AI analysis
-            ai_analysis = await self.ai_service.analyze_document(
-                file_content=file_content,
-                file_type=document["fileType"],
-                extracted_metadata=extracted_metadata
-            )
-            
-            # Generate thumbnail
-            thumbnail_url = await self._generate_thumbnail(
-                file_content,
-                document["fileType"],
-                document_id
-            )
-            
-            # Update document with results
-            update_data = {
-                "extractedMetadata": extracted_metadata,
-                "aiAnalysis": ai_analysis,
-                "thumbnailUrl": thumbnail_url,
-                "status": "processed",
-                "processedAt": datetime.utcnow()
-            }
-            
-            await self.document_repo.update(document_id, update_data)
-            
-            logger.info(f"Document processed successfully: {document_id}")
-            
-        except Exception as e:
-            logger.error(f"Error processing document {document_id}: {str(e)}")
-            
-            # Update status to failed
-            await self.document_repo.update(
-                document_id,
-                {
-                    "status": "failed",
-                    "aiAnalysis": {
-                        "processed": False,
-                        "processingErrors": [str(e)]
-                    }
-                }
-            )
-    
-    ### Delete document from storage and database
-    async def delete_document(self, document_id: str) -> bool:
-        document = await self.document_repo.get_by_id(document_id)
-        if not document:
-            return False
-        
-        # Delete from cloud storage
-        if "storageLocation" in document and "url" in document["storageLocation"]:
-            await self.storage_service.delete_file(
-                document["storageLocation"]["url"]
-            )
-        
-        # Delete from database
-        deleted = await self.document_repo.delete(document_id)
-        
-        logger.info(f"Document deleted: {document_id}")
-        
-        return deleted
-    
-    ### Generate unique document number
-    async def _generate_document_number(self, file_type: str) -> str:
-        prefix_map = {
-            'dwg': 'DWG',
-            'dxf': 'DXF',
-            'rvt': 'RVT',
-            'ifc': 'IFC',
-            'pdf': 'PDF',
-            'other': 'DOC'
-        }
-        prefix = prefix_map.get(file_type, 'DOC')
-        
-        # Get count of documents of this type
-        count = await self.document_repo.count_by_type(file_type)
-        
-        return f"{prefix}-{count + 1:05d}"
-    
-    ###  Generate thumbnail for document
-    async def _generate_thumbnail(
+        self.storage = StorageService()
+
+    async def process_document(
         self,
         file_content: bytes,
+        file_name: str,
         file_type: str,
-        document_id: str
-    ) -> Optional[str]:
-        try:
-            if file_type == 'pdf':
-                # Convert first page to image
-                thumbnail_bytes = await self.pdf_extractor.generate_thumbnail(
-                    file_content
+        project_id: str,
+        uploaded_by: str
+    ) -> Dict[str, Any]:
+        """Process an uploaded document: parse, analyze with AI, store results."""
+        logger.info(f"Processing document: {file_name} (type: {file_type})")
+
+        # Upload to cloud storage
+        storage_path = f"projects/{project_id}/documents/{file_name}"
+        file_url = await self.storage.upload_file(
+            file=file_content,
+            folder=f"projects/{project_id}",
+            filename=file_name
+        )
+
+        # Parse based on file type
+        extracted_metadata = {}
+        if file_type in [".dwg", ".dxf", ".rvt", ".ifc"]:
+            extracted_metadata = await self.cad_parser.parse(file_content, file_type)
+        elif file_type == ".pdf":
+            extracted_metadata = await self.pdf_extractor.extract(file_content)
+        elif file_type in [".xlsx", ".xls"]:
+            extracted_metadata = await self._parse_excel(file_content, file_name)
+
+        # AI analysis
+        ai_analysis = await self.ai_service.analyze_document(
+            file_content=file_content,
+            file_type=file_type,
+            extracted_metadata=extracted_metadata
+        )
+
+        # Generate thumbnail for PDFs
+        thumbnail_url = None
+        if file_type == ".pdf":
+            thumbnail_bytes = await self.pdf_extractor.generate_thumbnail(file_content)
+            if thumbnail_bytes:
+                thumbnail_url = await self.storage.upload_bytes(
+                    content=thumbnail_bytes,
+                    path=f"thumbnails/{project_id}/{file_name.replace('.pdf', '.png')}",
+                    content_type="image/png"
                 )
-                
-                if thumbnail_bytes:
-                    # Upload thumbnail
-                    thumbnail_path = f"thumbnails/{document_id}.jpg"
-                    thumbnail_url = await self.storage_service.upload_bytes(
-                        content=thumbnail_bytes,
-                        path=thumbnail_path,
-                        content_type="image/jpeg"
-                    )
-                    return thumbnail_url
-            
-            # CAD thumbnails would require specialized libraries
-            # For now, return None for CAD files
-            return None
-            
+
+        return {
+            "fileName": file_name,
+            "fileType": file_type,
+            "fileSize": len(file_content),
+            "fileUrl": file_url,
+            "projectId": project_id,
+            "uploadedBy": uploaded_by,
+            "uploadedAt": datetime.utcnow().isoformat(),
+            "extractedMetadata": extracted_metadata,
+            "aiAnalysis": ai_analysis,
+            "thumbnailUrl": thumbnail_url,
+            "status": "processed" if ai_analysis.get("processed") else "partial",
+        }
+
+    async def _parse_excel(self, content: bytes, file_name: str) -> Dict[str, Any]:
+        """Parse Excel BOQ files."""
+        try:
+            import openpyxl
+            from io import BytesIO
+
+            wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
+            sheets_info = []
+
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                rows = []
+                for row in ws.iter_rows(values_only=True, max_row=50):
+                    rows.append([str(c) if c is not None else "" for c in row])
+
+                sheets_info.append({
+                    "name": sheet_name,
+                    "rowCount": ws.max_row,
+                    "colCount": ws.max_column,
+                    "preview": rows[:10] if rows else [],
+                })
+
+            return {
+                "sheets": sheets_info,
+                "sheetCount": len(sheets_info),
+                "detectedType": "bill_of_quantities" if any(
+                    any(kw in str(s["name"]).lower() for kw in ["boq", "bill", "quantity", "pricing"])
+                    for s in sheets_info
+                ) else "unknown",
+            }
+
+        except ImportError:
+            logger.warning("openpyxl not installed, returning basic metadata")
+            return {
+                "sheets": [{"name": "Sheet1", "rowCount": 0, "colCount": 0, "preview": []}],
+                "sheetCount": 1,
+                "detectedType": "unknown",
+            }
         except Exception as e:
-            logger.error(f"Error generating thumbnail: {str(e)}")
-            return None
+            logger.error(f"Excel parsing failed: {str(e)}")
+            return {"error": str(e), "detectedType": "unknown"}
+
+    async def extract_boq_from_document(
+        self,
+        document_id: str,
+        extracted_metadata: Dict[str, Any],
+        ai_analysis: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Extract BOQ data from processed document analysis."""
+        logger.info(f"Extracting BOQ from document: {document_id}")
+
+        # Try to get BOQ data from AI analysis
+        if ai_analysis.get("processed") and ai_analysis.get("detectedElements"):
+            return self._build_boq_from_analysis(ai_analysis)
+
+        # Try to get from extracted metadata (Excel tables)
+        if extracted_metadata.get("detectedType") == "bill_of_quantities":
+            return self._build_boq_from_excel(extracted_metadata)
+
+        return None
+
+    def _build_boq_from_analysis(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Build BOQ structure from AI analysis results."""
+        elements = []
+        total = 0
+
+        for elem in analysis.get("detectedElements", []):
+            rate = self._get_material_rate(elem.get("elementType", ""))
+            amount = elem.get("totalQuantity", 0) * rate
+            elements.append({
+                "elementName": elem.get("elementType", "Unknown"),
+                "quantity": elem.get("totalQuantity", 0),
+                "unit": elem.get("unit", "nr"),
+                "rate": rate,
+                "amount": amount,
+            })
+            total += amount
+
+        return {
+            "elements": elements,
+            "totalContractSum": total,
+            "source": "ai_analysis",
+        }
+
+    def _build_boq_from_excel(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Build BOQ structure from Excel data."""
+        elements = []
+        total = 0
+
+        for sheet in metadata.get("sheets", []):
+            for row in sheet.get("preview", [])[1:]:  # Skip header
+                if len(row) >= 4:
+                    try:
+                        qty = float(row[2]) if row[2] else 0
+                        rate = float(row[3]) if row[3] else 0
+                        amount = qty * rate
+                        elements.append({
+                            "elementName": str(row[0]) if row[0] else "Item",
+                            "description": str(row[1]) if len(row) > 1 and row[1] else "",
+                            "quantity": qty,
+                            "unit": str(row[1]) if len(row) > 1 and row[1] else "nr",
+                            "rate": rate,
+                            "amount": amount,
+                        })
+                        total += amount
+                    except (ValueError, IndexError):
+                        continue
+
+        return {
+            "elements": elements,
+            "totalContractSum": total,
+            "source": "excel_extraction",
+        }
+
+    def _get_material_rate(self, element_type: str) -> float:
+        """Get estimated rate for a building element type."""
+        rates = {
+            "external_wall": 8500,
+            "internal_wall": 7200,
+            "slab": 15000,
+            "foundation": 45000,
+            "column": 85000,
+            "beam": 52000,
+            "roof": 18000,
+            "floor_finish": 7500,
+            "wall_finish": 3500,
+            "door": 45000,
+            "window": 35000,
+        }
+        return rates.get(element_type, 10000)

@@ -20,11 +20,11 @@ async def get_current_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
-    return {"id": str(user.id), "email": user.email, "role": user.role}
+    return user
 
 ### Get current active user
 async def get_current_active_user(
-    current_user: dict = Depends(get_current_user)
+    current_user = Depends(get_current_user)
 ):
     # Add additional checks if needed
     return current_user
@@ -32,10 +32,10 @@ async def get_current_active_user(
 ### Get current vendor (must be a vendor user)
 async def get_current_vendor(
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user = Depends(get_current_user)
 ):
     # Check if user role is vendor
-    if current_user["role"] not in ["vendor", "admin", "super_admin"]:
+    if current_user.role not in ["vendor", "admin", "super_admin"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is not a vendor. Please register as a vendor first."
@@ -43,7 +43,7 @@ async def get_current_vendor(
     
     # Get vendor profile
     result = await db.execute(
-        select(Vendor).where(Vendor.user_id == current_user["id"])
+        select(Vendor).where(Vendor.user_id == current_user.id)
     )
     vendor = result.scalar_one_or_none()
     
@@ -53,14 +53,14 @@ async def get_current_vendor(
             detail="Vendor profile not found. Please complete vendor registration."
         )
     
-    return {"id": str(vendor.id), "user_id": current_user["id"], "business_name": vendor.business_name}
+    return {"id": str(vendor.id), "user_id": str(current_user.id), "business_name": vendor.business_name}
 
 
 ### Get current admin user
 async def get_current_admin(
-    current_user: dict = Depends(get_current_user)
+    current_user = Depends(get_current_user)
 ):
-    if current_user["role"] not in ["admin", "super_admin"]:
+    if current_user.role not in ["admin", "super_admin"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is not an admin"

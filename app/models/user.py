@@ -30,18 +30,29 @@ class User(Base):
     phone_number = Column(String(20), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
 
-    # native_enum=False stores as VARCHAR, avoids PostgreSQL ENUM type issues
     role = Column(
-        SQLEnum(UserRole, native_enum=False, length=20),
+        SQLEnum(
+            UserRole,
+            name="user_role",
+            values_callable=lambda enum: [e.value for e in enum],
+            native_enum=True,
+            create_type=True,
+        ),
         nullable=False,
-        default=UserRole.CUSTOMER
-    )
-    status = Column(
-        SQLEnum(UserStatus, native_enum=False, length=30),
-        nullable=False,
-        default=UserStatus.PENDING_VERIFICATION
+        default=UserRole.CUSTOMER,
     )
 
+    status = Column(
+        SQLEnum(
+            UserStatus,
+            name="user_status",
+            values_callable=lambda enum: [e.value for e in enum],
+            native_enum=True,
+            create_type=True,
+        ),
+        nullable=False,
+        default=UserStatus.PENDING_VERIFICATION,
+    )
     email_verified = Column(Boolean, default=False)
     phone_verified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -71,6 +82,22 @@ class User(Base):
         "Order",
         back_populates="user",
         cascade="all, delete-orphan"
+    )
+    addresses = relationship(
+        "CustomerAddress",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+    reviews = relationship(
+        "Review",
+        back_populates="user",
+        foreign_keys="Review.user_id",
+        cascade="all, delete-orphan"
+    )
+    vendors_verified = relationship(
+        "Vendor",
+        back_populates="verifier",
+        foreign_keys="Vendor.verified_by"
     )
 
     def __repr__(self):

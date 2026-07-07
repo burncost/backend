@@ -45,7 +45,7 @@ CREATE TABLE vendors (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     business_name VARCHAR(255) NOT NULL,
-    business_registration_number VARCHAR(100) UNIQUE,
+    cac_business_registration_number VARCHAR(100) UNIQUE,
     tax_identification_number VARCHAR(50),
     verification_status vendor_verification_status DEFAULT 'pending',
     verification_date TIMESTAMP WITH TIME ZONE,
@@ -308,6 +308,10 @@ CREATE TABLE orders (
     -- Notes
     customer_notes TEXT,
     admin_notes TEXT,
+    
+    -- Driver info
+    driver_name VARCHAR(255),
+    driver_phone VARCHAR(20),
     
     -- Tracking
     estimated_delivery_date DATE,

@@ -1,5 +1,6 @@
-from sqlalchemy import Column, String, Boolean, Integer, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, Boolean, Integer, DateTime, ForeignKey, Text, Numeric
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 
@@ -17,6 +18,19 @@ class Category(Base):
     image_url = Column(Text)
     is_active = Column(Boolean, default=True, index=True)
     display_order = Column(Integer, default=0)
+    
+    # --- Taxonomy expansion for BOQ hierarchy ---
+    # Top-level grouping: "Structure", "Finishes", "MEP", "External Works", etc.
+    division = Column(String(100), index=True)
+    # Material type: "material", "labour", "equipment", "consumable"
+    material_type = Column(String(50), default="material")
+    # Default unit of measure for this category (e.g., "bag", "tonne", "meter", "piece")
+    default_unit = Column(String(50))
+    # Waste factor percentage for BOQ calculations (e.g., 5.00 = 5%)
+    waste_factor = Column(Numeric(5, 2), default=0.00)
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # Self-referential relationship for hierarchy
+    children = relationship("Category", backref="parent", remote_side=[id])

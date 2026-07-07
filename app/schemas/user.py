@@ -41,9 +41,10 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
     first_name: str = Field(..., min_length=2, max_length=100)
-    other_name: Optional[str] = Field(..., max_length=100)
+    other_name: Optional[str] = Field(None, max_length=100)
     last_name: str = Field(..., min_length=2, max_length=100)
-    business_name: str = Field(...,max_length=100)
+    business_name: Optional[str] = Field(None, max_length=100)
+
     location: str = Field(..., min_length=2, max_length=100)
     role:str = Field(..., max_length=50)
     
@@ -103,8 +104,10 @@ class UserUpdate(BaseModel):
 ### User profile information
 class UserProfileResponse(BaseModel):
     first_name: str
+    other_name: Optional[str] = None
     last_name: str
     business_name: Optional[str] = None
+    location: Optional[str] = None
     avatar_url: Optional[str] = None
     date_of_birth: Optional[date] = None
     
@@ -137,7 +140,7 @@ class TokenResponse(BaseModel):
     token_type: str = ""
     expires_in: int
     role: str
-    vendorverification: Optional[str]
+    vendor_verification: Optional[str]
     name: Optional[str]
     business_name: Optional[str]
 

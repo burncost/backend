@@ -2,7 +2,7 @@
 BOQ Repository
 """
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from bson import ObjectId
 
 from app.repositories.base_repository import BaseRepository
@@ -38,6 +38,20 @@ class BOQRepository(BaseRepository):
         query = {"status": status}
         return await self.find(query)
     
+    ### List BOQs for a user
+    async def list_by_user(
+        self,
+        user_id: str,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        query: Dict[str, Any] = {"createdBy": user_id}
+        if status:
+            query["status"] = status
+        sort = [("createdAt", -1)]
+        return await self.find(query, skip=skip, limit=limit, sort=sort)
+
     ### Add export record to BOQ
     async def add_export(self, boq_id: str, export_data: Dict[str, Any]) -> bool:
         try:

@@ -66,3 +66,14 @@ class OrderListResponse(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+class OrderListUI(BaseModel):
+    id: str
+    customerName: str
+    location: str
+    date: str
+    total: float
+    status: str
+    driverName: str = ""
+    driverPhone: str = ""
+    items: str

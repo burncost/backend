@@ -39,12 +39,22 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
 
     ### Create new user with hashed password and profile
     async def create(self, db: AsyncSession, *, obj_in: UserCreate) -> User:
+        # Convert string role to enum member if needed
+        from app.models.user import UserRole
+        role_value = obj_in.role
+        if isinstance(role_value, str):
+            for member in UserRole:
+                if member.value == role_value:
+                    role_value = member
+                    break
+        
         db_obj = User(
             email=obj_in.email,
             phone_number=obj_in.phone_number,
             password_hash=get_password_hash(obj_in.password),
-            role=obj_in.role,
+            role=role_value,
             status="pending_verification",
+            # status="active",
         )
         db.add(db_obj)
         await db.commit()
@@ -54,10 +64,8 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         profile = UserProfile(
             user_id=db_obj.id,
             first_name=obj_in.first_name,
-            other_name=obj_in.other_name,
             last_name=obj_in.last_name,
             business_name=obj_in.business_name,
-            location  = obj_in.location
         )
         db.add(profile)
         await db.commit()
@@ -100,6 +108,17 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
             user.phone_verified = True
             if user.email_verified:
                 user.status = "active"
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        return user
+
+    ### Update user's password
+    async def update_password(self, db: AsyncSession, *, user_id: Any, new_password: str) -> User:
+        from app.core.security import get_password_hash
+        user = await self.get(db, id=user_id)
+        if user:
+            user.password_hash = get_password_hash(new_password)
             db.add(user)
             await db.commit()
             await db.refresh(user)

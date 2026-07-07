@@ -3,7 +3,7 @@ import aspose.cad as cad
 
 def batch_convert_cad_to_pdf(cad_in_folder, pdf_out_folder):
     if not os.path.exists(pdf_out_folder):
-        os.makedir(pdf_out_folder)
+        os.makedirs(pdf_out_folder, exist_ok=True)
         
     valid_exts = (".dwg", ".dxf")
 
@@ -38,32 +38,3 @@ def batch_convert_cad_to_pdf(cad_in_folder, pdf_out_folder):
                 print(f"...Error converting {filename}: {e}")
 
 batch_convert_cad_to_pdf("cads/", "exported_pdfs/")
-                
-##import ezdxf
-##from ezdxf import recover
-##from ezdxf.addons.drawing import RenderContext, Frontend
-##from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-##import matplotlib.pyplot as plt
-##
-##def convert_cad_to_pdf(cad_file_in, pdf_file_out):
-##    try:
-##        doc, aud = recover.readfile(cad_file_in)
-##
-##        if aud.has_errors:
-##            print(f"Found errors in file: {len(aud.errors)}")
-##
-##        fig = plt.figurre(dpi=300)
-##        ax = fig.add_axes([0,0,1,1])
-##        ctx = RenderContext(doc)
-##        out = MatplotlibBackend(ax)
-##
-##        Frontend(ctx, out).draw_layout(doc.modelspace(), finalize=True)
-##
-##        #save to pdf
-##        fig.savefig(pdf_file_out, format-'pdf', bbox_inches='tight')
-##        plt.close(fig)
-##        print(f"Success! PDF File Created and Saved to {pdf_file_out}")
-##    except Exception as e:
-##        print(f"Error: {e}")
-##
-##convert_cad_to_pdf("test_cad","test_cad.pdf")

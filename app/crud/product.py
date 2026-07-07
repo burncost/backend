@@ -5,6 +5,7 @@ from uuid import UUID
 
 from app.crud.base import CRUDBase
 from app.models.product import Product
+from app.models.category import Category
 from app.schemas.product import ProductCreate, ProductUpdate
 
 
@@ -53,6 +54,22 @@ class CRUDProduct(CRUDBase[Product, ProductCreate, ProductUpdate]):
             .limit(limit)
         )
         return result.scalars().all()
+    
+    ### Get category ID by name
+    async def get_id_by_name(
+        self,
+        db: AsyncSession,
+        *,
+        name: str
+    ) -> Optional[UUID]:
+
+        result = await db.execute(
+            select(Category.id)
+            .where(Category.name == name)
+        )
+
+        return result.scalar_one_or_none()
+        
 
     ### Increment product view count
     async def increment_views(self, db: AsyncSession, *, product_id: UUID) -> None:

@@ -6,7 +6,7 @@ from app.core.database import get_db
 from app.schemas.user import UserResponse, UserUpdate
 from app.crud import user as user_crud
 from app.api.deps import get_current_user
-from app.models.user import UserProfile
+from app.models.user import User, UserProfile
 from app.models.address import CustomerAddress
 from app.schemas.addresses import AddressUpdate
 
@@ -15,28 +15,28 @@ router = APIRouter()
 ### Get current user
 @router.get("/me", response_model=UserResponse)
 async def read_users_me(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await user_crud.get(db, id=current_user["id"])
+    user = await user_crud.get(db, id=current_user.id)
     return user
 
 @router.get("/preload-me")
 async def read_users_preload_me(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await user_crud.get(db, id=current_user["id"])
+    user = await user_crud.get(db, id=current_user.id)
     return {"email": user.email, 
             "phone_number": user.phone_number, 
             "business_name": user.profile.business_name}
 
 @router.get("/client-me")
 async def read_client_me(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await user_crud.get(db, id=current_user["id"])
+    user = await user_crud.get(db, id=current_user.id)
 
     result = await db.execute(
             select(CustomerAddress).where(CustomerAddress.user_id == user.id)
@@ -66,10 +66,10 @@ async def read_client_me(
 @router.put("/me", response_model=UserResponse)
 async def update_user_me(
     user_in: UserUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await user_crud.get(db, id=current_user["id"])
+    user = await user_crud.get(db, id=current_user.id)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -150,10 +150,10 @@ async def update_user_me(
 @router.put("/me/address")
 async def update_user_address(
     address_in: AddressUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await user_crud.get(db, id=current_user["id"])
+    user = await user_crud.get(db, id=current_user.id)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

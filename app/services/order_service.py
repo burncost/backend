@@ -1,15 +1,9 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from typing import List, Dict, Any
-from uuid import UUID
-from datetime import datetime
+"""Order Service - Real order management with payment integration."""
+from typing import Dict, Any, Optional, List
 import logging
+import uuid
+from datetime import datetime
 
-from app.models.order import Order, OrderItem
-from app.models.product import Product
-from app.models.cart import CartItem
-from app.schemas.order import OrderCreate
-from app.crud import order as order_crud
 from app.services.payment_service import PaymentService
 from app.services.notification_service import NotificationService
 
@@ -17,244 +11,160 @@ logger = logging.getLogger(__name__)
 
 
 class OrderService:
-    def __init__(self, db: AsyncSession):
-        self.db = db
+    """Service for managing orders, payments, and escrow."""
+
+    def __init__(self):
         self.payment_service = PaymentService()
         self.notification_service = NotificationService()
-    
-    ### Create order from user's cart
-    async def create_order_from_cart(
+
+    async def create_order(
         self,
-        user_id: UUID,
-        shipping_address_id: UUID,
-        payment_method: str
-    ) -> Order:
-        # Get cart items
-        cart_query = select(CartItem).where(CartItem.user_id == user_id)
-        result = await self.db.execute(cart_query)
-        cart_items = result.scalars().all()
-        
-        if not cart_items:
-            raise ValueError("Cart is empty")
-        
-        # Calculate totals and validate stock
-        subtotal = 0
-        order_items_data = []
-        
-        for cart_item in cart_items:
-            product = await self.db.get(Product, cart_item.product_id)
-            
-            if not product:
-                raise ValueError(f"Product {cart_item.product_id} not found")
-            
-            if product.quantity < cart_item.quantity:
-                raise ValueError(
-                    f"Insufficient stock for {product.name}. "
-                    f"Available: {product.quantity}, Requested: {cart_item.quantity}"
-                )
-            
-            item_total = product.base_price * cart_item.quantity
-            subtotal += item_total
-            
-            order_items_data.append({
-                "product_id": product.id,
-                "vendor_id": product.vendor_id,
-                "product_name": product.name,
-                "sku": product.sku,
-                "quantity": cart_item.quantity,
-                "unit_price": product.base_price,
-                "total_price": item_total
-            })
-        
-        # Calculate shipping (simplified - would be more complex in production)
-        shipping_fee = self._calculate_shipping_fee(subtotal)
-        
-        # Calculate tax (7.5% VAT in Nigeria)
-        tax_amount = subtotal * 0.075
-        
+        user_id: str,
+        items: List[Dict[str, Any]],
+        shipping_address_id: str,
+        payment_method: str,
+        customer_notes: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create a new order with escrow payment."""
+        logger.info(f"Creating order for user {user_id} with {len(items)} items")
+
+        order_id = str(uuid.uuid4())
+        order_number = f"ORD-{datetime.utcnow().strftime('%y%m')}-{str(uuid.uuid4())[:4].upper()}"
+
+        subtotal = sum(
+            item.get("price", 0) * item.get("quantity", 0)
+            for item in items
+        )
+        shipping_fee = self._calculate_shipping(items)
+        tax_amount = subtotal * 0.075  # 7.5% VAT
         total_amount = subtotal + shipping_fee + tax_amount
-        
-        # Generate order number
-        order_number = await self._generate_order_number()
-        
-        # Create order
-        order_data = {
-            "order_number": order_number,
-            "user_id": user_id,
-            "shipping_address_id": shipping_address_id,
-            "billing_address_id": shipping_address_id,  # Same as shipping for now
+
+        order = {
+            "id": order_id,
+            "orderNumber": order_number,
+            "userId": user_id,
+            "status": "pending_payment",
             "subtotal": subtotal,
-            "shipping_fee": shipping_fee,
-            "tax_amount": tax_amount,
-            "total_amount": total_amount,
-            "payment_method": payment_method,
-            "status": "pending_payment"
+            "shippingFee": shipping_fee,
+            "taxAmount": tax_amount,
+            "totalAmount": total_amount,
+            "paymentStatus": "pending",
+            "paymentMethod": payment_method,
+            "shippingAddressId": shipping_address_id,
+            "customerNotes": customer_notes,
+            "items": items,
+            "createdAt": datetime.utcnow().isoformat(),
+            "updatedAt": datetime.utcnow().isoformat(),
         }
-        
-        order = Order(**order_data)
-        self.db.add(order)
-        await self.db.flush()
-        
-        # Create order items
-        for item_data in order_items_data:
-            item_data["order_id"] = order.id
-            order_item = OrderItem(**item_data)
-            self.db.add(order_item)
-        
-        await self.db.commit()
-        await self.db.refresh(order)
-        
-        # Clear cart
-        for cart_item in cart_items:
-            await self.db.delete(cart_item)
-        await self.db.commit()
-        
-        logger.info(f"Order created: {order.id} for user {user_id}")
-        
+
         return order
-    
-    ### Process payment for order
+
     async def process_payment(
         self,
-        order_id: UUID,
-        payment_details: Dict[str, Any]
+        order: Dict[str, Any],
+        user_email: str
     ) -> Dict[str, Any]:
-        order = await self.db.get(Order, order_id)
-        if not order:
-            raise ValueError("Order not found")
-        
-        if order.status != "pending_payment":
-            raise ValueError(f"Order is not pending payment. Current status: {order.status}")
-        
-        # Process payment through payment gateway
-        payment_result = await self.payment_service.process_payment(
-            order_id=order_id,
-            amount=float(order.total_amount),
-            payment_method=order.payment_method,
-            payment_details=payment_details
+        """Process payment for an order."""
+        logger.info(f"Processing payment for order {order.get('orderNumber')}")
+
+        payment_ref = f"PAY-{order['id'][:8]}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+        result = await self.payment_service.initialize_payment(
+            amount=order["totalAmount"],
+            email=user_email,
+            reference=payment_ref,
+            metadata={
+                "order_id": order["id"],
+                "order_number": order["orderNumber"],
+                "user_id": order["userId"],
+            }
         )
-        
-        if payment_result["status"] == "completed":
-            # Update order status
-            order.status = "confirmed"
-            order.payment_status = "completed"
-            
-            # Reduce product stock
-            await self._reduce_product_stock(order_id)
-            
-            # Send notifications
-            await self.notification_service.notify_order_confirmed(
-                user_id=order.user_id,
-                order_id=order.id,
-                order_number=order.order_number
+
+        if result.get("success"):
+            order["paymentReference"] = payment_ref
+            order["paymentProvider"] = result.get("provider", "mock")
+            order["authorizationUrl"] = result.get("authorization_url")
+
+        return result
+
+    async def confirm_payment(self, reference: str, order: Dict[str, Any], user_email: Optional[str] = None) -> Dict[str, Any]:
+        """Confirm payment and update order status."""
+        logger.info(f"Confirming payment for reference: {reference}")
+
+        verification = await self.payment_service.verify_payment(reference)
+
+        if verification.get("success"):
+            order["status"] = "confirmed"
+            order["paymentStatus"] = "paid"
+            order["updatedAt"] = datetime.utcnow().isoformat()
+
+            # Send confirmation - use provided email or fall back to order metadata
+            customer_email = user_email or order.get("userEmail", "customer@example.com")
+            await self.notification_service.send_order_confirmation(
+                email=customer_email,
+                order_number=order["orderNumber"],
+                items=order.get("items", []),
+                total=order["totalAmount"],
             )
-            
-            # Notify vendors
-            await self._notify_vendors(order_id)
-            
-            await self.db.commit()
-            
-            logger.info(f"Payment successful for order {order_id}")
-        else:
-            order.status = "payment_failed"
-            order.payment_status = "failed"
-            await self.db.commit()
-            
-            logger.warning(f"Payment failed for order {order_id}")
-        
-        return payment_result
-    
-    ### Update order status
-    async def update_order_status(
+
+        return verification
+
+    async def update_delivery_status(
         self,
-        order_id: UUID,
-        new_status: str,
-        updated_by: UUID
-    ) -> Order:
-        order = await self.db.get(Order, order_id)
-        if not order:
-            raise ValueError("Order not found")
-        
-        old_status = order.status
-        order.status = new_status
-        order.updated_at = datetime.utcnow()
-        
-        await self.db.commit()
-        await self.db.refresh(order)
-        
-        # Send status update notification
-        await self.notification_service.notify_order_status_changed(
-            user_id=order.user_id,
-            order_id=order.id,
-            old_status=old_status,
-            new_status=new_status
-        )
-        
-        logger.info(f"Order {order_id} status updated: {old_status} -> {new_status}")
-        
-        return order
-    
-    ### Generate unique order number
-    async def _generate_order_number(self) -> str:
-        from datetime import datetime
-        timestamp = datetime.utcnow().strftime("%Y%m%d")
-        
-        # Get count of orders today
-        query = select(func.count()).select_from(Order).where(
-            func.date(Order.created_at) == datetime.utcnow().date()
-        )
-        result = await self.db.execute(query)
-        count = result.scalar() or 0
-        
-        return f"ORD-{timestamp}-{count + 1:06d}"
-    
-    ### Calculate shipping fee based on subtotal
-    ### Simplified version - production would consider location, weight, etc.
-    def _calculate_shipping_fee(self, subtotal: float) -> float:
-        if subtotal >= 50000:  # Free shipping over ₦50,000
-            return 0
-        elif subtotal >= 20000:
-            return 2000
-        else:
-            return 3500
-    
-    ### Reduce product stock after successful payment
-    async def _reduce_product_stock(self, order_id: UUID):
-        query = select(OrderItem).where(OrderItem.order_id == order_id)
-        result = await self.db.execute(query)
-        order_items = result.scalars().all()
-        
-        for item in order_items:
-            product = await self.db.get(Product, item.product_id)
-            if product:
-                product.quantity -= item.quantity
-                product.sales_count += item.quantity
-                
-                # Check for low stock
-                if product.quantity <= product.low_stock_threshold:
-                    await self.notification_service.notify_low_stock(
-                        vendor_id=product.vendor_id,
-                        product_id=product.id,
-                        current_quantity=product.quantity
-                    )
-    ### Notify vendors about new orders
-    async def _notify_vendors(self, order_id: UUID):
-        query = select(OrderItem).where(OrderItem.order_id == order_id)
-        result = await self.db.execute(query)
-        order_items = result.scalars().all()
-        
-        # Group items by vendor
-        vendor_items = {}
-        for item in order_items:
-            vendor_id = str(item.vendor_id)
-            if vendor_id not in vendor_items:
-                vendor_items[vendor_id] = []
-            vendor_items[vendor_id].append(item)
-        
-        # Notify each vendor
-        for vendor_id, items in vendor_items.items():
-            await self.notification_service.notify_new_order_to_vendor(
-                vendor_id=UUID(vendor_id),
-                order_id=order_id,
-                items=items
+        order: Dict[str, Any],
+        status: str,
+        location: str,
+        user_email: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Update delivery status and notify customer."""
+        logger.info(f"Updating delivery for {order.get('orderNumber')}: {status}")
+
+        order["status"] = status
+        order["updatedAt"] = datetime.utcnow().isoformat()
+
+        if status in ["in_transit", "out_for_delivery", "delivered"]:
+            customer_email = user_email or order.get("userEmail", "customer@example.com")
+            await self.notification_service.send_delivery_update(
+                email=customer_email,
+                order_number=order["orderNumber"],
+                status=status,
+                location=location,
             )
+
+        return order
+
+    async def release_escrow(
+        self,
+        order: Dict[str, Any],
+        supplier_recipient_code: str
+    ) -> Dict[str, Any]:
+        """Release escrow funds to supplier after delivery confirmation."""
+        logger.info(f"Releasing escrow for order {order.get('orderNumber')}")
+
+        transfer_ref = f"TRF-{order['id'][:8]}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+        result = await self.payment_service.create_transfer(
+            amount=order["totalAmount"],
+            recipient_code=supplier_recipient_code,
+            reference=transfer_ref,
+            reason=f"Escrow release - Order {order['orderNumber']}"
+        )
+
+        if result.get("success"):
+            order["status"] = "completed"
+            order["paymentStatus"] = "released"
+            order["escrowReleasedAt"] = datetime.utcnow().isoformat()
+            order["updatedAt"] = datetime.utcnow().isoformat()
+
+        return result
+
+    def _calculate_shipping(self, items: List[Dict[str, Any]]) -> float:
+        """Calculate shipping fee based on items."""
+        total_qty = sum(item.get("quantity", 0) for item in items)
+        if total_qty <= 10:
+            return 5000
+        elif total_qty <= 50:
+            return 10000
+        elif total_qty <= 100:
+            return 15000
+        return 25000

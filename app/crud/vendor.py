@@ -22,7 +22,7 @@ class CRUDVendor(CRUDBase[Vendor, VendorCreate, VendorUpdate]):
         registration_number: str
     ) -> Optional[Vendor]:
         result = await db.execute(
-            select(Vendor).where(Vendor.business_registration_number == registration_number)
+            select(Vendor).where(Vendor.cac_business_registration_number == registration_number)
         )
         return result.scalar_one_or_none()
 
