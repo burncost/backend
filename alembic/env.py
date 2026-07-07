@@ -2,6 +2,7 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
 from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
 
 # Import your Base and config
 from app.core.database import Base
@@ -17,7 +18,7 @@ if config.config_file_name is not None:
 
 # Build the correct database URL for psycopg2 (synchronous)
 # Convert from asyncpg format to psycopg2 format
-database_url = settings.DATABASE_URL.replace("postgresql+asyncpg", "postgresql+psycopg2")
+database_url = settings.DATABASE_URL.replace("postgresql+asyncpg", "postgresql+psycopg2").replace("ssl=require", "sslmode=require")
 
 # Override sqlalchemy.url in alembic.ini
 config.set_main_option("sqlalchemy.url", database_url)

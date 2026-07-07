@@ -6,6 +6,10 @@ INSERT INTO categories (
     parent_id,
     is_active,
     display_order,
+    division,
+    material_type,
+    default_unit,
+    waste_factor,
     created_at,
     updated_at
 )
@@ -19,6 +23,10 @@ VALUES
     NULL,
     TRUE,
     1,
+    'Structure',
+    'material',
+    'bag',
+    5.00,
     NOW(),
     NOW()
 ),
@@ -31,6 +39,10 @@ VALUES
     NULL,
     TRUE,
     2,
+    'Structure',
+    'material',
+    'tonne',
+    3.00,
     NOW(),
     NOW()
 ),
@@ -43,6 +55,10 @@ VALUES
     NULL,
     TRUE,
     3,
+    'Structure',
+    'material',
+    'piece',
+    5.00,
     NOW(),
     NOW()
 ),
@@ -55,6 +71,10 @@ VALUES
     NULL,
     TRUE,
     4,
+    'Structure',
+    'material',
+    'm²',
+    10.00,
     NOW(),
     NOW()
 ),
@@ -67,6 +87,10 @@ VALUES
     NULL,
     TRUE,
     5,
+    'MEP',
+    'material',
+    'piece',
+    5.00,
     NOW(),
     NOW()
 ),
@@ -79,6 +103,10 @@ VALUES
     NULL,
     TRUE,
     6,
+    'MEP',
+    'material',
+    'piece',
+    5.00,
     NOW(),
     NOW()
 ),
@@ -91,6 +119,10 @@ VALUES
     NULL,
     TRUE,
     7,
+    'Finishes',
+    'material',
+    'litre',
+    10.00,
     NOW(),
     NOW()
 ),
@@ -103,6 +135,10 @@ VALUES
     NULL,
     TRUE,
     8,
+    'Finishes',
+    'material',
+    'm³',
+    5.00,
     NOW(),
     NOW()
 ),
@@ -115,6 +151,10 @@ VALUES
     NULL,
     TRUE,
     9,
+    'Structure',
+    'material',
+    'tonne',
+    10.00,
     NOW(),
     NOW()
 ),
@@ -127,6 +167,10 @@ VALUES
     NULL,
     TRUE,
     10,
+    'General',
+    'material',
+    'piece',
+    3.00,
     NOW(),
     NOW()
 );
