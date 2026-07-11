@@ -43,6 +43,32 @@ def _extract_json(text: str) -> Optional[str]:
     return None
 
 
+def _repair_json(raw: str) -> Optional[str]:
+    """Attempt to repair common JSON issues from LLM output."""
+    # Try direct parse first
+    try:
+        json.loads(raw)
+        return raw
+    except json.JSONDecodeError:
+        pass
+    # Try fixing missing commas between object/array entries
+    # e.g. `} {"key"` → `}, {"key"`  or  `] {"key"` → `], {"key"`
+    repaired = re.sub(r"(\}|\])\s*\{", r"\1, {", raw)
+    try:
+        json.loads(repaired)
+        return repaired
+    except json.JSONDecodeError:
+        pass
+    # Try stripping trailing commas before closing braces/brackets
+    repaired = re.sub(r",\s*([\]}])", r"\1", repaired)
+    try:
+        json.loads(repaired)
+        return repaired
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
 def _empty_analysis(error: str) -> Dict[str, Any]:
     return {
         "processed": False,
@@ -94,10 +120,13 @@ class AIService:
 
             json_str = _extract_json(text)
             if json_str:
-                analysis = json.loads(json_str)
-                analysis["processed"] = True
-                analysis["processedAt"] = datetime.utcnow().isoformat()
-                return analysis
+                repaired = _repair_json(json_str)
+                if repaired:
+                    analysis = json.loads(repaired)
+                    analysis["processed"] = True
+                    analysis["processedAt"] = datetime.utcnow().isoformat()
+                    return analysis
+                return _empty_analysis("Failed to parse AI response as JSON after repair attempt")
 
             return _empty_analysis("Failed to parse AI response as JSON")
 
