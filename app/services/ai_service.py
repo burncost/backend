@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from google.api_core import exceptions as google_exceptions
 from google.genai import types as genai_types
+from json_repair import repair_json as json_repair
 
 from app.services.gemini_client import get_gemini_client
 
@@ -44,27 +45,12 @@ def _extract_json(text: str) -> Optional[str]:
 
 
 def _repair_json(raw: str) -> Optional[str]:
-    """Attempt to repair common JSON issues from LLM output."""
-    # Try direct parse first
+    """Attempt to repair common JSON issues from LLM output using json-repair."""
     try:
-        json.loads(raw)
-        return raw
-    except json.JSONDecodeError:
-        pass
-    # Try fixing missing commas between object/array entries
-    # e.g. `} {"key"` → `}, {"key"`  or  `] {"key"` → `], {"key"`
-    repaired = re.sub(r"(\}|\])\s*\{", r"\1, {", raw)
-    try:
-        json.loads(repaired)
-        return repaired
-    except json.JSONDecodeError:
-        pass
-    # Try stripping trailing commas before closing braces/brackets
-    repaired = re.sub(r",\s*([\]}])", r"\1", repaired)
-    try:
-        json.loads(repaired)
-        return repaired
-    except json.JSONDecodeError:
+        repaired = json_repair(raw)
+        if repaired:
+            return repaired
+    except Exception:
         pass
     return None
 
@@ -126,9 +112,9 @@ class AIService:
                     analysis["processed"] = True
                     analysis["processedAt"] = datetime.utcnow().isoformat()
                     return analysis
-                return _empty_analysis("Failed to parse AI response as JSON after repair attempt")
+                return _empty_analysis("Drawing analysis failed. Please enter dimensions manually.")
 
-            return _empty_analysis("Failed to parse AI response as JSON")
+            return _empty_analysis("Drawing analysis failed. Please enter dimensions manually.")
 
         except Exception as exc:
             logger.error("AI analysis failed: %s", exc)
