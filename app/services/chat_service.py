@@ -725,7 +725,11 @@ class ChatService:
                 "yes", "add it", "add to cart", "buy", "order", "purchase",
                 "checkout", "create boq", "generate boq", "i want"
             ])
-            if purchase_intent:
+            # Also show signup if AI suggests adding to cart or placing an order
+            ai_suggests_action = any(kw in lower_reply for kw in [
+                "add to cart", "add this to your cart", "place an order", "place order", "checkout"
+            ])
+            if purchase_intent or ai_suggests_action:
                 actions.append(ActionButton(
                     label="Create Free Account",
                     type="signup",
