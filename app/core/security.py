@@ -95,6 +95,10 @@ async def get_current_user_id(
     request: Request
 ) -> str:
     token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
 
     if not token:
         raise HTTPException(
