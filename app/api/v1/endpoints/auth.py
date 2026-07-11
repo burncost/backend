@@ -26,6 +26,7 @@ from app.schemas.user import (
 from app.crud import user as user_crud, vendor as vendor_crud
 from app.services.auth_service import AuthService
 from app.services.notification_service import NotificationService
+from app.services.token_service import TokenService
 
 import redis.asyncio as airedis
 
@@ -63,6 +64,10 @@ async def register(
     try:
         # Create user
         user = await user_crud.create(db, obj_in=user_in)
+        
+        # Grant free signup tokens
+        token_service = TokenService(db)
+        await token_service.grant_signup_tokens(str(user.id))
         
         # Send welcome and verification emails in background
         notification_service = NotificationService()

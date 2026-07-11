@@ -27,6 +27,7 @@ TOKEN_COSTS: Dict[str, int] = {
 }
 
 FREE_TIER_MONTHLY_TOKENS = 2
+SIGNUP_FREE_TOKENS = 100
 
 # ── Token pack pricing ──────────────────────────────────────────────────────
 
@@ -186,6 +187,26 @@ class TokenService:
         self.db.add(transaction)
         await self.db.commit()
         return True
+
+    # ── Signup bonus ─────────────────────────────────────────────────────────
+
+    async def grant_signup_tokens(self, user_id: str) -> TokenUsage:
+        """Grant free tokens to a new user on sign up."""
+        usage = await self.get_or_create_usage(user_id)
+        usage.balance = SIGNUP_FREE_TOKENS
+        usage.lifetime_purchased += SIGNUP_FREE_TOKENS
+
+        transaction = TokenTransaction(
+            user_id=user_id,
+            transaction_type=TransactionType.PURCHASE,
+            amount=SIGNUP_FREE_TOKENS,
+            balance_after=usage.balance,
+            description=f"Free signup bonus: {SIGNUP_FREE_TOKENS} tokens",
+        )
+        self.db.add(transaction)
+        await self.db.commit()
+        await self.db.refresh(usage)
+        return usage
 
     # ── Free tier ────────────────────────────────────────────────────────────
 

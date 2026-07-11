@@ -176,8 +176,8 @@ class ChatAIService:
                 model=self.model,
                 contents=contents,
                 config=genai_types.GenerateContentConfig(
-                    temperature=0.3,
-                    max_output_tokens=1024,
+                    temperature=0.2,
+                    max_output_tokens=4096,
                     tools=gemini_tools,
                 ),
             )
