@@ -14,13 +14,14 @@ from app.models.product import Product
 from app.models.category import Category
 from app.models.brand import Brand
 from app.models.vendor import Vendor
-from app.schemas.chat import ChatResponse
+from app.schemas.chat import ChatResponse, ActionButton
+
 from app.services.product_service import ProductService
 from app.services.ai_service import ChatAIService
 
 logger = logging.getLogger(__name__)
 
-# ── Tool definitions for OpenAI function calling ──────────────────────────
+# Tool definitions for function calling
 
 TOOL_DEFINITIONS = [
     {
@@ -177,30 +178,29 @@ TOOL_DEFINITIONS = [
     },
 ]
 
-# ── System prompt ─────────────────────────────────────────────────────────
+# System prompt
 
-SYSTEM_PROMPT = """You are Burncost AI, a helpful building materials assistant for Burncost — a Nigerian construction materials marketplace.
+SYSTEM_PROMPT = """You are Burncost AI — a Nigerian construction project manager with 15+ years experience in building materials procurement across Lagos, Abuja, and Port Harcourt. You work for Burncost, a Nigerian construction materials marketplace.
 
 YOUR CAPABILITIES:
 - Search for products, categories, suppliers, and brands
 - Provide product details, pricing, and availability
-- Recommend alternative products
-- Create vendor sourcing requests for items not in our catalog
+- Recommend alternative products with reasons they fit
+- Create vendor sourcing requests for items not currently in stock
+- Help users compare prices across suppliers
 
-RULES - YOU MUST FOLLOW THESE:
-1. NEVER invent products, prices, or supplier information. Always use the available tools.
-2. When a user asks about a product:
-   a. First use search_products to find it
-   b. If not found, search the same category for similar items
-   c. If still nothing, use recommend_alternatives
-   d. If absolutely nothing is found, use create_vendor_request to start sourcing
-3. When you create a vendor request, NEVER say "no supplier" or "not available". Instead reply like a friendly Igbo businessman: "Oga, I don put your request for our vendors. As dem respond, I go notify you." If user is not authenticated, add: "Abeg create account make we fit send you update — na free."
-4. If the user asks to create a BOQ, generate a quote, or place an order, respond that they need to create an account first.
-5. Be helpful, concise, and professional. You're assisting construction professionals in Nigeria.
-6. Prices are in Nigerian Naira (₦) unless otherwise specified.
-7. When showing products, include: name, price, brand, category, and availability.
-8. Keep responses to 1-2 short sentences. Be direct — skip preambles like "I recommend" or "I suggest". Just state the facts.
-9. After showing a product, naturally nudge toward purchase — e.g. "Want me to add this to your cart?" or "I can help you place an order for this." Don't make it too obvious."""
+RESPONSE RULES:
+1. Be direct and professional. State the product, price, and a quick recommendation in 1-2 sentences. No pleasantries or preambles.
+2. NEVER say a product is "out of stock", "not available", or "we don't have it". Instead:
+   a. First, search for alternatives in the same category and explain why they also fit the user's needs
+   b. If nothing suitable exists, use create_vendor_request to start sourcing
+   c. Then say: "I've notified our vendors about this. You'll get quotations once available."
+3. When showing products, include: name, price, brand, and why it's a good fit for their project.
+4. After presenting a product, naturally nudge toward action: "Want me to add this to your cart?" or "I can help you place an order."
+5. Use 90% proper English. Only use Pidgin once per conversation at the persuasion moment — e.g. "Oga, this one na the best price for 12mm iron rods for this week."
+6. Prices are in Nigerian Naira (₦).
+7. If the user asks to create a BOQ, generate a quote, or place an order without an account, tell them to sign up and include a signup action."""
+
 
 GUEST_SYSTEM_PROMPT = SYSTEM_PROMPT + """
 
@@ -551,10 +551,11 @@ class ChatService:
         max_turns = 5
         for turn in range(max_turns):
             try:
-                response = self.ai_service.chat_completion(
+                response = await self.ai_service.chat_completion(
                     messages=messages,
                     tools=TOOL_DEFINITIONS,
                 )
+
             except Exception as e:
                 logger.error(f"AI service error: {e}")
                 return ChatResponse(
@@ -578,14 +579,17 @@ class ChatService:
                 "completion_tokens": response.usage.completion_tokens if response.usage else 0,
             }
 
-            # If no tool calls, return the text response
+            # If no tool calls, return the text response with actions
             if not msg.tool_calls:
                 assistant_msg = {"role": "assistant", "content": msg.content}
                 messages.append(assistant_msg)
                 await self._save_history(conversation_id, messages, user_id, token_usage)
+                actions = self._build_actions(msg.content or "", tool_results_list, message)
                 return ChatResponse(
                     reply=msg.content or "",
                     conversation_id=conversation_id,
+                    actions=actions,
+                    has_tool_results=len(tool_results_list) > 0,
                 )
 
             # Process tool calls
@@ -661,3 +665,89 @@ class ChatService:
             )
         except Exception as e:
             logger.warning(f"Failed to save chat history: {e}")
+
+    def _build_actions(
+        self,
+        reply: str,
+        tool_results: List[dict],
+        user_message: str,
+    ) -> Optional[List[ActionButton]]:
+        """Generate action buttons based on AI response and tool results."""
+        actions: List[ActionButton] = []
+        lower_reply = reply.lower()
+        lower_user = user_message.lower()
+
+        # 1. Signup action for unauthenticated users
+        if not self.is_authenticated:
+            # Check if user wants to order, add to cart, or create BOQ
+            purchase_intent = any(kw in lower_user for kw in [
+                "yes", "add it", "add to cart", "buy", "order", "purchase",
+                "checkout", "create boq", "generate boq", "i want"
+            ])
+            if purchase_intent:
+                actions.append(ActionButton(
+                    label="Create Free Account",
+                    type="signup",
+                    data={"redirect": "/auth/choose-role"},
+                ))
+                return actions
+
+        # 2. For authenticated users, check for product-related actions
+        if self.is_authenticated:
+            # Check if AI mentioned adding to cart
+            if any(kw in lower_reply for kw in ["add to cart", "add this to your cart", "add to your cart"]):
+                # Extract product IDs from tool results
+                product_ids = []
+                for tr in tool_results:
+                    result = tr.get("result", {})
+                    if "products" in result:
+                        for p in result["products"]:
+                            if p.get("id"):
+                                product_ids.append(p["id"])
+                    if "alternatives" in result:
+                        for p in result["alternatives"]:
+                            if p.get("id"):
+                                product_ids.append(p["id"])
+                    if "id" in result and tr.get("tool") == "get_product":
+                        product_ids.append(result["id"])
+
+                if product_ids:
+                    actions.append(ActionButton(
+                        label="Add to Cart",
+                        type="add_to_cart",
+                        data={"product_ids": product_ids},
+                    ))
+
+            # Check if user confirmed purchase
+            if any(kw in lower_user for kw in ["yes", "add it", "go ahead", "sure"]) and \
+               any(kw in lower_reply for kw in ["cart", "order", "checkout"]):
+                actions.append(ActionButton(
+                    label="Proceed to Checkout",
+                    type="checkout",
+                    data={},
+                ))
+
+            # Check if AI mentioned placing an order
+            if any(kw in lower_reply for kw in ["place an order", "place order", "checkout"]):
+                if not any(a.type == "checkout" for a in actions):
+                    actions.append(ActionButton(
+                        label="Checkout",
+                        type="checkout",
+                        data={},
+                    ))
+
+        # 3. View in marketplace if tool results exist
+        if tool_results:
+            has_products = any(
+                tr.get("result", {}).get("products")
+                or tr.get("result", {}).get("alternatives")
+                for tr in tool_results
+            )
+            if has_products and not any(a.type == "add_to_cart" for a in actions):
+                actions.append(ActionButton(
+                    label="View in Marketplace",
+                    type="view_product",
+                    data={},
+                ))
+
+        return actions if actions else None

@@ -20,6 +20,7 @@ from app.api.v1.endpoints import (
     material_rates,
     promos,
     chat,
+    tokens,
 )
 
 api_router = APIRouter()
@@ -43,3 +44,4 @@ api_router.include_router(prices.router, prefix="/prices", tags=["Prices"])
 api_router.include_router(material_rates.router, prefix="/materials/rates", tags=["Material Rates"])
 api_router.include_router(promos.router, prefix="/promos", tags=["Promotions"])
 api_router.include_router(chat.router, prefix="", tags=["Chat"])
+api_router.include_router(tokens.router, prefix="/tokens", tags=["Tokens"])

@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     AI_SERVICE_API_KEY: Optional[str] = None
     AI_MODEL: Optional[str] = None
     AI_BASE_URL: Optional[str] = None
+
+    # Google Gemini AI
+    GOOGLE_PROJECT_ID: str = "burncost-493208"
+    GOOGLE_LOCATION: str = "europe-west1"
+    GOOGLE_CREDS_PATH: str = "google_creds.json"
     
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
@@ -168,7 +173,23 @@ class Settings(BaseSettings):
     BREVO_API_KEY: Optional[str]
 
     UPLOAD_DIR: Optional[str]
-    
+
+    # Token system configuration
+    TOKEN_COSTS: dict = {
+        "boq_generate_manual": 1,
+        "boq_generate_drawing": 2,
+        "export_pdf": 1,
+        "export_excel": 0.5,
+        "export_docx": 0.5,
+        "boq_regenerate": 1,
+    }
+    FREE_TIER_MONTHLY_TOKENS: int = 2
+    TOKEN_PACKS: list = [
+        {"tokens": 10, "price_ngn": 5_000, "price_per_token": 500},
+        {"tokens": 50, "price_ngn": 20_000, "price_per_token": 400},
+        {"tokens": 200, "price_ngn": 60_000, "price_per_token": 300},
+    ]
+
     class Config:
         env_file = ".env"
         case_sensitive = True

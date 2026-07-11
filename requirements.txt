@@ -100,7 +100,7 @@ resend
 
 xlrd
 
-openai
+google-genai
 json-repair
 
 anthropic

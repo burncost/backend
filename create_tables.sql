@@ -5,7 +5,6 @@
 
 -- ============================================
 -- ENUMS
--- ============================================
 
 CREATE TYPE user_role AS ENUM ('customer', 'vendor', 'admin', 'super_admin');
 CREATE TYPE user_status AS ENUM ('active', 'suspended', 'pending_verification', 'deactivated');
@@ -460,6 +459,28 @@ CREATE TABLE promo_codes (
 );
 
 CREATE INDEX idx_promo_codes_code ON promo_codes(code);
+
+-- ============================================
+-- DEMAND ALERTS (out-of-stock vendor notifications)
+-- ============================================
+
+CREATE TABLE demand_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    item_description VARCHAR(500) NOT NULL,
+    city VARCHAR(100) NOT NULL,
+    quantity_needed DECIMAL(15,2),
+    unit VARCHAR(50),
+    project_title VARCHAR(500),
+    requested_by UUID REFERENCES users(id),
+    status VARCHAR(50) DEFAULT 'pending',
+    notified_vendors TEXT[],  -- array of vendor IDs notified
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_demand_alerts_city ON demand_alerts(city);
+CREATE INDEX idx_demand_alerts_status ON demand_alerts(status);
+CREATE INDEX idx_demand_alerts_requested_by ON demand_alerts(requested_by);
 
 -- ============================================
 -- TRIGGERS FOR AUTO-UPDATE TIMESTAMPS

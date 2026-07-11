@@ -4,12 +4,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.core.security import get_current_user_id
+from app.core.security import get_current_user_id, get_current_user_id_optional
+
 from app.crud import user as user_crud
 from app.crud import vendor as vendor_crud
 from app.models.vendor import Vendor
 
-### Get current authenticated user"""
+### Get current authenticated user (raises 401 if not authenticated)
 async def get_current_user(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
@@ -20,6 +21,17 @@ async def get_current_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
+    return user
+
+
+### Get current user or None (allows anonymous access)
+async def get_optional_user(
+    db: AsyncSession = Depends(get_db),
+    user_id: Optional[str] = Depends(get_current_user_id_optional)
+):
+    if not user_id:
+        return None
+    user = await user_crud.get(db, id=user_id)
     return user
 
 ### Get current active user

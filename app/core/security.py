@@ -114,6 +114,25 @@ async def get_current_user_id(
     return user_id
 
 
+async def get_current_user_id_optional(
+    request: Request
+) -> Optional[str]:
+    """Returns user_id if authenticated, None otherwise. Never raises."""
+    # Check cookie first, then Authorization header
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if not token:
+        return None
+    try:
+        payload = decode_token(token)
+        return payload.get("sub")
+    except HTTPException:
+        return None
+
+
 def create_email_verification_token(email: str) -> str:
     expire = datetime.utcnow() + timedelta(hours=24)
     to_encode = {
