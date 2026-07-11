@@ -68,17 +68,15 @@ class BOQGenerator:
         """Generate BOQ items in background using AI."""
         logger.info(f"Generating BOQ items for {boq_id} from {len(document_ids)} documents")
         if not self.db:
-            logger.warning("No DB connection — cannot generate BOQ items")
+            logger.warning("No DB connection - cannot generate BOQ items")
             return
 
         try:
-            # Load the BOQ record to get generation parameters
             boq = await self.db["boqs"].find_one({"_id": ObjectId(boq_id)})
             if not boq:
                 logger.error(f"BOQ {boq_id} not found")
                 return
 
-            # Build a minimal BOQGenerationRequest from stored data
             from app.schemas.boq import BOQGenerationRequest, ProjectInfoInput, FloorInput
             project_info = ProjectInfoInput(
                 project_title=boq.get("title", "Untitled"),
@@ -93,13 +91,10 @@ class BOQGenerator:
                 )],
             )
 
-            # Run MITM enrichment + template generation
             mitm_result = self.mitm.enrich(request)
             enriched = mitm_result["enriched"]
             boq_data = await self._generate_from_template(request, enriched)
 
-
-            # Enrich with prices
             city = enriched["project_info"]["city"]
             enriched_elements, discrepancies = await self.price_service.enrich_boq_elements(
                 boq_data["elements"], city
@@ -107,7 +102,6 @@ class BOQGenerator:
             boq_data["elements"] = enriched_elements
             boq_data["price_discrepancies"] = discrepancies
 
-            # Recalculate totals
             totals = self.price_service.recalculate_totals(boq_data["elements"])
             boq_data["summary"] = {
                 "sub_total": totals["sub_total"],
@@ -118,7 +112,6 @@ class BOQGenerator:
                 "total_contract_sum": totals["total_contract_sum"],
             }
 
-            # Save generated items to DB
             await self.db["boqs"].update_one(
                 {"_id": ObjectId(boq_id)},
                 {"$set": {
@@ -139,7 +132,6 @@ class BOQGenerator:
                     {"_id": ObjectId(boq_id)},
                     {"$set": {"status": "failed", "error": str(e), "updatedAt": datetime.utcnow()}}
                 )
-
 
     async def approve_boq(
         self,
@@ -186,7 +178,6 @@ class BOQGenerator:
             summary = boq.get("summary", {})
             project_title = boq.get("title", "BOQ")
 
-            # Ensure export directory exists
             export_dir = os.path.join(os.getcwd(), "exports")
             os.makedirs(export_dir, exist_ok=True)
 
@@ -225,11 +216,9 @@ class BOQGenerator:
                 ws = wb.active
                 ws.title = "BOQ"
 
-                # Header
                 ws.cell(row=1, column=1, value=f"Bill of Quantities - {project_title}").font = Font(bold=True, size=14)
                 ws.merge_cells("A1:G1")
 
-                # Column headers
                 headers = ["Element", "Item Code", "Description", "Quantity", "Unit", "Rate (NGN)", "Amount (NGN)"]
                 for col, h in enumerate(headers, 1):
                     cell = ws.cell(row=3, column=col, value=h)
@@ -247,7 +236,6 @@ class BOQGenerator:
                         ws.cell(row=row, column=7, value=item.get("amount", 0))
                         row += 1
 
-                # Summary
                 row += 1
                 ws.cell(row=row, column=1, value="Sub Total").font = Font(bold=True)
                 ws.cell(row=row, column=7, value=summary.get("sub_total", 0)).font = Font(bold=True)
@@ -289,8 +277,8 @@ class BOQGenerator:
                             item.get("description", ""),
                             str(item.get("quantity", 0)),
                             item.get("unit", ""),
-                            f"₦{item.get('rate', 0):,.2f}",
-                            f"₦{item.get('amount', 0):,.2f}",
+                            f"N{item.get('rate', 0):,.2f}",
+                            f"N{item.get('amount', 0):,.2f}",
                         ])
                     t = Table(data, colWidths=[60, 200, 50, 40, 70, 70])
                     t.setStyle(TableStyle([
@@ -313,7 +301,6 @@ class BOQGenerator:
         except Exception as e:
             logger.error(f"Export failed for BOQ {boq_id}: {e}")
             return f"/exports/{boq_id}.{format}"
-
 
     async def upload_and_verify(
         self,
@@ -366,7 +353,6 @@ class BOQGenerator:
                     "message": "No data rows found in the uploaded file."
                 }
 
-            # Parse items from rows
             parsed_items = []
             for row in rows:
                 desc = str(row.get("description", row.get("Description", "")))
@@ -383,7 +369,6 @@ class BOQGenerator:
                         "amount": amount,
                     })
 
-            # Verify against market prices
             analysis = {"verified_items": [], "discrepancies": []}
             total_quoted = 0
             total_market = 0
@@ -419,7 +404,6 @@ class BOQGenerator:
                         "status": "unverified",
                     })
 
-            # Save to DB
             boq_id = ""
             if self.db:
                 doc = {
@@ -456,7 +440,6 @@ class BOQGenerator:
                 "analysis": {},
                 "message": f"Error processing file: {str(e)}",
             }
-
 
     async def handle_decision(
         self,
@@ -510,7 +493,7 @@ Return ONLY valid JSON with this structure:
     {{
       "description": "item description",
       "quantity": number,
-      "unit": "m²/m³/nr/ls/etc",
+      "unit": "m2/m3/nr/ls/etc",
       "quoted_rate": number,
       "estimated_market_rate": number,
       "deviation_pct": number,
@@ -549,7 +532,6 @@ Return ONLY valid JSON with this structure:
                 else:
                     raise Exception("Failed to parse Gemini response")
 
-            # Verify each item against DB prices
             for item in result.get("items", []):
                 db_rate = await self.price_service.get_rate(item["description"])
                 if db_rate and db_rate.get("rate"):
@@ -573,8 +555,7 @@ Return ONLY valid JSON with this structure:
                 "summary_note": f"Verification failed: {str(e)}"
             }
 
-
-    # ── Main generation entry point ──────────────────────────────────────────
+    # Main generation entry point
 
     async def generate_from_parameters(
         self,
@@ -587,13 +568,11 @@ Return ONLY valid JSON with this structure:
         """
         logger.info(f"Generating BOQ for project: {request.project_info.project_title}")
 
-        # Step 1: MITM enrichment
         mitm_result = self.mitm.enrich(request)
         enriched = mitm_result["enriched"]
         flags = mitm_result["flags"]
         confidence = mitm_result["confidence"]
 
-        # Step 2: Generate BOQ (AI or template)
         if self.api_key:
             try:
                 boq = await self._generate_with_ai(request, enriched)
@@ -603,8 +582,6 @@ Return ONLY valid JSON with this structure:
         else:
             boq = await self._generate_from_template(request, enriched)
 
-
-        # Step 3: Enrich with real prices from DB
         city = enriched["project_info"]["city"]
         enriched_elements, discrepancies, out_of_stock = await self.price_service.enrich_boq_elements(
             boq["elements"], city
@@ -613,7 +590,6 @@ Return ONLY valid JSON with this structure:
         boq["price_discrepancies"] = discrepancies
         boq["out_of_stock_items"] = out_of_stock
 
-        # Step 3b: Notify vendors for out-of-stock items
         if out_of_stock and user_id:
             project_title = enriched["project_info"]["project_title"]
             notified_count = await self.price_service.notify_vendors(
@@ -621,11 +597,9 @@ Return ONLY valid JSON with this structure:
                 project_title=project_title,
                 user_id=user_id,
             )
-            # Mark notified items
             for item in boq["out_of_stock_items"]:
                 item["vendor_notified"] = True
 
-        # Step 4: Recalculate totals
         totals = self.price_service.recalculate_totals(boq["elements"])
         total = totals["total_contract_sum"]
         floor_area = enriched["total_floor_area_m2"]
@@ -648,7 +622,6 @@ Return ONLY valid JSON with this structure:
             },
         }
 
-        # Step 5: Attach confidence and assumptions
         boq["confidence"] = confidence
         boq["assumptions_used"] = mitm_result["assumptions"]
         boq["warnings"] = [f["message"] for f in flags if f["severity"] == "critical"]
@@ -657,7 +630,7 @@ Return ONLY valid JSON with this structure:
 
         return boq
 
-    # ── AI generation ────────────────────────────────────────────────────────
+    # AI generation
 
     async def _generate_with_ai(
         self, request: BOQGenerationRequest, enriched: Dict
@@ -704,7 +677,7 @@ Return ONLY valid JSON with this structure:
         city = enriched["project_info"]["city"]
         building_type = enriched["project_info"]["building_type"]
 
-        return f"""You are a professional Quantity Surveyor registered with NIQS (Nigerian Institute of Quantity Surveyors). 
+        return f"""You are a professional Quantity Surveyor registered with NIQS (Nigerian Institute of Quantity Surveyors).
 Generate a detailed Bill of Quantities (BOQ) in JSON format following the Nigerian SMM7 standard.
 
 PROJECT INFORMATION:
@@ -762,7 +735,7 @@ Return ONLY valid JSON with this exact structure:
   "notes": [string]
 }}"""
 
-    # ── Template generation (fallback) ───────────────────────────────────────
+    # Template generation (fallback)
 
     async def _generate_from_template(
         self, request: BOQGenerationRequest, enriched: Dict
@@ -770,6 +743,7 @@ Return ONLY valid JSON with this exact structure:
         """Generate BOQ from template calculations using enriched data.
         All rates are fetched from price_service (DB or internet fallback).
         No hardcoded rates are used.
+        Uses batched DB queries for performance.
         """
         derived = enriched.get("derived_quantities", {})
         total_area = enriched["total_floor_area_m2"]
@@ -777,7 +751,6 @@ Return ONLY valid JSON with this exact structure:
         city = enriched["project_info"]["city"]
         finish_grade = enriched["finishes"]["finish_grade"]
 
-        # Get city and finish multipliers (async)
         try:
             city_factor = await self.price_service.get_city_factor(city)
             finish_factor = await self.price_service.get_finish_level_multiplier(finish_grade)
@@ -785,279 +758,145 @@ Return ONLY valid JSON with this exact structure:
             city_factor = 1.0
             finish_factor = 1.0
 
-        # Helper to fetch rate from price_service with fallback
-        async def _get_rate(description: str, default_rate: float) -> float:
-            result = await self.price_service.get_rate(description, city)
-            if result and result.get("rate"):
-                return float(result["rate"])
-            return default_rate * city_factor
-
-        elements = []
-        total_cost = 0
-
-        # ── Preliminaries ────────────────────────────────────────────────────
-        prelim_items = [
-            ("PRE-001", "Site clearance & preparation", 1, "ls", 150000),
-            ("PRE-002", "Scaffolding hire", total_area, "m²", 800),
-            ("PRE-003", "Concrete mixer hire", 1, "ls", 200000),
-            ("PRE-004", "Setting out & survey", 1, "ls", 100000),
-        ]
-        prelim_items_resolved = []
-        for code, desc, qty, unit, default_rate in prelim_items:
-            rate = await _get_rate(desc, default_rate)
-            prelim_items_resolved.append({
-                "itemCode": code, "description": desc,
-                "quantity": qty, "unit": unit,
-                "rate": round(rate), "amount": round(qty * rate),
-                "estimated": True,
-            })
-        prelim_cost = sum(i["amount"] for i in prelim_items_resolved)
-        elements.append({
-            "elementName": "Preliminaries", "trade": "Preliminaries",
-            "totalCost": round(prelim_cost, 2), "items": prelim_items_resolved,
-        })
-        total_cost += prelim_cost
-
-        # ── Substructure ─────────────────────────────────────────────────────
-        foundation_vol = derived.get("foundation_concrete_m3", total_area * 0.3)
-        sub_items = [
-            ("SUB-001", "Excavation (strip foundation)", round(foundation_vol * 1.5, 2), "m³", 2500),
-            ("SUB-002", "Hardcore filling 150mm thick", round(total_area, 2), "m²", 1800),
-            ("SUB-003", "Blinding concrete (1:3:6) 50mm", round(total_area, 2), "m²", 2200),
-            ("SUB-004", "Foundation concrete (1:2:4)", round(foundation_vol, 2), "m³", 94000),
-            ("SUB-005", "DPC membrane (oversite)", round(total_area, 2), "m²", 1200),
-            ("SUB-006", "Reinforcement (foundation)", round(derived.get("estimated_rebar_kg", total_area * 15) * 0.3, 2), "kg", 850),
-        ]
-        sub_items_resolved = []
-        for code, desc, qty, unit, default_rate in sub_items:
-            rate = await _get_rate(desc, default_rate)
-            sub_items_resolved.append({
-                "itemCode": code, "description": desc,
-                "quantity": qty, "unit": unit,
-                "rate": round(rate), "amount": round(qty * rate),
-                "estimated": True,
-            })
-        sub_cost = sum(i["amount"] for i in sub_items_resolved)
-        elements.append({
-            "elementName": "Substructure", "trade": "Substructure",
-            "totalCost": round(sub_cost, 2), "items": sub_items_resolved,
-        })
-        total_cost += sub_cost
-
-        # ── Superstructure ───────────────────────────────────────────────────
-        ext_blocks = derived.get("external_blocks_225mm", total_area * 20)
-        int_blocks = derived.get("internal_blocks_150mm", total_area * 12)
         wall_area = derived.get("net_wall_area_m2", total_area * 2.8 * num_floors)
         total_perimeter = enriched.get("total_perimeter_m", math.sqrt(total_area) * 4)
-        sup_items = [
-            ("SUP-001", "9-inch sandcrete block wall (225mm)", round(ext_blocks), "nr", 1300),
-            ("SUP-002", "6-inch sandcrete block wall (150mm)", round(int_blocks), "nr", 1100),
-            ("SUP-003", "RC Columns 225x225mm (1:2:4)", round(num_floors * 12), "nr", 85000),
-            ("SUP-004", "RC Ring Beams 225x450mm", round(total_perimeter, 2), "m", 12000),
-            ("SUP-005", "RC Lintels over openings", round(total_perimeter * 0.3, 2), "m", 8000),
-            ("SUP-006", "Ground floor slab (1:2:4) 150mm", round(total_area * 0.15, 2), "m³", 94000),
-        ]
-        sup_items_resolved = []
-        for code, desc, qty, unit, default_rate in sup_items:
-            rate = await _get_rate(desc, default_rate)
-            sup_items_resolved.append({
-                "itemCode": code, "description": desc,
-                "quantity": qty, "unit": unit,
-                "rate": round(rate), "amount": round(qty * rate),
-                "estimated": True,
-            })
-        sup_cost = sum(i["amount"] for i in sup_items_resolved)
-        elements.append({
-            "elementName": "Superstructure", "trade": "Superstructure",
-            "totalCost": round(sup_cost, 2), "items": sup_items_resolved,
-        })
-        total_cost += sup_cost
-
-        # ── Roofing ──────────────────────────────────────────────────────────
+        foundation_vol = derived.get("foundation_concrete_m3", total_area * 0.3)
+        ext_blocks = derived.get("external_blocks_225mm", total_area * 20)
+        int_blocks = derived.get("internal_blocks_150mm", total_area * 12)
         roof_area = derived.get("roof_slope_area_m2", total_area * 1.3)
-        roof_items = [
-            ("ROF-001", "Timber roof trusses (supply & fix)", round(roof_area, 2), "m²", 6500),
-            ("ROF-002", "Longspan aluminium roofing 0.55mm", round(roof_area, 2), "m²", 6000),
-            ("ROF-003", "Ridge capping", round(math.sqrt(roof_area) * 1.5, 2), "m", 3500),
-            ("ROF-004", "Fascia & soffit board", round(math.sqrt(roof_area) * 4, 2), "m", 3500),
-            ("ROF-005", "Rainwater gutter (uPVC)", round(math.sqrt(roof_area) * 4, 2), "m", 2500),
-            ("ROF-006", "Downpipe (uPVC)", round(num_floors * 4), "nr", 4500),
-        ]
-        roof_items_resolved = []
-        for code, desc, qty, unit, default_rate in roof_items:
-            rate = await _get_rate(desc, default_rate)
-            roof_items_resolved.append({
-                "itemCode": code, "description": desc,
-                "quantity": qty, "unit": unit,
-                "rate": round(rate), "amount": round(qty * rate),
-                "estimated": True,
-            })
-        roof_cost = sum(i["amount"] for i in roof_items_resolved)
-        elements.append({
-            "elementName": "Roofing", "trade": "Roofing",
-            "totalCost": round(roof_cost, 2), "items": roof_items_resolved,
-        })
-        total_cost += roof_cost
-
-        # ── Joinery ──────────────────────────────────────────────────────────
         door_count = sum(len(f["openings"]["doors"]) for f in enriched["floors"])
         window_count = sum(len(f["openings"]["windows"]) for f in enriched["floors"])
-        joinery_items = [
-            ("JON-001", "Internal flush door (0.8x2.1m) with frame", max(door_count, 6), "nr", 65000),
-            ("JON-002", "External security door (0.9x2.1m)", max(1, door_count // 4), "nr", 120000),
-            ("JON-003", "Aluminium sliding window 1.2x1.2m", max(window_count, 4), "nr", 95000),
-            ("JON-004", "Burglar-proofing (window)", max(window_count, 4), "nr", 25000),
-        ]
-        joinery_items_resolved = []
-        for code, desc, qty, unit, default_rate in joinery_items:
-            rate = await _get_rate(desc, default_rate)
-            joinery_items_resolved.append({
-                "itemCode": code, "description": desc,
-                "quantity": qty, "unit": unit,
-                "rate": round(rate), "amount": round(qty * rate),
-                "estimated": True,
-            })
-        joinery_cost = sum(i["amount"] for i in joinery_items_resolved)
-        elements.append({
-            "elementName": "Joinery (Doors & Windows)", "trade": "Joinery",
-            "totalCost": round(joinery_cost, 2), "items": joinery_items_resolved,
-        })
-        total_cost += joinery_cost
-
-        # ── Internal Finishes ────────────────────────────────────────────────
         floor_finish_area = derived.get("floor_finish_area_m2", total_area)
         wall_finish_area = derived.get("wall_finish_area_m2", wall_area)
-        int_finish_items = [
-            ("FIN-001", "Floor screed (25mm) cement/sand 1:4", round(floor_finish_area, 2), "m²", 2500),
-            ("FIN-002", "Ceramic floor tile 600x600mm (supply & fix)", round(floor_finish_area, 2), "m²", 13300),
-            ("FIN-003", "Wall plastering (15mm) cement/sand 1:4", round(wall_finish_area, 2), "m²", 2800),
-            ("FIN-004", "Wall tiling (wet areas) 300x600mm", round(wall_finish_area * 0.15, 2), "m²", 12000),
-            ("FIN-005", "POP ceiling (supply & install)", round(floor_finish_area, 2), "m²", 6500),
-            ("FIN-006", "Emulsion paint (2 coats) walls", round(wall_finish_area, 2), "m²", 3400),
-            ("FIN-007", "Skirting (ceramic) 100mm high", round(enriched.get("total_perimeter_m", math.sqrt(total_area) * 4), 2), "m", 2500),
-        ]
-        int_finish_items_resolved = []
-        for code, desc, qty, unit, default_rate in int_finish_items:
-            rate = await _get_rate(desc, default_rate)
-            # Apply finish factor to tile/paint items
-            if code in ("FIN-002", "FIN-004", "FIN-006"):
-                rate = rate * finish_factor
-            int_finish_items_resolved.append({
-                "itemCode": code, "description": desc,
-                "quantity": qty, "unit": unit,
-                "rate": round(rate), "amount": round(qty * rate),
-                "estimated": True,
-            })
-        finish_cost = sum(i["amount"] for i in int_finish_items_resolved)
-        elements.append({
-            "elementName": "Internal Finishes", "trade": "Finishes",
-            "totalCost": round(finish_cost, 2), "items": int_finish_items_resolved,
-        })
-        total_cost += finish_cost
-
-        # ── External Finishes ────────────────────────────────────────────────
         ext_wall_area = wall_area * 0.3
-        ext_finish_items = [
-            ("EXT-001", "External rendering (20mm) cement/sand 1:4", round(ext_wall_area, 2), "m²", 3200),
-            ("EXT-002", "External emulsion paint (2 coats)", round(ext_wall_area, 2), "m²", 3500),
-        ]
-        ext_finish_items_resolved = []
-        for code, desc, qty, unit, default_rate in ext_finish_items:
-            rate = await _get_rate(desc, default_rate)
-            ext_finish_items_resolved.append({
-                "itemCode": code, "description": desc,
-                "quantity": qty, "unit": unit,
-                "rate": round(rate), "amount": round(qty * rate),
-                "estimated": True,
-            })
-        ext_cost = sum(i["amount"] for i in ext_finish_items_resolved)
-        elements.append({
-            "elementName": "External Finishes", "trade": "Finishes",
-            "totalCost": round(ext_cost, 2), "items": ext_finish_items_resolved,
-        })
-        total_cost += ext_cost
-
-        # ── Plumbing & Drainage ──────────────────────────────────────────────
         pf = enriched["services"].get("plumbing_fixtures", {})
         wc_count = pf.get("wc", 2)
         whb_count = pf.get("wash_hand_basin", 2)
         shower_count = pf.get("shower", 2)
         sink_count = pf.get("kitchen_sink", 1)
         has_overhead_tank = enriched["services"].get("overhead_tank", True)
-        plumb_items = [
-            ("PLB-001", "Cold water supply pipework (PVC)", round(total_area * 0.3, 2), "m", 2500),
-            ("PLB-002", "Drainage pipework (PVC 4\")", round(total_area * 0.2, 2), "m", 3500),
-            ("PLB-003", "WC suite (low level)", wc_count, "nr", 65000),
-            ("PLB-004", "Wash hand basin", whb_count, "nr", 25000),
-            ("PLB-005", "Shower fitting", shower_count, "nr", 18000),
-            ("PLB-006", "Kitchen sink (stainless steel)", sink_count, "nr", 45000),
-            ("PLB-007", "Overhead water tank (1000L)", 1 if has_overhead_tank else 0, "nr", 180000),
-            ("PLB-008", "Septic tank & soakaway", 1, "ls", 350000),
+
+        all_items = [
+            ("PRE-001", "Site clearance & preparation", 1, "ls", 150000, False),
+            ("PRE-002", "Scaffolding hire", total_area, "m2", 800, False),
+            ("PRE-003", "Concrete mixer hire", 1, "ls", 200000, False),
+            ("PRE-004", "Setting out & survey", 1, "ls", 100000, False),
+            ("SUB-001", "Excavation (strip foundation)", round(foundation_vol * 1.5, 2), "m3", 2500, False),
+            ("SUB-002", "Hardcore filling 150mm thick", round(total_area, 2), "m2", 1800, False),
+            ("SUB-003", "Blinding concrete (1:3:6) 50mm", round(total_area, 2), "m2", 2200, False),
+            ("SUB-004", "Foundation concrete (1:2:4)", round(foundation_vol, 2), "m3", 94000, False),
+            ("SUB-005", "DPC membrane (oversite)", round(total_area, 2), "m2", 1200, False),
+            ("SUB-006", "Reinforcement (foundation)", round(derived.get("estimated_rebar_kg", total_area * 15) * 0.3, 2), "kg", 850, False),
+            ("SUP-001", "9-inch sandcrete block wall (225mm)", round(ext_blocks), "nr", 1300, False),
+            ("SUP-002", "6-inch sandcrete block wall (150mm)", round(int_blocks), "nr", 1100, False),
+            ("SUP-003", "RC Columns 225x225mm (1:2:4)", round(num_floors * 12), "nr", 85000, False),
+            ("SUP-004", "RC Ring Beams 225x450mm", round(total_perimeter, 2), "m", 12000, False),
+            ("SUP-005", "RC Lintels over openings", round(total_perimeter * 0.3, 2), "m", 8000, False),
+            ("SUP-006", "Ground floor slab (1:2:4) 150mm", round(total_area * 0.15, 2), "m3", 94000, False),
+            ("ROF-001", "Timber roof trusses (supply & fix)", round(roof_area, 2), "m2", 6500, False),
+            ("ROF-002", "Longspan aluminium roofing 0.55mm", round(roof_area, 2), "m2", 6000, False),
+            ("ROF-003", "Ridge capping", round(math.sqrt(roof_area) * 1.5, 2), "m", 3500, False),
+            ("ROF-004", "Fascia & soffit board", round(math.sqrt(roof_area) * 4, 2), "m", 3500, False),
+                        ("ROF-005", "Rainwater gutter (uPVC)", round(math.sqrt(roof_area) * 4, 2), "m", 2500, False),
+            ("ROF-006", "Downpipe (uPVC)", round(num_floors * 4), "nr", 4500, False),
+            ("JON-001", "Internal flush door (0.8x2.1m) with frame", max(door_count, 6), "nr", 65000, False),
+            ("JON-002", "External security door (0.9x2.1m)", max(1, door_count // 4), "nr", 120000, False),
+            ("JON-003", "Aluminium sliding window 1.2x1.2m", max(window_count, 4), "nr", 95000, False),
+            ("JON-004", "Burglar-proofing (window)", max(window_count, 4), "nr", 25000, False),
+            ("FIN-001", "Floor screed (25mm) cement/sand 1:4", round(floor_finish_area, 2), "m2", 2500, False),
+            ("FIN-002", "Ceramic floor tile 600x600mm (supply & fix)", round(floor_finish_area, 2), "m2", 13300, True),
+            ("FIN-003", "Wall plastering (15mm) cement/sand 1:4", round(wall_finish_area, 2), "m2", 2800, False),
+            ("FIN-004", "Wall tiling (wet areas) 300x600mm", round(wall_finish_area * 0.15, 2), "m2", 12000, True),
+            ("FIN-005", "POP ceiling (supply & install)", round(floor_finish_area, 2), "m2", 6500, False),
+            ("FIN-006", "Emulsion paint (2 coats) walls", round(wall_finish_area, 2), "m2", 3400, True),
+            ("FIN-007", "Skirting (ceramic) 100mm high", round(enriched.get("total_perimeter_m", math.sqrt(total_area) * 4), 2), "m", 2500, False),
+            ("EXT-001", "External rendering (20mm) cement/sand 1:4", round(ext_wall_area, 2), "m2", 3200, False),
+            ("EXT-002", "External emulsion paint (2 coats)", round(ext_wall_area, 2), "m2", 3500, False),
+            ("PLB-001", "Cold water supply pipework (PVC)", round(total_area * 0.3, 2), "m", 2500, False),
+            ("PLB-002", "Drainage pipework (PVC 4in)", round(total_area * 0.2, 2), "m", 3500, False),
+            ("PLB-003", "WC suite (low level)", wc_count, "nr", 65000, False),
+            ("PLB-004", "Wash hand basin", whb_count, "nr", 25000, False),
+            ("PLB-005", "Shower fitting", shower_count, "nr", 18000, False),
+            ("PLB-006", "Kitchen sink (stainless steel)", sink_count, "nr", 45000, False),
+            ("PLB-007", "Overhead water tank (1000L)", 1 if has_overhead_tank else 0, "nr", 180000, False),
+            ("PLB-008", "Septic tank & soakaway", 1, "ls", 350000, False),
+            ("ELE-001", "PVC conduit & wiring (2.5mm) per point", round(total_area * 0.5, 2), "m", 1200, False),
+            ("ELE-002", "Lighting point (complete)", round(total_area * 0.15, 2), "nr", 8500, False),
+            ("ELE-003", "Socket outlet (double, complete)", round(total_area * 0.1, 2), "nr", 9500, False),
+            ("ELE-004", "Distribution board (8-way)", 1, "nr", 35000, False),
+            ("ELE-005", "Earthing system", 1, "ls", 80000, False),
+            ("EXTW-001", "Fencing (sandcrete block wall)", round(math.sqrt(total_area) * 4, 2), "m", 18000, False),
+            ("EXTW-002", "Gate (metal, sliding)", 1, "nr", 250000, False),
+            ("EXTW-003", "Interlocking paving (driveway)", round(total_area * 0.15, 2), "m2", 8500, False),
+            ("EXTW-004", "Landscaping & planting", round(total_area * 0.2, 2), "m2", 3500, False),
         ]
-        plumb_items_resolved = []
-        for code, desc, qty, unit, default_rate in plumb_items:
-            rate = await _get_rate(desc, default_rate)
-            plumb_items_resolved.append({
+
+        # Batch-fetch all rates in one call
+        descriptions = [item[1] for item in all_items]
+        batch_rates = await self.price_service.get_rates_batch(descriptions, city)
+
+        def _resolve_rate(description: str, default_rate: float) -> float:
+            rate = batch_rates.get(description.lower())
+            if rate is not None:
+                return rate
+            return default_rate * city_factor
+
+        # Build elements from resolved items
+        element_map = {
+            "Preliminaries": ("Preliminaries", []),
+            "Substructure": ("Substructure", []),
+            "Superstructure": ("Superstructure", []),
+            "Roofing": ("Roofing", []),
+            "Joinery (Doors & Windows)": ("Joinery", []),
+            "Internal Finishes": ("Finishes", []),
+            "External Finishes": ("Finishes", []),
+            "Plumbing & Drainage": ("Services", []),
+            "Electrical Installation": ("Services", []),
+            "External Works": ("External Works", []),
+        }
+
+        element_items = {k: [] for k in element_map}
+        element_order = [
+            "Preliminaries", "Substructure", "Superstructure", "Roofing",
+            "Joinery (Doors & Windows)", "Internal Finishes", "External Finishes",
+            "Plumbing & Drainage", "Electrical Installation", "External Works",
+        ]
+
+        code_to_element = {
+            "PRE": "Preliminaries", "SUB": "Substructure", "SUP": "Superstructure",
+            "ROF": "Roofing", "JON": "Joinery (Doors & Windows)", "FIN": "Internal Finishes",
+            "EXT": "External Finishes", "PLB": "Plumbing & Drainage",
+            "ELE": "Electrical Installation", "EXTW": "External Works",
+        }
+
+        for code, desc, qty, unit, default_rate, apply_finish in all_items:
+            rate = _resolve_rate(desc, default_rate)
+            if apply_finish:
+                rate = rate * finish_factor
+            prefix = code.split("-")[0]
+            element_name = code_to_element.get(prefix, "Preliminaries")
+            element_items[element_name].append({
                 "itemCode": code, "description": desc,
                 "quantity": qty, "unit": unit,
                 "rate": round(rate), "amount": round(qty * rate),
                 "estimated": True,
             })
-        plumb_cost = sum(i["amount"] for i in plumb_items_resolved)
-        elements.append({
-            "elementName": "Plumbing & Drainage", "trade": "Services",
-            "totalCost": round(plumb_cost, 2), "items": plumb_items_resolved,
-        })
-        total_cost += plumb_cost
 
-        # ── Electrical ───────────────────────────────────────────────────────
-        elec_items = [
-            ("ELE-001", "PVC conduit & wiring (2.5mm) per point", round(total_area * 0.5, 2), "m", 1200),
-            ("ELE-002", "Lighting point (complete)", round(total_area * 0.15, 2), "nr", 8500),
-            ("ELE-003", "Socket outlet (double, complete)", round(total_area * 0.1, 2), "nr", 9500),
-            ("ELE-004", "Distribution board (8-way)", 1, "nr", 35000),
-            ("ELE-005", "Earthing system", 1, "ls", 80000),
-        ]
-        elec_items_resolved = []
-        for code, desc, qty, unit, default_rate in elec_items:
-            rate = await _get_rate(desc, default_rate)
-            elec_items_resolved.append({
-                "itemCode": code, "description": desc,
-                "quantity": qty, "unit": unit,
-                "rate": round(rate), "amount": round(qty * rate),
-                "estimated": True,
+        elements = []
+        total_cost = 0
+        for name in element_order:
+            items = element_items[name]
+            if not items:
+                continue
+            cost = sum(i["amount"] for i in items)
+            trade = element_map[name][1]
+            elements.append({
+                "elementName": name, "trade": trade,
+                "totalCost": round(cost, 2), "items": items,
             })
-        elec_cost = sum(i["amount"] for i in elec_items_resolved)
-        elements.append({
-            "elementName": "Electrical Installation", "trade": "Services",
-            "totalCost": round(elec_cost, 2), "items": elec_items_resolved,
-        })
-        total_cost += elec_cost
+            total_cost += cost
 
-        # ── External Works ───────────────────────────────────────────────────
-        ext_works_items = [
-            ("EXTW-001", "Fencing (sandcrete block wall)", round(math.sqrt(total_area) * 4, 2), "m", 18000),
-            ("EXTW-002", "Gate (metal, sliding)", 1, "nr", 250000),
-            ("EXTW-003", "Interlocking paving (driveway)", round(total_area * 0.15, 2), "m²", 8500),
-            ("EXTW-004", "Landscaping & planting", round(total_area * 0.2, 2), "m²", 3500),
-        ]
-        ext_works_items_resolved = []
-        for code, desc, qty, unit, default_rate in ext_works_items:
-            rate = await _get_rate(desc, default_rate)
-            ext_works_items_resolved.append({
-                "itemCode": code, "description": desc,
-                "quantity": qty, "unit": unit,
-                "rate": round(rate), "amount": round(qty * rate),
-                "estimated": True,
-            })
-        ext_works_cost = sum(i["amount"] for i in ext_works_items_resolved)
-        elements.append({
-            "elementName": "External Works", "trade": "External Works",
-            "totalCost": round(ext_works_cost, 2), "items": ext_works_items_resolved,
-        })
-        total_cost += ext_works_cost
-
-        # ── Compute summary ──────────────────────────────────────────────────
+        # Compute summary
         contingencies = total_cost * 0.05
         overheads_profit = total_cost * 0.10
         vat_rate = 0.075
