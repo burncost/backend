@@ -509,13 +509,19 @@ class ChatService:
         self.ai_service = ChatAIService()
         self.tool_executor = ToolExecutor(db)
         self.max_guest_tokens = 20000
+        self.user_location: Optional[str] = None
 
     async def handle_message(
         self,
         message: str,
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        user_location: Optional[str] = None,
     ) -> ChatResponse:
+        # Store location for consistent use across turns
+        if user_location:
+            self.user_location = user_location
+
         # Load or create conversation
         if not conversation_id:
             conversation_id = str(uuid.uuid4())
@@ -538,8 +544,16 @@ class ChatService:
                     action="signup_required",
                 )
 
-        # Build messages array
+        # Build messages array with location context
         system_prompt = GUEST_SYSTEM_PROMPT if not self.is_authenticated else SYSTEM_PROMPT
+        if self.user_location:
+            system_prompt = (
+                f"USER LOCATION: {self.user_location}\n\n"
+                f"IMPORTANT: The user is located in {self.user_location}. "
+                f"Always reference this location for pricing, availability, and advice. "
+                f"Never switch to a different location unless the user explicitly says they're elsewhere.\n\n"
+                f"{system_prompt}"
+            )
         messages = [{"role": "system", "content": system_prompt}]
 
         # Add history
@@ -569,6 +583,7 @@ class ChatService:
 
         # Multi-turn function calling loop
         max_turns = 5
+        tool_results_list = []
         for turn in range(max_turns):
             try:
                 response = await self.ai_service.chat_completion(
@@ -577,9 +592,16 @@ class ChatService:
                 )
 
             except Exception as e:
-                logger.error(f"AI service error: {e}")
+                logger.error(f"AI service error (turn {turn}): {e}")
+                # Return a helpful fallback instead of a generic error
                 return ChatResponse(
-                    reply="I'm sorry, I'm having trouble connecting to my AI service right now. Please try again later.",
+                    reply=(
+                        "I'm sorry, I'm having trouble processing that right now. "
+                        "Could you try rephrasing your question? I can help with:\n"
+                        "• Material prices and product searches\n"
+                        "• Construction advice and project guidance\n"
+                        "• Comparing suppliers and finding alternatives"
+                    ),
                     conversation_id=conversation_id,
                 )
 
@@ -614,7 +636,6 @@ class ChatService:
 
             # Process tool calls
             assistant_msg = {"role": "assistant", "content": msg.content, "tool_calls": []}
-            tool_results_list = []
             for tc in msg.tool_calls:
                 tc_dict = {
                     "id": tc.id,
