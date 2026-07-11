@@ -30,21 +30,21 @@ Base = declarative_base()
 
 
 # MongoDB Setup
-# mongoclient: AsyncIOMotorClient = None
-# mongodb = None
-mongoclient = AsyncIOMotorClient(settings.MONGODB_URL)
-mongodb = mongoclient[settings.MONGO_DB]
+mongoclient: AsyncIOMotorClient = None
+mongodb = None
 
 async def connect_to_mongo():
+    global mongoclient, mongodb
     try:
-        # mongoclient = AsyncIOMotorClient(settings.MONGODB_URL)
-        # mongodb = mongoclient[settings.MONGO_DB]
+        mongoclient = AsyncIOMotorClient(settings.MONGODB_URL)
+        mongodb = mongoclient[settings.MONGO_DB]
         # Test connection
         await mongoclient.admin.command('ping')
         logger.info("Connected to MongoDB successfully")
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")
-        raise
+        mongoclient = None
+        mongodb = None
 
 
 async def close_mongo_connection():
