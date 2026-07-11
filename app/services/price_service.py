@@ -608,7 +608,7 @@ class PriceService:
         """Recompute element and summary totals after price enrichment."""
         grand_total = 0.0
         for element in elements:
-            el_total = sum(item.get("amount", 0) for item in element.get("items", []))
+            el_total = sum(item.get("amount") or 0 for item in element.get("items", []))
             element["element_total"] = round(el_total, 2)
             grand_total += el_total
 

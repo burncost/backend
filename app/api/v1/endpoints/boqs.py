@@ -162,8 +162,8 @@ async def analyze_drawing(
     extracted_rooms = [
         {
             "name": r.get("roomName", f"Room {i+1}"),
-            "area_m2": r.get("area", 0),
-            "perimeter_m": r.get("perimeter", 0),
+            "area_m2": r.get("area") or 0,
+            "perimeter_m": r.get("perimeter") or 0,
             "is_wet_area": r.get("roomType", "").lower() in ("bathroom", "toilet", "kitchen", "shower", "laundry"),
         }
         for i, r in enumerate(rooms)
@@ -175,7 +175,7 @@ async def analyze_drawing(
         "file_name": file.filename,
         "file_size_bytes": len(content),
         "rooms": extracted_rooms,
-        "floor_area_m2": sum(r.get("area", 0) for r in rooms),
+        "floor_area_m2": sum(r.get("area") or 0 for r in rooms),
         "elements": elements,
         "materials": materials,
     }

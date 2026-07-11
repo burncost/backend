@@ -160,7 +160,7 @@ class OrderService:
 
     def _calculate_shipping(self, items: List[Dict[str, Any]]) -> float:
         """Calculate shipping fee based on items."""
-        total_qty = sum(item.get("quantity", 0) for item in items)
+        total_qty = sum(item.get("quantity") or 0 for item in items)
         if total_qty <= 10:
             return 5000
         elif total_qty <= 50:
