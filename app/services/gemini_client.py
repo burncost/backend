@@ -1,4 +1,3 @@
-"""Shared Gemini client — initialised once with service-account credentials."""
 from __future__ import annotations
 
 import os
@@ -16,34 +15,56 @@ _client: Optional[genai.Client] = None
 
 
 def get_gemini_client() -> genai.Client:
-    """Return a singleton Gemini enterprise client."""
+    """Return a singleton Gemini client."""
     global _client
     if _client is not None:
         return _client
 
-    creds_path = settings.GOOGLE_CREDS_PATH or os.getenv("GOOGLE_CREDS_PATH", "google_creds.json")
-    project = settings.GOOGLE_PROJECT_ID or os.getenv("GOOGLE_PROJECT_ID", "burncost-493208")
-    location = settings.GOOGLE_LOCATION or os.getenv("GOOGLE_LOCATION", "us-central1")
-
-    if not os.path.exists(creds_path):
-        logger.warning("Google credentials file not found at %s — Gemini calls will fail", creds_path)
-        _client = genai.Client(project=project, location=location)
-        return _client
+    project = settings.GOOGLE_PROJECT_ID
+    location = settings.GOOGLE_LOCATION
 
     try:
-        credentials = service_account.Credentials.from_service_account_file(
-            creds_path
-        ).with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
+        if settings.DEBUG:
+            # Local development
+            creds_path = (
+                settings.GOOGLE_CREDS_PATH
+                or "google_creds.json"
+            )
 
-        _client = genai.Client(
-            enterprise=True,
-            project=project,
-            location=location,
-            credentials=credentials,
-        )
-        logger.info("Gemini enterprise client initialised (project=%s, location=%s)", project, location)
-    except Exception as exc:
-        logger.error("Failed to initialise Gemini client: %s", exc)
-        _client = genai.Client(project=project, location=location)
+            if not os.path.exists(creds_path):
+                raise FileNotFoundError(
+                    f"Google credentials not found: {creds_path}"
+                )
+
+            credentials = (
+                service_account.Credentials.from_service_account_file(
+                    creds_path
+                ).with_scopes(
+                    ["https://www.googleapis.com/auth/cloud-platform"]
+                )
+            )
+
+            _client = genai.Client(
+                vertexai=True,
+                project=project,
+                location=location,
+                credentials=credentials,
+            )
+
+            logger.info("Gemini client initialized using local service account.")
+
+        else:
+            # Cloud Run / GCP - Uses ADC automatically
+            _client = genai.Client(
+                vertexai=True,
+                project=project,
+                location=location,
+            )
+
+            logger.info("Gemini client initialized using ADC.")
+
+    except Exception:
+        logger.exception("Failed to initialize Gemini client.")
+        raise
 
     return _client
