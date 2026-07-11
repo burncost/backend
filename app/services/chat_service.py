@@ -225,7 +225,7 @@ CONSTRUCTION ADVICE GUIDELINES:
 GUEST_SYSTEM_PROMPT = SYSTEM_PROMPT + """
 
 GUEST USER RULES:
-- You have a limited conversation allowance of 20000 tokens.
+- You have a limited conversation allowance of 50000 tokens.
 - If the user asks to create a BOQ, place an order, or access any feature that requires an account, tell them to sign up.
 - When the user approaches the token limit, suggest they create a free account to continue using the assistant."""
 
@@ -508,7 +508,7 @@ class ChatService:
         self.is_authenticated = is_authenticated
         self.ai_service = ChatAIService()
         self.tool_executor = ToolExecutor(db)
-        self.max_guest_tokens = 20000
+        self.max_guest_tokens = 50000
         self.user_location: Optional[str] = None
 
     async def handle_message(
