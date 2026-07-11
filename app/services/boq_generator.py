@@ -1,5 +1,6 @@
 """BOQ Generator - Real BOQ generation using AI and market rates."""
 from typing import Dict, Any, List, Optional
+import asyncio
 import logging
 import json
 import os
@@ -7,6 +8,7 @@ import math
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
+from json_repair import repair_json
 
 from app.schemas.boq import BOQGenerationRequest
 from app.services.mitm_engine import MITMEngine
@@ -659,10 +661,16 @@ Return ONLY valid JSON with this structure:
             import re
             match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
             if match:
-                return json.loads(match.group(1))
+                raw = match.group(1)
+                repaired = repair_json(raw)
+                if repaired:
+                    return json.loads(repaired)
             match = re.search(r'\{[\s\S]*\}', text)
             if match:
-                return json.loads(match.group(0))
+                raw = match.group(0)
+                repaired = repair_json(raw)
+                if repaired:
+                    return json.loads(repaired)
 
             raise Exception("Failed to parse AI response")
         except Exception as exc:
@@ -831,9 +839,15 @@ Return ONLY valid JSON with this exact structure:
             ("EXTW-004", "Landscaping & planting", round(total_area * 0.2, 2), "m2", 3500, False),
         ]
 
-        # Batch-fetch all rates in one call
+        # Fetch all rates concurrently
         descriptions = [item[1] for item in all_items]
-        batch_rates = await self.price_service.get_rates_batch(descriptions, city)
+        rate_results = await asyncio.gather(*[
+            self.price_service.get_rate(desc, city) for desc in descriptions
+        ])
+        batch_rates = {}
+        for desc, result in zip(descriptions, rate_results):
+            if result and result.get("rate"):
+                batch_rates[desc.lower()] = result["rate"]
 
         def _resolve_rate(description: str, default_rate: float) -> float:
             rate = batch_rates.get(description.lower())
