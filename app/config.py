@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     # Google Gemini AI
     GOOGLE_PROJECT_ID: str = "burncost-493208"
     GOOGLE_LOCATION: str = "europe-west1"
-    GOOGLE_CREDS_PATH: str = "google_creds.json"
+    #GOOGLE_CREDS_PATH: str = "google_creds.json"
     
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
