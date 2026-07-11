@@ -509,7 +509,7 @@ Return ONLY valid JSON with this structure:
 }}"""
 
             response = client.models.generate_content(
-                model="gemini-2.5-pro",
+                model="gemini-2.5-flash",
                 contents=[prompt],
                 config=genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -644,7 +644,7 @@ Return ONLY valid JSON with this structure:
 
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-pro",
+                model="gemini-2.5-flash",
                 contents=[prompt],
                 config=genai_types.GenerateContentConfig(
                     temperature=0.1,

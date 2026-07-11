@@ -61,7 +61,7 @@ class AIService:
 
     def __init__(self):
         self.client = get_gemini_client()
-        self.model = "gemini-2.5-pro"
+        self.model = "gemini-2.5-flash"
 
     async def analyze_document(
         self,

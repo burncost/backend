@@ -223,7 +223,7 @@ Return ONLY valid JSON with this exact structure:
 If you don't know the price, return: {{"rate": null, "source": "not_found"}}"""
 
             response = client.models.generate_content(
-                model="gemini-2.5-pro",
+                model="gemini-2.5-flash",
                 contents=[prompt],
                 config={"temperature": 0.1, "max_output_tokens": 1024},
             )
