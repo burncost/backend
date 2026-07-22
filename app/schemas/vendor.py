@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 from uuid import UUID
 from decimal import Decimal
@@ -15,8 +15,8 @@ class VendorCreate(VendorBase):
     business_name: str = Field(..., max_length=100)
     business_type: str = Field(..., max_length=100)
     business_address: str = Field(..., max_length=255)
-    city : str = Field(..., max_length=100),
-    state : str = Field(..., max_length=100),
+    city: str = Field(..., max_length=100)
+    state: str = Field(..., max_length=100)
     cac_business_registration_number: Optional[str] = Field(None, max_length=100)
     tax_identification_number: Optional[str] = Field(None, max_length=50)
     verification_status: Optional[str] = Field(None, max_length=50)
@@ -25,10 +25,11 @@ class VendorCreate(VendorBase):
     bank_name: str = Field(..., max_length=100)
     bank_account_number: str = Field(..., max_length=100)
     bank_account_name: str = Field(..., max_length=100)
-    commission_rate: Optional[Decimal] = Field(None, max_digits=5, decimal_places=2)
-    rating: Optional[Decimal] = Field(None, max_digits=3, decimal_places=2)
+    bank_code: Optional[str] = Field(None, max_length=10)
+    commission_rate: Optional[Decimal] = None
+    rating: Optional[Decimal] = None
     total_reviews: Optional[int] = None
-    total_sales: Optional[Decimal] = Field(None, max_digits=15, decimal_places=2)
+    total_sales: Optional[Decimal] = None
     is_featured: Optional[bool] = False
 
 
@@ -46,11 +47,15 @@ class VendorUpdate(BaseModel):
     verification_status: Optional[str] = Field(None, max_length=50)
     verification_date: Optional[datetime] = None
     verified_by: Optional[UUID] = None
-    commission_rate: Optional[Decimal] = Field(None, max_digits=5, decimal_places=2)
-    rating: Optional[Decimal] = Field(None, max_digits=3, decimal_places=2)
+    commission_rate: Optional[Decimal] = None
+    rating: Optional[Decimal] = None
     total_reviews: Optional[int] = None
-    total_sales: Optional[Decimal] = Field(None, max_digits=15, decimal_places=2)
+    total_sales: Optional[Decimal] = None
     is_featured: Optional[bool] = False
+    business_image: Optional[str] = None
+    delivery_time: Optional[str] = Field(None, max_length=100)
+    response_time: Optional[str] = Field(None, max_length=100)
+    specializations: Optional[List[str]] = None
 
 
 class VendorResponse(VendorBase):
@@ -69,6 +74,10 @@ class VendorResponse(VendorBase):
     total_reviews: int
     total_sales: Decimal
     is_featured: bool
+    business_image: Optional[str] = None
+    delivery_time: Optional[str] = "1-3 Days"
+    response_time: Optional[str] = "< 1 hour"
+    specializations: Optional[List[str]] = []
     created_at: datetime
 
     class Config:

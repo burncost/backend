@@ -1,14 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from typing import List, Optional
-from uuid import UUID
 
 from app.core.database import get_db
 from app.models.category import Category
-from app.schemas.category import CategoryCreate, CategoryUpdate, CategoryResponse, CategoryTreeResponse
-from app.api.deps import get_current_admin
-
+from app.schemas.category import CategoryResponse, CategoryTreeResponse
 import logging
 
 logger = logging.getLogger(__name__)
@@ -16,175 +14,106 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-### List all active categories
-@router.get("/", response_model=List[CategoryResponse])
+@router.get("/")
 async def list_categories(
-    include_inactive: bool = Query(False),
-    parent_id: Optional[UUID] = Query(None),
-    division: Optional[str] = Query(None),
-    material_type: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db)
+    parent_only: bool = Query(False, description="Return only parent categories"),
+    active_only: bool = Query(True),
+    db: AsyncSession = Depends(get_db),
 ):
+    """List all categories. If parent_only=True, returns only top-level categories."""
     query = select(Category)
-    if not include_inactive:
+
+    if active_only:
         query = query.where(Category.is_active == True)
-    if parent_id is not None:
-        query = query.where(Category.parent_id == parent_id)
-    if division:
-        query = query.where(Category.division == division)
-    if material_type:
-        query = query.where(Category.material_type == material_type)
+
+    if parent_only:
+        query = query.where(Category.parent_id.is_(None))
+    else:
+        # Eager load children
+        query = query.options(selectinload(Category.children))
+
     query = query.order_by(Category.display_order, Category.name)
-
     result = await db.execute(query)
-    categories = result.scalars().all()
-    return categories
+    categories = result.scalars().unique().all()
+
+    cats_out = []
+    for cat in categories:
+        d = {
+            "id": str(cat.id),
+            "name": cat.name,
+            "slug": cat.slug,
+            "parent_id": str(cat.parent_id) if cat.parent_id else None,
+            "division": cat.division,
+            "default_unit": cat.default_unit,
+            "platform_margin": float(cat.platform_margin) if cat.platform_margin else 0,
+            "fee_model": cat.fee_model or "percentage",
+            "fee_fixed": float(cat.fee_fixed) if cat.fee_fixed else None,
+            "description": cat.description,
+            "display_order": cat.display_order or 0,
+            "is_active": cat.is_active,
+            "children": [],
+        }
+        if not parent_only and hasattr(cat, "children"):
+            for child in cat.children:
+                d["children"].append({
+                    "id": str(child.id),
+                    "name": child.name,
+                    "slug": child.slug,
+                    "parent_id": str(child.parent_id) if child.parent_id else None,
+                    "division": child.division,
+                    "default_unit": child.default_unit,
+                    "platform_margin": float(child.platform_margin) if child.platform_margin else 0,
+                    "description": child.description,
+                    "display_order": child.display_order or 0,
+                    "is_active": child.is_active,
+                })
+        cats_out.append(d)
+
+    return cats_out
 
 
-### Get category tree (hierarchical)
-@router.get("/tree", response_model=List[CategoryTreeResponse])
-async def get_category_tree(
-    division: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db)
-):
-    """Returns the full category hierarchy as a tree."""
-    query = select(Category).where(Category.is_active == True)
-    if division:
-        query = query.where(Category.division == division)
-    query = query.order_by(Category.display_order, Category.name)
-
-    result = await db.execute(query)
-    all_categories = result.scalars().all()
-
-    # Build tree
-    category_map = {}
-    roots = []
-
-    for cat in all_categories:
-        cat_id_str = str(cat.id)
-        category_map[cat_id_str] = CategoryTreeResponse(
-            id=cat.id,
-            name=cat.name,
-            slug=cat.slug,
-            division=cat.division,
-            material_type=cat.material_type,
-            default_unit=cat.default_unit,
-            waste_factor=cat.waste_factor,
-            children=[],
-        )
-
-    for cat in all_categories:
-        cat_id_str = str(cat.id)
-        node = category_map[cat_id_str]
-        if cat.parent_id and str(cat.parent_id) in category_map:
-            category_map[str(cat.parent_id)].children.append(node)
-        else:
-            roots.append(node)
-
-    return roots
-
-
-### List all divisions
-@router.get("/divisions", response_model=List[str])
-async def list_divisions(
-    db: AsyncSession = Depends(get_db)
-):
-    """Returns all unique division names."""
-    result = await db.execute(
-        select(Category.division)
-        .where(Category.division.isnot(None))
-        .distinct()
-        .order_by(Category.division)
-    )
-    divisions = result.scalars().all()
-    return divisions
-
-
-### Get category by ID
-@router.get("/{category_id}", response_model=CategoryResponse)
+@router.get("/{category_id}")
 async def get_category(
-    category_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    category_id: str,
+    db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Category).where(Category.id == category_id))
-    category = result.scalar_one_or_none()
+    """Get a single category by ID."""
+    from uuid import UUID
+    try:
+        uid = UUID(category_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid category ID")
 
-    if not category:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Category not found"
-        )
+    result = await db.execute(
+        select(Category)
+        .options(selectinload(Category.children))
+        .where(Category.id == uid)
+    )
+    cat = result.scalar_one_or_none()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
 
-    return category
-
-
-### Create a new category (admin only)
-@router.post("/", response_model=CategoryResponse, status_code=status.HTTP_201_CREATED)
-async def create_category(
-    category_in: CategoryCreate,
-    current_admin: dict = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
-):
-    # Check for duplicate slug
-    result = await db.execute(select(Category).where(Category.slug == category_in.slug))
-    existing = result.scalar_one_or_none()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Category with slug '{category_in.slug}' already exists"
-        )
-
-    category = Category(**category_in.dict())
-    db.add(category)
-    await db.commit()
-    await db.refresh(category)
-
-    logger.info(f"Category created: {category.name} ({category.id})")
-    return category
-
-
-### Update a category (admin only)
-@router.put("/{category_id}", response_model=CategoryResponse)
-async def update_category(
-    category_id: UUID,
-    category_in: CategoryUpdate,
-    current_admin: dict = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(Category).where(Category.id == category_id))
-    category = result.scalar_one_or_none()
-
-    if not category:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Category not found"
-        )
-
-    update_data = category_in.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(category, field, value)
-
-    await db.commit()
-    await db.refresh(category)
-    return category
-
-
-### Delete a category (admin only)
-@router.delete("/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_category(
-    category_id: UUID,
-    current_admin: dict = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(Category).where(Category.id == category_id))
-    category = result.scalar_one_or_none()
-
-    if not category:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Category not found"
-        )
-
-    await db.delete(category)
-    await db.commit()
-    return None
+    return {
+        "id": str(cat.id),
+        "name": cat.name,
+        "slug": cat.slug,
+        "parent_id": str(cat.parent_id) if cat.parent_id else None,
+        "division": cat.division,
+        "default_unit": cat.default_unit,
+        "platform_margin": float(cat.platform_margin) if cat.platform_margin else 0,
+        "description": cat.description,
+        "display_order": cat.display_order or 0,
+        "is_active": cat.is_active,
+        "children": [
+            {
+                "id": str(c.id),
+                "name": c.name,
+                "slug": c.slug,
+                "parent_id": str(c.parent_id) if c.parent_id else None,
+                "division": c.division,
+                "default_unit": c.default_unit,
+                "platform_margin": float(c.platform_margin) if c.platform_margin else 0,
+            }
+            for c in cat.children
+        ],
+    }

@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Enum as SQLEnum, DateTime, Numeric, Integer, Boolean, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -13,6 +13,7 @@ class VendorVerificationStatus(str, enum.Enum):
     VERIFIED = "verified"
     REJECTED = "rejected"
     SUSPENDED = "suspended"
+    DEACTIVATED = "deactivated"
 
 
 class Vendor(Base):
@@ -37,14 +38,15 @@ class Vendor(Base):
     )
     verification_date = Column(DateTime, nullable=True)
     verified_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
-    bank_name = Column(String(255), nullable=False)
-    bank_account_number = Column(String(255), nullable=False)
-    bank_account_name = Column(String(255), nullable=False)
     commission_rate = Column(Numeric(5, 2), default=10.00)
     rating = Column(Numeric(3, 2), default=0.00)
     total_reviews = Column(Integer, default=0)
     total_sales = Column(Numeric(15, 2), default=0.00)
     is_featured = Column(Boolean, default=False)
+    business_image = Column(String(500), nullable=True)
+    delivery_time = Column(String(100), default="1-3 Days")
+    response_time = Column(String(100), default="< 1 hour")
+    specializations = Column(ARRAY(String), default=[])
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -59,6 +61,7 @@ class Vendor(Base):
         back_populates="vendors_verified"
     )
     products = relationship("Product", back_populates="vendor", cascade="all, delete-orphan")
+    bank_accounts = relationship("VendorBankAccount", back_populates="vendor", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Vendor {self.business_name}>"

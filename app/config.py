@@ -161,12 +161,10 @@ class Settings(BaseSettings):
     CLOUDINARY_API_KEY: Optional[str] = None
     CLOUDINARY_API_SECRET: Optional[str] = None
 
-    # API_URL: str = "http://localhost:8000/api/v1"
-    API_URL: str = "https://api.burncost.com/api/v1"
+    API_URL: str = None
     
     LOG_LEVEL: str = "INFO"
-    # FRONTEND_URL: str = "http://localhost:5173"
-    FRONTEND_URL: str = "https://demo.burncost.com"
+    FRONTEND_URL: str = None
 
     RESEND_API_KEY: Optional[str]
 

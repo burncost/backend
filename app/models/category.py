@@ -28,6 +28,12 @@ class Category(Base):
     default_unit = Column(String(50))
     # Waste factor percentage for BOQ calculations (e.g., 5.00 = 5%)
     waste_factor = Column(Numeric(5, 2), default=0.00)
+    # Burncost platform margin percentage per category (e.g., 10.00 = 10%)
+    platform_margin = Column(Numeric(5, 2), default=5.00)
+    # Fee model: "percentage", "fixed", or "service"
+    fee_model = Column(String(20), default="percentage")
+    # Fixed fee amount in Naira (for fixed-fee categories like Cement at ₦200/bag)
+    fee_fixed = Column(Numeric(12, 2), default=None)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

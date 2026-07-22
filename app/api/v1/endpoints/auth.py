@@ -65,35 +65,41 @@ async def register(
         # Create user
         user = await user_crud.create(db, obj_in=user_in)
         
-        # Grant free signup tokens
+        # Capture values as plain strings BEFORE any more commits
+        # (grant_signup_tokens does 2 more commits which expires session state)
+        user_email = user.email
+        user_id = str(user.id)
+        full_name = user.profile.first_name if user and user.profile else user_in.email.split('@')[0]
+        user_role = user.role.value if user.role else "customer"
+        
+        # Grant free signup tokens (does 2 more commits)
         token_service = TokenService(db)
-        await token_service.grant_signup_tokens(str(user.id))
+        await token_service.grant_signup_tokens(user_id)
         
         # Send welcome and verification emails in background
         notification_service = NotificationService()
-        full_name = user.profile.first_name if user and user.profile else user_in.email.split('@')[0]
         
-        # Send welcome email
+        # Send welcome email (using pre-captured plain strings)
         background_tasks.add_task(
             notification_service.send_welcome_email,
-            email=user.email,
+            email=user_email,
             full_name=full_name,
-            role=user.role or "customer"
+            role=user_role
         )
         
         # Send verification email
         verification_token = create_access_token(
-            data={"sub": str(user.id), "type": "email_verification"},
+            data={"sub": user_id, "type": "email_verification"},
             expires_delta=timedelta(hours=48)
         )
         background_tasks.add_task(
             notification_service.send_verification_email,
-            email=user.email,
+            email=user_email,
             verification_token=verification_token,
             full_name=full_name
         )
         
-        logger.info(f"New user registered: {user.email}")
+        logger.info(f"New user registered: {user_email}")
         return user
         
     except IntegrityError as e:
@@ -157,8 +163,8 @@ async def login(
             detail="Account is deactivated. Please contact support to reactivate."
         )
     
-    # Only allow verified accounts to login
-    if user.status == "pending_verification":
+    # Only allow verified accounts to login (production only)
+    if not settings.DEBUG and user.status == "pending_verification":
         notification_service = NotificationService()
         full_name = user.profile.first_name if user and user.profile else user.email.split('@')[0]
         verification_token = create_access_token(

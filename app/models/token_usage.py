@@ -43,7 +43,7 @@ class TokenTransaction(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
 
-    transaction_type = Column(SAEnum(TransactionType), nullable=False)
+    transaction_type = Column(SAEnum(TransactionType, values_callable=lambda x: [e.value for e in x]), nullable=False)
     amount = Column(Integer, nullable=False)  # positive for purchase, negative for consumption
     balance_after = Column(Integer, nullable=False)
 

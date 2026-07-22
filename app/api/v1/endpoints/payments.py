@@ -10,8 +10,9 @@ import os
 from app.core.database import get_db
 from app.models.order import Order, OrderItem, PaymentStatus
 from app.models.product import Product
+from app.models.vendor import Vendor
 from app.models.notification import Notification
-from app.api.deps import get_current_user, get_current_admin
+from app.api.deps import get_current_user, get_current_admin, get_current_vendor
 from app.services.payment_service import PaymentService
 from app.services.notification_service import NotificationService
 
@@ -61,6 +62,103 @@ async def list_payments(
             }
             for o in orders
         ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size,
+    }
+
+
+### List payments for vendor's orders
+@router.get("/vendor")
+async def list_vendor_payments(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_vendor: dict = Depends(get_current_vendor),
+    db: AsyncSession = Depends(get_db)
+):
+    vendor_id = UUID(current_vendor["id"])
+
+    # Get orders that contain this vendor's products
+    order_id_subq = (
+        select(OrderItem.order_id)
+        .where(OrderItem.vendor_id == vendor_id)
+        .distinct()
+        .subquery()
+    )
+
+    count_query = select(func.count(Order.id)).where(
+        Order.id.in_(select(order_id_subq.c.order_id)),
+        Order.payment_status.isnot(None)
+    )
+    count_result = await db.execute(count_query)
+    total = count_result.scalar() or 0
+
+    query = (
+        select(Order)
+        .where(
+            Order.id.in_(select(order_id_subq.c.order_id)),
+            Order.payment_status.isnot(None)
+        )
+        .order_by(Order.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    result = await db.execute(query)
+    orders = result.scalars().all()
+
+    # Compute summary for vendor
+    # Fetch vendor's commission rate
+    vendor_result = await db.execute(select(Vendor).where(Vendor.id == vendor_id))
+    vendor = vendor_result.scalar_one_or_none()
+    commission_rate = float(vendor.commission_rate) / 100.0 if vendor else 0.10
+
+    # Fetch all order items for this vendor to compute actual vendor share
+    all_order_ids = select(OrderItem.order_id).where(OrderItem.vendor_id == vendor_id).distinct().subquery()
+    items_query = (
+        select(OrderItem, Order.payment_status)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(OrderItem.vendor_id == vendor_id, Order.payment_status.isnot(None))
+    )
+    items_result = await db.execute(items_query)
+    rows = items_result.all()
+
+    total_earned = 0.0
+    pending_balance = 0.0
+    next_payout_date = None
+
+    for item, payment_status in rows:
+        vendor_share = float(item.total_price) * (1 - commission_rate)
+        if payment_status == PaymentStatus.COMPLETED:
+            total_earned += vendor_share
+        else:
+            pending_balance += vendor_share
+
+    # Determine next payout date (first day of next month from now)
+    from datetime import timedelta
+    today = datetime.utcnow()
+    next_payout = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+    next_payout_date = next_payout.strftime("%Y-%m-%d")
+
+    return {
+        "payments": [
+            {
+                "id": str(o.id),
+                "reference": o.order_number,
+                "description": f"Order {o.order_number}",
+                "amount": float(o.total_amount),
+                "payment_status": o.payment_status.value if o.payment_status else "pending",
+                "payment_method": o.payment_method.value if o.payment_method else None,
+                "created_at": o.created_at.isoformat() if o.created_at else None,
+                "next_payout_date": (o.created_at.replace(day=1) if o.created_at else None),
+            }
+            for o in orders
+        ],
+        "summary": {
+            "total_earned": round(total_earned, 2),
+            "pending_balance": round(pending_balance, 2),
+            "next_payout_date": next_payout_date,
+        },
         "total": total,
         "page": page,
         "page_size": page_size,

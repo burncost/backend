@@ -150,32 +150,171 @@ async def get_dashboard_stats(
     }
 
 
+### Helper: parse period into timedelta
+def _period_days(period: str) -> int:
+    return {"7d": 7, "30d": 30, "90d": 90, "1y": 365}.get(period, 30)
+
+
 ### Sales analytics (vendor-facing)
 @router.get("/sales")
 async def get_sales_analytics(
     period: str = Query("30d", regex="^(7d|30d|90d|1y)$"),
-    current_user: dict = Depends(get_current_user),
+    current_vendor: dict = Depends(get_current_vendor),
     db: AsyncSession = Depends(get_db)
 ):
-    # This is a vendor-facing endpoint
-    # In production, this would filter by vendor_id and aggregate by date
-    # For now, return aggregate stats
+    vendor_id = UUID(current_vendor["id"])
+    since = datetime.utcnow() - timedelta(days=_period_days(period))
 
-    total_revenue_result = await db.execute(
-        select(func.sum(Order.total_amount)).where(Order.status == "delivered")
+    # Revenue from delivered orders for this vendor
+    revenue_result = await db.execute(
+        select(func.sum(OrderItem.total_price))
+        .select_from(OrderItem)
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(
+            OrderItem.vendor_id == vendor_id,
+            Order.status == "delivered",
+            Order.created_at >= since,
+        )
     )
-    total_revenue = float(total_revenue_result.scalar() or 0)
+    total_revenue = float(revenue_result.scalar() or 0)
 
-    total_orders_result = await db.execute(
-        select(func.count(Order.id))
+    # Total orders (all statuses) for this vendor in period
+    orders_result = await db.execute(
+        select(func.count(Order.id.distinct()))
+        .select_from(Order)
+        .join(OrderItem, OrderItem.order_id == Order.id)
+        .where(
+            OrderItem.vendor_id == vendor_id,
+            Order.created_at >= since,
+        )
     )
-    total_orders = total_orders_result.scalar() or 0
+    total_orders = orders_result.scalar() or 0
 
     return {
         "period": period,
         "total_revenue": total_revenue,
         "total_orders": total_orders,
         "average_order_value": round(total_revenue / total_orders, 2) if total_orders > 0 else 0,
+    }
+
+
+### Sales comparison (current period vs previous period)
+@router.get("/sales/compare")
+async def get_sales_comparison(
+    period: str = Query("30d", regex="^(7d|30d|90d|1y)$"),
+    current_vendor: dict = Depends(get_current_vendor),
+    db: AsyncSession = Depends(get_db)
+):
+    vendor_id = UUID(current_vendor["id"])
+    days = _period_days(period)
+    now = datetime.utcnow()
+
+    # Current period
+    current_start = now - timedelta(days=days)
+    # Previous period (same length, before current)
+    prev_start = current_start - timedelta(days=days)
+
+    async def _period_stats(since: datetime, until: datetime) -> dict:
+        rev_result = await db.execute(
+            select(func.sum(OrderItem.total_price))
+            .select_from(OrderItem)
+            .join(Order, OrderItem.order_id == Order.id)
+            .where(
+                OrderItem.vendor_id == vendor_id,
+                Order.status == "delivered",
+                Order.created_at >= since,
+                Order.created_at < until,
+            )
+        )
+        revenue = float(rev_result.scalar() or 0)
+
+        ord_result = await db.execute(
+            select(func.count(Order.id.distinct()))
+            .select_from(Order)
+            .join(OrderItem, OrderItem.order_id == Order.id)
+            .where(
+                OrderItem.vendor_id == vendor_id,
+                Order.created_at >= since,
+                Order.created_at < until,
+            )
+        )
+        total_orders = ord_result.scalar() or 0
+
+        pend_result = await db.execute(
+            select(func.count(Order.id.distinct()))
+            .select_from(Order)
+            .join(OrderItem, OrderItem.order_id == Order.id)
+            .where(
+                OrderItem.vendor_id == vendor_id,
+                Order.status.in_(["pending_payment", "pending", "confirmed"]),
+                Order.created_at >= since,
+                Order.created_at < until,
+            )
+        )
+        pending = pend_result.scalar() or 0
+
+        return {"revenue": revenue, "orders": total_orders, "pending": pending}
+
+    current = await _period_stats(current_start, now)
+    previous = await _period_stats(prev_start, current_start)
+
+    def pct_change(curr: float, prev: float) -> str:
+        if prev == 0:
+            return "+100%" if curr > 0 else "0%"
+        change = ((curr - prev) / prev) * 100
+        return f"{'+' if change >= 0 else ''}{change:.1f}%"
+
+    return {
+        "period": period,
+        "current": current,
+        "previous": previous,
+        "revenue_change": pct_change(current["revenue"], previous["revenue"]),
+        "orders_change": pct_change(current["orders"], previous["orders"]),
+        "pending_change": pct_change(current["pending"], previous["pending"]),
+    }
+
+
+### On-time delivery rate for vendor
+@router.get("/on-time-rate")
+async def get_on_time_delivery_rate(
+    current_vendor: dict = Depends(get_current_vendor),
+    db: AsyncSession = Depends(get_db)
+):
+    vendor_id = UUID(current_vendor["id"])
+
+    # Total delivered orders for this vendor
+    total_result = await db.execute(
+        select(func.count(Order.id.distinct()))
+        .select_from(Order)
+        .join(OrderItem, OrderItem.order_id == Order.id)
+        .where(
+            OrderItem.vendor_id == vendor_id,
+            Order.status == "delivered",
+        )
+    )
+    total_delivered = total_result.scalar() or 0
+
+    # On-time delivered (delivered_at <= estimated_delivery_date)
+    on_time_result = await db.execute(
+        select(func.count(Order.id.distinct()))
+        .select_from(Order)
+        .join(OrderItem, OrderItem.order_id == Order.id)
+        .where(
+            OrderItem.vendor_id == vendor_id,
+            Order.status == "delivered",
+            Order.delivered_at.isnot(None),
+            Order.estimated_delivery_date.isnot(None),
+            Order.delivered_at <= Order.estimated_delivery_date,
+        )
+    )
+    on_time = on_time_result.scalar() or 0
+
+    rate = round((on_time / total_delivered) * 100, 1) if total_delivered > 0 else 0
+
+    return {
+        "on_time_rate": rate,
+        "total_delivered": total_delivered,
+        "on_time_delivered": on_time,
     }
 
 

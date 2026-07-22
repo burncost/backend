@@ -155,7 +155,8 @@ async def create_product(
             vendor_id=UUID(current_vendor["id"])
         )
 
-        return Response(status_code=status.HTTP_201_CREATED)
+        # Return the created product data
+        return {"id": str(product.id), "name": product.name, "slug": product.slug}
 
     except HTTPException:
         raise
@@ -195,7 +196,7 @@ async def update_product(
                 detail="You don't have permission to update this product"
             )
         
-        update_data = product_in.dict(exclude_unset=True)
+        update_data = product_in.model_dump(exclude_unset=True)
         
         if not update_data:
             raise HTTPException(

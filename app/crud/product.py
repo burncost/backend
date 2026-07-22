@@ -66,6 +66,7 @@ class CRUDProduct(CRUDBase[Product, ProductCreate, ProductUpdate]):
         result = await db.execute(
             select(Category.id)
             .where(Category.name == name)
+            .where(Category.parent_id.is_(None))
         )
 
         return result.scalar_one_or_none()

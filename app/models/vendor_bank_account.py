@@ -20,7 +20,7 @@ class VendorBankAccount(Base):
     verified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    vendor = relationship("Vendor", backref="bank_accounts")
+    vendor = relationship("Vendor", back_populates="bank_accounts")
 
     def __repr__(self):
         return f"<VendorBankAccount {self.bank_name} - {self.account_number}>"

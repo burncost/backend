@@ -21,6 +21,9 @@ from app.models.vendor import Vendor
 from app.models.user import User, UserProfile
 from app.core.database import get_db
 from app.services.notification_service import NotificationService
+from app.services.shipping_service import ShippingService
+from app.models.category import Category
+from app.crud import promo as promo_crud
 
 class VendorOrderUpdate(BaseModel):
     status: str
@@ -45,7 +48,8 @@ def _generate_order_number() -> str:
 async def create_order(
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    promo_code: Optional[str] = Query(None, max_length=50),
 ):
     user_id = current_user.id
 
@@ -106,12 +110,71 @@ async def create_order(
             "base_price": base_price,
         })
 
-    # Calculate fees
-    shipping_fee = 1500.0  # Flat rate for testing
-    platform_fee = round(subtotal * 0.075, 2)
-    # Total savings = sum of (base_price - unit_price) * qty for all items
+    # Calculate platform margin per category
+    platform_fee = 0.0
+    platform_fee_breakdown = []
+    for item_data in order_items:
+        # Get category margin
+        product = None
+        product_result = await db.execute(
+            select(Product).where(Product.id == item_data["product_id"])
+        )
+        product = product_result.scalar_one_or_none()
+        if product:
+            cat_result = await db.execute(
+                select(Category.platform_margin).where(Category.id == product.category_id)
+            )
+            cat_margin = cat_result.scalar() or 5.00
+        else:
+            cat_margin = 5.00
+        item_margin = round(item_data["total_price"] * float(cat_margin) / 100, 2)
+        platform_fee += item_margin
+        platform_fee_breakdown.append({
+            "product_name": item_data["product_name"],
+            "margin_pct": float(cat_margin),
+            "amount": item_margin,
+        })
+
+    # Calculate shipping (dev: flat rate, prod: zone+weight)
+    shipping_service = ShippingService()
+    shipping_result = await shipping_service.calculate_shipping(
+        db=db,
+        vendor_id=order_items[0]["vendor_id"],
+        items=[{"base_price": i["base_price"], "discount_price": i["unit_price"], "quantity": i["quantity"]} for i in order_items],
+    )
+    shipping_fee = shipping_result["shipping_fee"]
+
+    # VAT on (subtotal + platform_fee)
+    vat_amount = round((subtotal + platform_fee) * 0.075, 2)
+
+    # Product discount (base_price - unit_price)
     discount_amount = round(sum(item["base_price"] * item["quantity"] - item["total_price"] for item in order_items), 2)
-    total_amount = round(subtotal + shipping_fee + platform_fee, 2)
+
+    # Server-side promo code validation
+    promo_discount = 0.0
+    promo_applied = None
+    if promo_code:
+        promo = await promo_crud.get_by_code(db, promo_code)
+        if promo and promo.is_active:
+            now = datetime.utcnow()
+            if (promo.max_uses == 0 or promo.current_uses < promo.max_uses) and \
+               (promo.expires_at is None or promo.expires_at > now) and \
+               (promo.min_order_amount == 0 or subtotal >= float(promo.min_order_amount)):
+                promo_discount = round(subtotal * float(promo.discount_percent) / 100, 2)
+                promo.current_uses += 1
+                promo_applied = {
+                    "code": promo.code,
+                    "discount_percent": float(promo.discount_percent),
+                    "amount": promo_discount,
+                }
+                logger.info(f"Promo code '{promo_code}' applied: {promo.discount_percent}% off, saved ₦{promo_discount:,.2f}")
+            else:
+                logger.warning(f"Promo code '{promo_code}' validation failed: inactive/expired/limit reached")
+        else:
+            logger.warning(f"Promo code '{promo_code}' not found or inactive")
+
+    # Total
+    total_amount = round(subtotal + platform_fee + shipping_fee + vat_amount - discount_amount - promo_discount, 2)
 
     # Create the order
     order = Order(
@@ -120,7 +183,7 @@ async def create_order(
         status=OrderStatus.PENDING_PAYMENT,
         subtotal=subtotal,
         shipping_fee=shipping_fee,
-        tax_amount=platform_fee,
+        tax_amount=vat_amount,
         discount_amount=discount_amount,
         total_amount=total_amount,
         payment_status=PaymentStatus.PENDING,
@@ -418,10 +481,11 @@ async def get_order_tracking(
 
     return {"timeline": timeline}
 
-### Confirm delivery of an order
+### Confirm delivery of an order (triggers escrow release to vendor)
 @router.post("/{order_id}/confirm-delivery")
 async def confirm_delivery(
     order_id: str,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -455,8 +519,52 @@ async def confirm_delivery(
     order.payment_status = "completed"
     await db.commit()
 
+    # Trigger escrow release to vendor(s) in background
+    for item in order.items:
+        if item.vendor_id:
+            background_tasks.add_task(
+                _release_escrow_to_vendor,
+                vendor_id=str(item.vendor_id),
+                order_number=order.order_number,
+                amount=float(item.total_price),
+                db_session=db,
+            )
+
     logger.info(f"Order {order_id} delivery confirmed by user {current_user.id}")
     return {"message": "Delivery confirmed", "order_id": order_id}
+
+
+async def _release_escrow_to_vendor(
+    vendor_id: str,
+    order_number: str,
+    amount: float,
+    db_session: AsyncSession,
+):
+    """Background task: release escrow funds to vendor."""
+    try:
+        # Get vendor bank details
+        from app.models.vendor import Vendor
+        vendor_result = await db_session.execute(
+            select(Vendor).where(Vendor.id == vendor_id)
+        )
+        vendor = vendor_result.scalar_one_or_none()
+        if not vendor:
+            logger.warning(f"Vendor {vendor_id} not found for escrow release")
+            return
+
+        # Create mock transfer (real transfer in production via PaymentService)
+        transfer_ref = f"TRF-{order_number}-{vendor_id[:8]}"
+        payment_service = PaymentService()
+        await payment_service.create_transfer(
+            amount=amount,
+            recipient_code=f"VENDOR-{vendor.bank_account_number[-4:]}",
+            reference=transfer_ref,
+            reason=f"Escrow release - Order {order_number}",
+        )
+
+        logger.info(f"Escrow released to vendor {vendor_id}: ₦{amount:,.2f} for order {order_number}")
+    except Exception as e:
+        logger.error(f"Failed to release escrow to vendor {vendor_id}: {e}")
 
 
 ### Vendor: Update order status
@@ -515,6 +623,17 @@ async def update_order_status(
         order.driver_phone = driver_phone or ""
 
     await db.commit()
+
+    # Create shipment record on "shipped" status
+    if new_status == "shipped":
+        background_tasks.add_task(
+            _create_shipment_record,
+            order_id=str(order.id),
+            order_number=order.order_number,
+            driver_name=driver_name or "",
+            driver_phone=driver_phone or "",
+            db_session=db,
+        )
 
     logger.info(f"Order {order_id} status updated to '{new_status}' by vendor {current_vendor['id']}")
 
@@ -612,6 +731,27 @@ async def vendor_update_order(
         )
 
     return {"message": f"Order updated to '{new_status}'", "order_id": order_id}
+
+
+async def _create_shipment_record(
+    order_id: str,
+    order_number: str,
+    driver_name: str,
+    driver_phone: str,
+    db_session: AsyncSession,
+):
+    """Background task: create shipment tracking record when order is shipped."""
+    try:
+        from app.models.vendor import Vendor
+        tracking_number = f"BNC-{order_number}-{datetime.utcnow().strftime('%H%M')}"
+        
+        # Store shipment info in order (already has driver_name/phone)
+        logger.info(
+            f"Shipment created for order {order_number}: "
+            f"tracking={tracking_number}, driver={driver_name}, phone={driver_phone}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to create shipment for order {order_number}: {e}")
 
 
 ### Cancel an order

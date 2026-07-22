@@ -16,7 +16,8 @@ class PaymentService:
         self.paystack_public_key = os.getenv("PAYSTACK_PUBLIC_KEY", "")
         self.flutterwave_secret_key = settings.FLUTTERWAVE_SECRET_KEY
         self.flutterwave_public_key = settings.FLUTTERWAVE_PUBLIC_KEY
-        self.mock_mode = settings.MOCK_PAYMENT_GATEWAY
+        # Dev: always mock; Prod: use real gateway if enabled
+        self.mock_mode = settings.DEBUG or settings.MOCK_PAYMENT_GATEWAY
 
     async def initialize_payment(
         self,

@@ -107,7 +107,7 @@ class TokenService:
             usage.free_tier_used_this_month += 1
             transaction = TokenTransaction(
                 user_id=user_id,
-                transaction_type=TransactionType.FREE_TIER,
+                transaction_type=TransactionType.FREE_TIER.value,
                 amount=0,
                 balance_after=usage.balance,
                 action_type=action_type,
@@ -127,7 +127,7 @@ class TokenService:
 
         transaction = TokenTransaction(
             user_id=user_id,
-            transaction_type=TransactionType.CONSUMPTION,
+            transaction_type=TransactionType.CONSUMPTION.value,
             amount=-cost,
             balance_after=usage.balance,
             action_type=action_type,
@@ -178,7 +178,7 @@ class TokenService:
 
         transaction = TokenTransaction(
             user_id=user_id,
-            transaction_type=TransactionType.PURCHASE,
+            transaction_type=TransactionType.PURCHASE.value,
             amount=tokens,
             balance_after=usage.balance,
             reference=reference,
@@ -198,7 +198,7 @@ class TokenService:
 
         transaction = TokenTransaction(
             user_id=user_id,
-            transaction_type=TransactionType.PURCHASE,
+            transaction_type=TransactionType.PURCHASE.value,
             amount=SIGNUP_FREE_TOKENS,
             balance_after=usage.balance,
             description=f"Free signup bonus: {SIGNUP_FREE_TOKENS} tokens",

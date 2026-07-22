@@ -11,21 +11,14 @@ import logging
 from app.config import settings
 from app.core.exceptions import CustomException
 from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
+from app.core.logging_config import setup_logging
+from app.core.audit_logger import setup_audit_logging
 from app.api.v1.router import api_router
 
 # Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+setup_logging(debug=settings.DEBUG, log_dir="logs")
+setup_audit_logging(log_dir="logs")
 logger = logging.getLogger(__name__)
-
-# control pyongo logging verbosity
-logging.getLogger('pymongo').setLevel(logging.WARNING)
-logging.getLogger('pymongo.topology').setLevel(logging.WARNING)
-logging.getLogger('pymongo.serverSelection').setLevel(logging.WARNING)
-logging.getLogger('pymongo.connection').setLevel(logging.WARNING)
 
 # Create FastAPI app
 app = FastAPI(

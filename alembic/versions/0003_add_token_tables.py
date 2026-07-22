@@ -32,20 +32,24 @@ def upgrade() -> None:
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), onupdate=sa.func.now()),
     )
 
-    # Create token_transactions table
-    op.create_table(
-        'token_transactions',
-        sa.Column('id', UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
-        sa.Column('user_id', UUID(as_uuid=True), sa.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True),
-        sa.Column('transaction_type', sa.Enum('purchase', 'consumption', 'refund', 'free_tier', 'expiry', name='transactiontype'), nullable=False),
-        sa.Column('amount', sa.Integer(), nullable=False),
-        sa.Column('balance_after', sa.Integer(), nullable=False),
-        sa.Column('action_type', sa.String(50), nullable=True),
-        sa.Column('boq_id', sa.String(50), nullable=True),
-        sa.Column('reference', sa.String(100), nullable=True),
-        sa.Column('description', sa.String(255), nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
-    )
+    # Create enum type if not exists
+    op.execute("DO $$ BEGIN CREATE TYPE transactiontype AS ENUM ('purchase', 'consumption', 'refund', 'free_tier', 'expiry'); EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+    
+    # Create token_transactions table (raw SQL to avoid enum auto-creation conflicts)
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS token_transactions (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            transaction_type transactiontype NOT NULL,
+            amount INTEGER NOT NULL,
+            balance_after INTEGER NOT NULL,
+            action_type VARCHAR(50),
+            boq_id VARCHAR(50),
+            reference VARCHAR(100),
+            description VARCHAR(255),
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
 
     # Create indexes (idempotent — IF NOT EXISTS)
     op.execute('CREATE INDEX IF NOT EXISTS ix_token_usage_user_id ON token_usage (user_id)')

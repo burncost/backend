@@ -1,13 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from uuid import UUID
 
 from app.core.database import get_db
 from app.models.vendor import Vendor
+from app.models.product import Product
+from app.models.category import Category
 from app.schemas.vendor import VendorResponse, VendorUpdate
 from app.api.deps import get_current_admin, get_current_vendor
+from pydantic import BaseModel
 
 import logging
 
@@ -16,8 +20,32 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class SupplierListItem(BaseModel):
+    id: str
+    business_name: str
+    business_type: str | None = None
+    business_address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    business_image: str | None = None
+    verification_status: str
+    commission_rate: float = 0.0
+    rating: float = 0.0
+    total_reviews: int = 0
+    total_sales: float = 0.0
+    is_featured: bool = False
+    delivery_time: str = "1-3 Days"
+    response_time: str = "< 1 hour"
+    specializations: list[str] = []
+    categories: list[str] = []
+    platform_margin: float = 5.0
+
+    class Config:
+        from_attributes = True
+
+
 ### List verified suppliers
-@router.get("/", response_model=List[VendorResponse])
+@router.get("/", response_model=list[SupplierListItem])
 async def list_suppliers(
     verified_only: bool = Query(True),
     search: Optional[str] = Query(None),
@@ -25,7 +53,7 @@ async def list_suppliers(
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db)
 ):
-    query = select(Vendor)
+    query = select(Vendor).options(selectinload(Vendor.products).selectinload(Product.category))
 
     if verified_only:
         query = query.where(Vendor.verification_status == "verified")
@@ -38,7 +66,43 @@ async def list_suppliers(
 
     result = await db.execute(query)
     suppliers = result.scalars().all()
-    return suppliers
+
+    # Build typed response with categories and platform margins derived from products
+    result_list = []
+    for s in suppliers:
+        cat_names = list(set(
+            p.category.name for p in s.products
+            if p.category and p.category.name
+        )) if s.products else []
+        # Calculate average platform margin from vendor's product categories
+        margins = [
+            float(p.category.platform_margin) for p in s.products
+            if p.category and p.category.platform_margin
+        ] if s.products else []
+        avg_margin = round(sum(margins) / len(margins), 2) if margins else 5.0
+
+        result_list.append(SupplierListItem(
+            id=str(s.id),
+            business_name=s.business_name,
+            business_type=s.business_type,
+            business_address=s.business_address,
+            city=s.city,
+            state=s.state,
+            business_image=s.business_image,
+            verification_status=s.verification_status,
+            commission_rate=float(s.commission_rate) if s.commission_rate else 0.0,
+            rating=float(s.rating) if s.rating else 0.0,
+            total_reviews=s.total_reviews or 0,
+            total_sales=float(s.total_sales) if s.total_sales else 0.0,
+            is_featured=s.is_featured or False,
+            delivery_time=s.delivery_time or "1-3 Days",
+            response_time=s.response_time or "< 1 hour",
+            specializations=s.specializations or [],
+            categories=cat_names,
+            platform_margin=avg_margin,
+        ))
+
+    return result_list
 
 
 ### Get supplier by ID

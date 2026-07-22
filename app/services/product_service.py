@@ -136,7 +136,7 @@ class ProductService:
 
     async def create_product(self, product_in: ProductCreate, vendor_id: UUID) -> Product:
         """Create a new product listing in the database."""
-        product_data = product_in.dict(exclude_unset=True)
+        product_data = product_in.model_dump(exclude_unset=True)
         product_data["vendor_id"] = vendor_id
         product_data["slug"] = self._generate_slug(product_data["name"])
 
@@ -187,7 +187,7 @@ class ProductService:
         if not product:
             return None
 
-        update_data = product_in.dict(exclude_unset=True)
+        update_data = product_in.model_dump(exclude_unset=True)
         for field, value in update_data.items():
             setattr(product, field, value)
 

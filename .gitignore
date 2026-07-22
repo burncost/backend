@@ -4,6 +4,7 @@
 .env.development
 .env.production
 .env.*.local
+.clineignore
 
 create_db.py
 google_creds.json
@@ -49,6 +50,9 @@ venv.bak/
 # Database
 *.db
 *.sqlite3
+
+# Logs
+logs/
 
 # Logs
 *.log
