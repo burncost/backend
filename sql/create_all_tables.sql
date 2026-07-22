@@ -453,7 +453,7 @@ CREATE INDEX IF NOT EXISTS ix_token_usage_user_id ON token_usage (user_id);
 -- =============================================================
 -- 23. TOKEN TRANSACTIONS
 -- =============================================================
-CREATE TYPE IF NOT EXISTS transactiontype AS ENUM ('purchase', 'consumption', 'refund', 'free_tier', 'expiry');
+CREATE TYPE transactiontype AS ENUM ('purchase', 'consumption', 'refund', 'free_tier', 'expiry');
 CREATE TABLE IF NOT EXISTS token_transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

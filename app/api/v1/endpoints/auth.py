@@ -221,7 +221,8 @@ async def login(
             value=access_token,
             httponly=True,
             secure=True,
-            samesite="Strict",
+            samesite="None",
+            # domain=".burncost.com", #return this when in production
             max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES*60,
             path="/"
         )
@@ -231,7 +232,8 @@ async def login(
             value=refresh_token,
             httponly=True,
             secure=True,
-            samesite="Strict",
+            samesite="None",
+            # domain=".burncost.com", #return this when in production
             max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES*60,
             path="/"
         )
