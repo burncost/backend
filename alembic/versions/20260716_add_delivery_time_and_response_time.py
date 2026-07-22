@@ -19,7 +19,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("vendors", sa.Column("response_time", sa.String(100), server_default="< 1 hour"))
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='vendors' AND column_name='response_time'
+            ) THEN
+                ALTER TABLE vendors ADD COLUMN response_time VARCHAR(100) DEFAULT '< 1 hour';
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:
