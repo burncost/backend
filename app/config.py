@@ -26,6 +26,7 @@ class Settings(BaseSettings):
         "https://burncost.com",
         "https://www.burncost.com",
         "https://demo.burncost.com",
+        "https://onboard.burncost.com"
     ]
     
     # PostgreSQL Database
