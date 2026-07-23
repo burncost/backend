@@ -65,7 +65,7 @@ class Settings(BaseSettings):
             return f"mongodb+srv://{self.MONGO_USER}:{self.MONGO_PASSWORD}@burncost.cpm6qy5.mongodb.net/{self.MONGO_DB}?retryWrites=true&w=majority"
         else:
             # return f"mongodb://{self.MONGO_USER}:{self.MONGO_PASSWORD}@{self.MONGO_HOST}:{self.MONGO_PORT}/{self.MONGO_DB}"
-            return f"mongodb://{self.MONGO_HOST}:{self.MONGO_PORT}"
+            return f"mongodb://{self.MONGO_HOST}:{self.MONGO_PORT}/"
     
     # Redis
     REDIS_HOST: str = "localhost"

@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, text
 from uuid import UUID
 from typing import Optional
+from datetime import datetime, timezone
+import asyncio
 
 from app.core.database import get_db
 from app.models.vendor import Vendor
@@ -19,6 +21,16 @@ import logging
 router = APIRouter()
 logger = logging.getLogger(__name__)
 auth_service = AuthService()
+
+# In-memory cache for CAC verification results (keyed by user_id string)
+_cac_cache: dict[str, dict] = {}
+
+def _is_cac_result_complete(result: dict) -> bool:
+    return bool(
+        result.get("business_name")
+        and result.get("tax_id")
+        and result.get("status")
+    )
 
 ### Onboard current user as a vendor
 @router.post("/onboard", response_model=VendorResponse, status_code=status.HTTP_201_CREATED)
@@ -55,15 +67,78 @@ async def onboard_vendor(
             )
         
     from app.config import settings
-    
-    # Dev: auto-verify for testing; Prod: require admin approval
-    ver_status = "verified" if settings.DEBUG else "pending"
-    
     from app.models.vendor_bank_account import VendorBankAccount
     
     # Use default commission from config or category default
     default_commission = getattr(settings, 'DEFAULT_VENDOR_COMMISSION', 10.00)
-    
+
+    # --- CAC auto-verification ---
+    user_id_str = str(current_user.id)
+    cac_data = _cac_cache.pop(user_id_str, None)  # Consume cached result
+
+    if not cac_data and vendor_in.cac_business_registration_number and not settings.DEBUG:
+        # Not pre-fetched; fetch fresh with retry
+        from app.tasks.cac_tasks import get_cac_business_info
+        for attempt in range(2):
+            cac_data = await asyncio.to_thread(get_cac_business_info, vendor_in.cac_business_registration_number)
+            if _is_cac_result_complete(cac_data):
+                break
+            if attempt == 0:
+                await asyncio.sleep(1.5)
+
+    verified = False
+    ver_status = "pending"
+    verification_notes = []
+    years_active = None
+
+    if settings.DEBUG:
+        ver_status = "verified"
+    elif cac_data:
+        # Hard check 1: tax_id must match
+        submitted_tin = (vendor_in.tax_identification_number or "").strip().replace("-", "").replace(" ", "")
+        cac_tin = (cac_data.get("tax_id") or "").strip()
+        tax_id_matches = bool(submitted_tin and cac_tin and submitted_tin == cac_tin)
+
+        # Hard check 2: status must be ACTIVE
+        status_active = (cac_data.get("status") or "").upper() == "ACTIVE"
+
+        # Soft check: business name similarity (logged, no penalty)
+        name_cac = (cac_data.get("business_name") or "").upper().strip()
+        name_input = (vendor_in.business_name or "").upper().strip()
+        name_similar = name_cac and name_input and (name_input in name_cac or name_cac in name_input)
+
+        # Soft check: years active
+        dor = cac_data.get("date_of_registration", "")
+        if dor:
+            try:
+                from dateutil.parser import parse as dateparse
+                reg_date = dateparse(dor).replace(tzinfo=None)
+                now = datetime.utcnow()
+                years_active = round((now - reg_date).days / 365.25, 1)
+            except Exception:
+                years_active = None
+
+        if tax_id_matches and status_active:
+            ver_status = "verified"
+            verified = True
+        else:
+            ver_status = "pending"
+            if not tax_id_matches:
+                verification_notes.append("Tax ID mismatch")
+            if not status_active:
+                verification_notes.append(f"CAC status is '{cac_data.get('status', 'unknown')}', not ACTIVE")
+
+        # Log soft check results
+        logger.info(
+            f"CAC verification for user {user_id_str}: "
+            f"tax_id_match={tax_id_matches}, status_active={status_active}, "
+            f"name_similar={name_similar}, years_active={years_active}, "
+            f"result={'verified' if verified else 'manual'}"
+        )
+    elif vendor_in.cac_business_registration_number:
+        verification_notes.append("CAC lookup returned incomplete data after retries")
+        logger.warning(f"CAC lookup incomplete for user {user_id_str}, RC={vendor_in.cac_business_registration_number}")
+
     # onboard vendor
     vendor = Vendor(
         user_id=current_user.id,
@@ -75,7 +150,8 @@ async def onboard_vendor(
         cac_business_registration_number=vendor_in.cac_business_registration_number,
         tax_identification_number=vendor_in.tax_identification_number,
         verification_status=ver_status,
-        commission_rate=default_commission
+        commission_rate=default_commission,
+        verification_date=datetime.now(timezone.utc) if verified else None,
     )
     db.add(vendor)
     await db.flush()  # Get vendor.id before creating bank account
@@ -420,3 +496,33 @@ async def upload_vendor_image(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to upload image. Please try again."
         )
+
+
+### Verify business via CAC — background pre-fetch endpoint
+@router.post("/verify-business")
+async def verify_business_cac(
+    rc_number: str = Query(..., min_length=1, max_length=20, description="CAC RC number (digits only)"),
+    current_user: dict = Depends(get_current_user),
+):
+    from app.tasks.cac_tasks import get_cac_business_info
+
+    user_id_str = str(current_user.id)
+
+    result: dict = {}
+    for attempt in range(2):
+        result = await asyncio.to_thread(get_cac_business_info, rc_number)
+        logger.info(f"CAC lookup attempt {attempt + 1} for RC={rc_number}: complete={_is_cac_result_complete(result)}")
+        if _is_cac_result_complete(result):
+            break
+        if attempt == 0:
+            # Brief delay before retry
+            await asyncio.sleep(1.5)
+
+    # Cache result for later use in /onboard
+    _cac_cache[user_id_str] = result
+
+    return {
+        "rc_number": rc_number,
+        "cac_data": result,
+        "complete": _is_cac_result_complete(result),
+    }

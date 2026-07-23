@@ -382,7 +382,7 @@ async def refresh_token(
             value=access_token,
             httponly=True,
             secure=True,
-            samesite="Strict",
+            samesite="None",
             max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES*60,
             path="/"
         )
@@ -392,7 +392,7 @@ async def refresh_token(
             value=new_refresh_token,
             httponly=True,
             secure=True,
-            samesite="Strict",
+            samesite="None",
             max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES*60,
             path="/"
         )
