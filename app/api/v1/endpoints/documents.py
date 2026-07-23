@@ -63,7 +63,7 @@ async def upload_document(
     
     # Check if user already has a vendor profile
     result = await db.execute(
-        select(Vendor).where(Vendor.user_id == current_user["id"])
+        select(Vendor).where(Vendor.user_id == current_user.id)
     )
     
     vendor = result.scalar_one_or_none()
@@ -145,7 +145,7 @@ async def upload_cad_document(
         file=file,
         project_id=project_id,
         document_category=document_category,
-        uploaded_by=current_user["id"]
+        uploaded_by=current_user.id
     )
     
     # Process document in background
