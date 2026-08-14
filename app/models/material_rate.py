@@ -29,7 +29,9 @@ class MaterialRate(Base):
     state = Column(String(100), index=True)
     lga = Column(String(100))
     supplier_id = Column(UUID(as_uuid=True), ForeignKey("vendors.id"))
-    trend = Column(SQLEnum(PriceTrend, native_enum=False, length=10), default=PriceTrend.STABLE)
+    trend = Column(SQLEnum(PriceTrend, native_enum=False, length=10,
+                           values_callable=lambda e: [m.value for m in e]),
+                   default=PriceTrend.STABLE)
     source = Column(String(50), default="manual")  # "manual", "api", "scraped"
     verified_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)

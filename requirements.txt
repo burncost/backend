@@ -52,6 +52,7 @@ PyPDF2
 pdfplumber
 pdf2image
 pymupdf
+reportlab
 
 # CAD Processing
 # ezdxf
@@ -74,7 +75,7 @@ pytz
 # selenium
 beautifulsoup4
 # webdriver-manager
-# fake-useragent
+fake-useragent
 playwright
 
 # Cloud & Analytics

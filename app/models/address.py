@@ -21,7 +21,8 @@ class CustomerAddress(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     address_type = Column(
-        SQLEnum(AddressType, native_enum=False, length=10),
+        SQLEnum(AddressType, native_enum=False, length=10,
+                values_callable=lambda e: [m.value for m in e]),
         default=AddressType.HOME
     )
     contact_name = Column(String(255))

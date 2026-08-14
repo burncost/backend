@@ -64,8 +64,10 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         profile = UserProfile(
             user_id=db_obj.id,
             first_name=obj_in.first_name,
+            other_name=obj_in.other_name,
             last_name=obj_in.last_name,
             business_name=obj_in.business_name,
+            location=obj_in.location,
         )
         db.add(profile)
         await db.commit()

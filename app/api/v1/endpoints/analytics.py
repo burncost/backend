@@ -338,8 +338,8 @@ async def get_top_products(
             "id": str(p.id),
             "name": p.name,
             "category": p.brand.name if p.brand else None,
-            "sales": p.sales_count,
-            "revenue": float(p.sales_count * (p.discount_price or p.base_price)),
+            "sales": p.sales_count or 0,
+            "revenue": float((p.sales_count or 0) * (p.discount_price or p.base_price)),
             "price": float(p.discount_price or p.base_price),
         }
         for p in products

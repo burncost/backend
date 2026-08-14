@@ -68,10 +68,13 @@ async def list_products(
     )
     
     product_service = ProductService(db)
+    # Public marketplace: only show products from VERIFIED vendors so a
+    # pending vendor's listings stay private (visible only via my-products).
     result = await product_service.list_products(
         filters=filters,
         page=page,
-        page_size=page_size
+        page_size=page_size,
+        only_verified=True
     )
     
     return result
@@ -115,12 +118,26 @@ async def get_product(
         vendor_name = vendor.business_name
         vendor_email = user.email
         vendor_location = profile.location if profile and profile.location else f"{vendor.city}, {vendor.state}"
-    
+    else:
+        # No vendor found for this product — treat as unavailable publicly.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found"
+        )
+
+    # Marketplace detail gate: only verified vendors' products are public, so a
+    # pending vendor's product URL stays hidden (they still see it via my-products).
+    if (vendor.verification_status or "") != "verified":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found"
+        )
+
     # Increment view count
     product_service = ProductService(db)
     await product_service.increment_view_count(product_id)
     
-    return {
+    return ProductService._coerce_product_dict({
         **product.__dict__,
         "category": category_name,
         "category_division": category_division,
@@ -129,7 +146,7 @@ async def get_product(
         "vendor_name": vendor_name,
         "vendor_email": vendor_email,
         "vendor_location": vendor_location,
-    }
+    })
 
 
 ### Create a new product (vendor only)

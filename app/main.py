@@ -10,7 +10,7 @@ import logging
 
 from app.config import settings
 from app.core.exceptions import CustomException
-from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
+from app.core.middleware import LoggingMiddleware, RateLimitMiddleware, AuditMiddleware
 from app.core.logging_config import setup_logging
 from app.core.audit_logger import setup_audit_logging
 from app.api.v1.router import api_router
@@ -42,6 +42,7 @@ app.add_middleware(
 # Middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(LoggingMiddleware)
+app.add_middleware(AuditMiddleware)
 # app.add_middleware(RateLimitMiddleware)
 
 
@@ -165,17 +166,27 @@ async def startup_event():
     logger.info("Starting up application...")
     
     # Test database connections
-    from app.core.database import test_db_connection, test_mongo_connection
+    from app.core.database import test_db_connection, test_mongo_connection, connect_to_mongo
     
     if not await test_db_connection():
         logger.error("PostgreSQL connection failed!")
     else:
         logger.info("PostgreSQL connected successfully")
     
+    await connect_to_mongo()
     if not await test_mongo_connection():
         logger.error("MongoDB connection failed!")
     else:
         logger.info("MongoDB connected successfully")
+
+    # Idempotent bootstrap: vendor verification tiers (table + columns + seed)
+    try:
+        from app.core.database import AsyncSessionLocal
+        from app.db.bootstrap_tiers import bootstrap_tiers
+        async with AsyncSessionLocal() as session:
+            await bootstrap_tiers(session)
+    except Exception as e:
+        logger.error(f"Vendor tiers bootstrap failed: {e}")
     
     logger.info("Application startup complete")
 
@@ -196,13 +207,36 @@ async def shutdown_event():
     logger.info("Application shutdown complete")
 
 
+async def _test_redis_connection() -> bool:
+    import redis.asyncio as airedis
+    from app.config import settings as _settings
+
+    if _settings.DEBUG:
+        client = airedis.Redis(host=_settings.REDIS_HOST, port=_settings.REDIS_PORT, db=_settings.REDIS_DB, decode_responses=True)
+    else:
+        client = airedis.from_url(_settings.REDIS_URL, ssl_cert_reqs=None, decode_responses=True)
+
+    try:
+        await client.ping()
+        return True
+    except Exception as e:
+        logger.error(f"Redis connection failed: {e}")
+        return False
+    finally:
+        await client.aclose()
+
+
 # Health Check Endpoints
 @app.get("/health", tags=["Health"])
 async def health_check():
+    redis_healthy = await _test_redis_connection()
     return {
-        "status": "healthy",
+        "status": "healthy" if redis_healthy else "degraded",
         "timestamp": time.time(),
-        "version": settings.VERSION
+        "version": settings.VERSION,
+        "services": {
+            "redis": "healthy" if redis_healthy else "unhealthy",
+        }
     }
 
 ### Detailed health check including database connections
@@ -212,15 +246,17 @@ async def detailed_health_check():
     
     postgres_healthy = await test_db_connection()
     mongo_healthy = await test_mongo_connection()
+    redis_healthy = await _test_redis_connection()
     
     return {
         "Project": settings.PROJECT_NAME,
-        "status": "healthy" if (postgres_healthy and mongo_healthy) else "degraded",
+        "status": "healthy" if (postgres_healthy and mongo_healthy and redis_healthy) else "degraded",
         "timestamp": time.time(),
         "version": settings.VERSION,
         "services": {
             "postgresql": "healthy" if postgres_healthy else "unhealthy",
             "mongodb": "healthy" if mongo_healthy else "unhealthy",
+            "redis": "healthy" if redis_healthy else "unhealthy",
         }
     }
 
@@ -243,7 +279,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=settings.UVIPORT,
+        port=settings.PORT,
         reload=settings.DEBUG,
         workers=4 if not settings.DEBUG else 1,
         log_level=settings.LOG_LEVEL.lower()

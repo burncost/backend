@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS vendors (
     cac_business_registration_number VARCHAR(100) UNIQUE,
     tax_identification_number VARCHAR(50),
     verification_status VARCHAR(20) DEFAULT 'pending',
+    verification_tier VARCHAR(20) NOT NULL DEFAULT 'cac_only',
+    transaction_volume NUMERIC(15,2) DEFAULT 0.00,
     verification_date TIMESTAMP,
     verified_by UUID REFERENCES users(id),
     commission_rate NUMERIC(5,2) DEFAULT 10.00,
@@ -160,11 +162,33 @@ CREATE TABLE IF NOT EXISTS vendor_documents (
     document_type VARCHAR(50) NOT NULL,
     document_url TEXT NOT NULL,
     uploaded_at TIMESTAMP DEFAULT NOW(),
-    verified BOOLEAN DEFAULT FALSE
+    verified BOOLEAN DEFAULT FALSE,
+    tier VARCHAR(20) DEFAULT 'cac_only',
+    review_status VARCHAR(20) DEFAULT 'pending',
+    reviewed_by UUID REFERENCES users(id),
+    reviewed_at TIMESTAMP
 );
 
 -- =============================================================
--- 9. VENDOR DRAFTS
+-- 9. VENDOR VERIFICATION TIERS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS vendor_verification_tiers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tier_code VARCHAR(20) UNIQUE NOT NULL,
+    display_name VARCHAR(50) NOT NULL,
+    sort_order INTEGER DEFAULT 1,
+    transaction_cap NUMERIC(16,2) NOT NULL DEFAULT 5000000,
+    commission_rate NUMERIC(5,2) NOT NULL DEFAULT 10.00,
+    required_document_types JSONB DEFAULT '[]'::jsonb,
+    requires_manual_review BOOLEAN DEFAULT FALSE,
+    perks JSONB DEFAULT '[]'::jsonb,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_vendor_verification_tiers_tier_code ON vendor_verification_tiers (tier_code);
+
+-- =============================================================
+-- 10. VENDOR DRAFTS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS vendor_drafts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -177,7 +201,7 @@ CREATE TABLE IF NOT EXISTS vendor_drafts (
 );
 
 -- =============================================================
--- 10. PRODUCTS
+-- 11. PRODUCTS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS products (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -226,7 +250,7 @@ CREATE INDEX IF NOT EXISTS ix_products_status ON products (status);
 CREATE INDEX IF NOT EXISTS ix_products_created_at ON products (created_at);
 
 -- =============================================================
--- 11. PRODUCT IMAGES
+-- 12. PRODUCT IMAGES
 -- =============================================================
 CREATE TABLE IF NOT EXISTS product_images (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -240,7 +264,7 @@ CREATE TABLE IF NOT EXISTS product_images (
 CREATE INDEX IF NOT EXISTS ix_product_images_product_id ON product_images (product_id);
 
 -- =============================================================
--- 12. PRODUCT SPECIFICATIONS
+-- 13. PRODUCT SPECIFICATIONS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS product_specifications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -252,7 +276,7 @@ CREATE TABLE IF NOT EXISTS product_specifications (
 CREATE INDEX IF NOT EXISTS ix_product_specifications_product_id ON product_specifications (product_id);
 
 -- =============================================================
--- 13. PRODUCT VARIANTS
+-- 14. PRODUCT VARIANTS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS product_variants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -267,7 +291,7 @@ CREATE TABLE IF NOT EXISTS product_variants (
 CREATE INDEX IF NOT EXISTS ix_product_variants_product_id ON product_variants (product_id);
 
 -- =============================================================
--- 14. PRODUCT REVIEWS
+-- 15. PRODUCT REVIEWS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS product_reviews (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -290,7 +314,7 @@ CREATE INDEX IF NOT EXISTS ix_product_reviews_product_id ON product_reviews (pro
 CREATE INDEX IF NOT EXISTS ix_product_reviews_user_id ON product_reviews (user_id);
 
 -- =============================================================
--- 15. CUSTOMER ADDRESSES
+-- 16. CUSTOMER ADDRESSES
 -- =============================================================
 CREATE TABLE IF NOT EXISTS customer_addresses (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -315,7 +339,7 @@ CREATE TABLE IF NOT EXISTS customer_addresses (
 CREATE INDEX IF NOT EXISTS ix_customer_addresses_user_id ON customer_addresses (user_id);
 
 -- =============================================================
--- 16. ORDERS
+-- 17. ORDERS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -346,7 +370,7 @@ CREATE INDEX IF NOT EXISTS ix_orders_status ON orders (status);
 CREATE INDEX IF NOT EXISTS ix_orders_created_at ON orders (created_at);
 
 -- =============================================================
--- 17. ORDER ITEMS
+-- 18. ORDER ITEMS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS order_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -367,7 +391,7 @@ CREATE INDEX IF NOT EXISTS ix_order_items_order_id ON order_items (order_id);
 CREATE INDEX IF NOT EXISTS ix_order_items_vendor_id ON order_items (vendor_id);
 
 -- =============================================================
--- 18. CART ITEMS
+-- 19. CART ITEMS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS cart_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -383,7 +407,7 @@ CREATE TABLE IF NOT EXISTS cart_items (
 CREATE INDEX IF NOT EXISTS ix_cart_items_user_id ON cart_items (user_id);
 
 -- =============================================================
--- 19. NOTIFICATIONS
+-- 20. NOTIFICATIONS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS notifications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -399,7 +423,7 @@ CREATE INDEX IF NOT EXISTS ix_notifications_read ON notifications (read);
 CREATE INDEX IF NOT EXISTS ix_notifications_created_at ON notifications (created_at);
 
 -- =============================================================
--- 20. MATERIAL RATES
+-- 21. MATERIAL RATES
 -- =============================================================
 CREATE TABLE IF NOT EXISTS material_rates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -423,7 +447,7 @@ CREATE INDEX IF NOT EXISTS ix_material_rates_category_id ON material_rates (cate
 CREATE INDEX IF NOT EXISTS ix_material_rates_state ON material_rates (state);
 
 -- =============================================================
--- 21. MATERIAL RATE HISTORY
+-- 22. MATERIAL RATE HISTORY
 -- =============================================================
 CREATE TABLE IF NOT EXISTS material_rate_history (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -435,7 +459,7 @@ CREATE TABLE IF NOT EXISTS material_rate_history (
 CREATE INDEX IF NOT EXISTS ix_material_rate_history_rate_id ON material_rate_history (rate_id);
 
 -- =============================================================
--- 22. TOKEN USAGE
+-- 23. TOKEN USAGE
 -- =============================================================
 CREATE TABLE IF NOT EXISTS token_usage (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -451,7 +475,7 @@ CREATE TABLE IF NOT EXISTS token_usage (
 CREATE INDEX IF NOT EXISTS ix_token_usage_user_id ON token_usage (user_id);
 
 -- =============================================================
--- 23. TOKEN TRANSACTIONS
+-- 24. TOKEN TRANSACTIONS
 -- =============================================================
 CREATE TYPE transactiontype AS ENUM ('purchase', 'consumption', 'refund', 'free_tier', 'expiry');
 CREATE TABLE IF NOT EXISTS token_transactions (
@@ -470,7 +494,7 @@ CREATE INDEX IF NOT EXISTS ix_token_transactions_user_id ON token_transactions (
 CREATE INDEX IF NOT EXISTS ix_token_transactions_created_at ON token_transactions (created_at);
 
 -- =============================================================
--- 24. PROMO CODES
+-- 25. PROMO CODES
 -- =============================================================
 CREATE TABLE IF NOT EXISTS promo_codes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -489,7 +513,7 @@ CREATE TABLE IF NOT EXISTS promo_codes (
 CREATE INDEX IF NOT EXISTS ix_promo_codes_code ON promo_codes (code);
 
 -- =============================================================
--- 25. DEMAND ALERTS
+-- 26. DEMAND ALERTS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS demand_alerts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -509,7 +533,7 @@ CREATE INDEX IF NOT EXISTS ix_demand_alerts_status ON demand_alerts (status);
 CREATE INDEX IF NOT EXISTS ix_demand_alerts_requested_by ON demand_alerts (requested_by);
 
 -- =============================================================
--- 26. SHIPPING ZONES
+-- 27. SHIPPING ZONES
 -- =============================================================
 CREATE TABLE IF NOT EXISTS shipping_zones (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -527,7 +551,7 @@ CREATE TABLE IF NOT EXISTS shipping_zones (
 );
 
 -- =============================================================
--- 27. SHIPPING ZONE MAPPINGS
+-- 28. SHIPPING ZONE MAPPINGS
 -- =============================================================
 CREATE TABLE IF NOT EXISTS shipping_zone_mappings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -539,7 +563,7 @@ CREATE TABLE IF NOT EXISTS shipping_zone_mappings (
 );
 
 -- =============================================================
--- 28. VENDOR SHIPPING OVERRIDES
+-- 29. VENDOR SHIPPING OVERRIDES
 -- =============================================================
 CREATE TABLE IF NOT EXISTS vendor_shipping_overrides (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -552,10 +576,136 @@ CREATE TABLE IF NOT EXISTS vendor_shipping_overrides (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- =============================================================
+-- 30. AUDIT LOGS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    action VARCHAR(100) NOT NULL,
+    resource_type VARCHAR(100),
+    resource_id VARCHAR(255),
+    method VARCHAR(10),
+    path VARCHAR(500),
+    status_code VARCHAR(10),
+    ip_address VARCHAR(45),
+    details TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_audit_logs_user_id ON audit_logs (user_id);
+CREATE INDEX IF NOT EXISTS ix_audit_logs_action ON audit_logs (action);
+CREATE INDEX IF NOT EXISTS ix_audit_logs_created_at ON audit_logs (created_at);
+
 -- Add deferred FK for product_reviews -> orders (orders created later)
 ALTER TABLE product_reviews
   ADD CONSTRAINT product_reviews_order_id_fkey
   FOREIGN KEY (order_id) REFERENCES orders(id);
+
+-- =============================================================
+-- LEGACY ENUM NORMALIZATION + CHECK CONSTRAINTS
+-- =============================================================
+-- Normalize any historical uppercase values in the VARCHAR-backed
+-- (non-native) enum columns, then enforce lowercase-valid values.
+-- The SQLAlchemy models expose these as enums whose allowed values
+-- are lowercase; stray uppercase values cause LookupError at read.
+
+-- 1) Normalize existing rows (safe no-op when no legacy rows exist)
+UPDATE products SET status = LOWER(status)
+WHERE status IS NOT NULL AND status <> LOWER(status);
+
+UPDATE orders SET status = LOWER(status)
+WHERE status IS NOT NULL AND status <> LOWER(status);
+
+UPDATE orders SET payment_status = LOWER(payment_status)
+WHERE payment_status IS NOT NULL AND payment_status <> LOWER(payment_status);
+
+UPDATE orders SET payment_method = LOWER(payment_method)
+WHERE payment_method IS NOT NULL AND payment_method <> LOWER(payment_method);
+
+UPDATE order_items SET vendor_status = LOWER(vendor_status)
+WHERE vendor_status IS NOT NULL AND vendor_status <> LOWER(vendor_status);
+
+UPDATE vendors SET verification_status = LOWER(verification_status)
+WHERE verification_status IS NOT NULL AND verification_status <> LOWER(verification_status);
+
+UPDATE customer_addresses SET address_type = LOWER(address_type)
+WHERE address_type IS NOT NULL AND address_type <> LOWER(address_type);
+
+UPDATE material_rates SET trend = LOWER(trend)
+WHERE trend IS NOT NULL AND trend <> LOWER(trend);
+
+-- 2) Enforce lowercase, valid enum values going forward
+ALTER TABLE products
+  ADD CONSTRAINT chk_products_status CHECK (
+    status IS NULL OR (
+      status IN ('draft','active','out_of_stock','discontinued','pending_approval')
+      AND status = LOWER(status)
+    )
+  );
+
+ALTER TABLE orders
+  ADD CONSTRAINT chk_orders_status CHECK (
+    status IS NULL OR (
+      status IN ('pending_payment','payment_failed','confirmed','processing',
+                 'ready_for_pickup','shipped','in_transit','delivered',
+                 'cancelled','refunded')
+      AND status = LOWER(status)
+    )
+  );
+
+ALTER TABLE orders
+  ADD CONSTRAINT chk_orders_payment_status CHECK (
+    payment_status IS NULL OR (
+      payment_status IN ('pending','completed','failed','refunded','partially_refunded')
+      AND payment_status = LOWER(payment_status)
+    )
+  );
+
+ALTER TABLE orders
+  ADD CONSTRAINT chk_orders_payment_method CHECK (
+    payment_method IS NULL OR (
+      payment_method IN ('card','bank_transfer','ussd','wallet','pay_on_delivery')
+      AND payment_method = LOWER(payment_method)
+    )
+  );
+
+ALTER TABLE order_items
+  ADD CONSTRAINT chk_order_items_vendor_status CHECK (
+    vendor_status IS NULL OR (
+      vendor_status IN ('pending_payment','payment_failed','confirmed','processing',
+                        'ready_for_pickup','shipped','in_transit','delivered',
+                        'cancelled','refunded')
+      AND vendor_status = LOWER(vendor_status)
+    )
+  );
+
+ALTER TABLE vendors
+  ADD CONSTRAINT chk_vendors_verification_status CHECK (
+    verification_status IS NULL OR (
+      verification_status IN ('pending','verified','rejected','suspended','deactivated')
+      AND verification_status = LOWER(verification_status)
+    )
+  );
+
+ALTER TABLE customer_addresses
+  ADD CONSTRAINT chk_customer_addresses_address_type CHECK (
+    address_type IS NULL OR (
+      address_type IN ('home','office','site','other')
+      AND address_type = LOWER(address_type)
+    )
+  );
+
+ALTER TABLE material_rates
+  ADD CONSTRAINT chk_material_rates_trend CHECK (
+    trend IS NULL OR (
+      trend IN ('up','down','stable')
+      AND trend = LOWER(trend)
+    )
+  );
+
+-- NOTE: users.role, users.status, token_transactions.transaction_type are
+-- native PG ENUM columns; Postgres rejects invalid casing at insert, so
+-- they need no CHECK constraint.
 
 -- =============================================================
 -- DONE

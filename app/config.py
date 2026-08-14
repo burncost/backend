@@ -22,11 +22,14 @@ class Settings(BaseSettings):
     # CORS
     ALLOWED_ORIGINS: List[str] = [
         "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
         "http://localhost:8000",
         "https://burncost.com",
         "https://www.burncost.com",
         "https://demo.burncost.com",
-        "https://onboard.burncost.com"
+        "https://onboard.burncost.com",
+        "https://admin.burncost.com"
     ]
     
     # PostgreSQL Database
@@ -65,7 +68,7 @@ class Settings(BaseSettings):
             return f"mongodb+srv://{self.MONGO_USER}:{self.MONGO_PASSWORD}@burncost.cpm6qy5.mongodb.net/{self.MONGO_DB}?retryWrites=true&w=majority"
         else:
             # return f"mongodb://{self.MONGO_USER}:{self.MONGO_PASSWORD}@{self.MONGO_HOST}:{self.MONGO_PORT}/{self.MONGO_DB}"
-            return f"mongodb://{self.MONGO_HOST}:{self.MONGO_PORT}/"
+            return f"mongodb://{self.MONGO_HOST}:{self.MONGO_PORT}/{self.MONGO_DB}"
     
     # Redis
     REDIS_HOST: str = "localhost"

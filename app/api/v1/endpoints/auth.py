@@ -316,9 +316,20 @@ async def login(
 async def refresh_token(
     request: Request,
     response: Response,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    token_data: TokenRefresh = Body(default=None)
 ):
-    refresh_token = request.cookies.get("refresh_token")
+    # Accept refresh token from (highest→lowest priority): Bearer header, JSON body, or cookie.
+    # This fixes cross-origin flows (dev frontend :5173 → API :8000) where Lax/secure=False
+    # cookies are blocked by browsers. The token is always also returned in the login body.
+    refresh_token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        refresh_token = auth_header[7:]
+    if not refresh_token and token_data and token_data.refresh_token:
+        refresh_token = token_data.refresh_token
+    if not refresh_token:
+        refresh_token = request.cookies.get("refresh_token")
 
     if not refresh_token:
         raise HTTPException(
@@ -416,7 +427,16 @@ async def refresh_token(
             max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES*60,
             path="/"
         )
-    return {"status":"refreshed"}
+
+    # Return the new tokens in the body so cross-origin clients can capture
+    # and reuse them (dev cookies are Lax/secure=False and are blocked cross-site).
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "role": role,
+    }
 
 ### Verify user email with token
 @router.get("/verify-email")

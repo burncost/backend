@@ -103,4 +103,45 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable):
         response = await call_next(request)
         return response
+
+
+# Persist business-critical writes to the audit_logs DB table.
+# Runs after the response; failures are logged but never break the request.
+class AuditMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: Callable):
+        response = await call_next(request)
+
+        # Only record state-changing, successful requests
+        if request.method in ("GET", "HEAD", "OPTIONS") or response.status_code >= 400:
+            return response
+
+        try:
+            user_id = None
+            auth_header = request.headers.get("authorization", "")
+            if auth_header.startswith("Bearer "):
+                from app.core.security import decode_token
+                payload = decode_token(auth_header[7:])
+                user_id = payload.get("sub")
+
+            from app.models.audit_log import AuditLog
+            from app.core.database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as session:
+                entry = AuditLog(
+                    user_id=user_id,
+                    action=f"{request.method.lower()}.{request.url.path}",
+                    resource_type=None,
+                    resource_id=None,
+                    method=request.method,
+                    path=request.url.path,
+                    status_code=str(response.status_code),
+                    ip_address=request.client.host if request.client else None,
+                    details=None,
+                )
+                session.add(entry)
+                await session.commit()
+        except Exception:
+            logger.warning("Audit write failed", exc_info=True)
+
+        return response
     

@@ -68,6 +68,49 @@ async def get_current_vendor(
     return {"id": str(vendor.id), "user_id": str(current_user.id), "business_name": vendor.business_name}
 
 
+### Get current vendor that is verified (admins always allowed; blocks
+### transaction endpoints for unverified suppliers so they can upload and
+### explore but not transact until approved).
+async def get_current_verified_vendor(
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    if current_user.role not in ["vendor", "admin", "super_admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is not a vendor. Please register as a vendor first."
+        )
+
+    # Admins bypass the verification gate
+    if current_user.role in ["admin", "super_admin"]:
+        result = await db.execute(
+            select(Vendor).where(Vendor.user_id == current_user.id)
+        )
+        vendor = result.scalar_one_or_none()
+        if not vendor:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Vendor profile not found. Please complete vendor registration."
+            )
+        return {"id": str(vendor.id), "user_id": str(current_user.id), "business_name": vendor.business_name}
+
+    result = await db.execute(
+        select(Vendor).where(Vendor.user_id == current_user.id)
+    )
+    vendor = result.scalar_one_or_none()
+    if not vendor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vendor profile not found. Please complete vendor registration."
+        )
+    if vendor.verification_status != "verified":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Supplier not verified — you can upload products and explore, but cannot transact until your application is approved."
+        )
+    return {"id": str(vendor.id), "user_id": str(current_user.id), "business_name": vendor.business_name}
+
+
 ### Get current admin user
 async def get_current_admin(
     current_user = Depends(get_current_user)
@@ -78,3 +121,20 @@ async def get_current_admin(
             detail="User is not an admin"
         )
     return current_user
+
+
+### RBAC guard factory - require one of the given roles (admin & super_admin always allowed)
+def require_roles(*roles: str):
+    allowed = set(roles) | {"admin", "super_admin"}
+
+    async def role_checker(
+        current_user = Depends(get_current_user)
+    ):
+        if current_user.role not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permissions for this action"
+            )
+        return current_user
+
+    return role_checker

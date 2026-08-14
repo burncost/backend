@@ -13,6 +13,9 @@ class UserRole(str, enum.Enum):
     VENDOR = "vendor"
     ADMIN = "admin"
     SUPER_ADMIN = "super_admin"
+    MANAGER = "manager"
+    SUPPORT = "support"
+    MARKETING = "marketing"
 
 
 class UserStatus(str, enum.Enum):

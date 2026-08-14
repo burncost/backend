@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, text
 from uuid import UUID
@@ -17,6 +17,7 @@ from app.schemas.vendor_draft import VendorDraftSave, VendorDraftResponse
 from app.api.deps import get_current_user
 from app.services.auth_service import AuthService
 import logging
+import json
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -32,10 +33,99 @@ def _is_cac_result_complete(result: dict) -> bool:
         and result.get("status")
     )
 
+
+async def _auto_verify_vendor_background(
+    vendor_id: str,
+    rc_number: str,
+    submitted_tin: str,
+) -> None:
+    """Run CAC auto-verification after onboarding has committed.
+
+    Flips the same vendor row from `pending` → `verified` when the CAC
+    lookup succeeds and the submitted TIN matches the CAC record with an
+    ACTIVE status. If anything fails, the vendor stays `pending` for admin
+    review (handled by the admin Approve/Reject UI).
+    """
+    from app.core.database import AsyncSessionLocal
+    from app.tasks.cac_tasks import get_cac_business_info
+
+    try:
+        async with AsyncSessionLocal() as db:
+            for attempt in range(2):
+                cac_data = await asyncio.to_thread(get_cac_business_info, rc_number)
+                logger.info(
+                    f"[auto-verify] attempt {attempt + 1} RC={rc_number}: "
+                    f"complete={_is_cac_result_complete(cac_data)}"
+                )
+                if _is_cac_result_complete(cac_data):
+                    break
+                if attempt == 0:
+                    await asyncio.sleep(1.5)
+
+            if not _is_cac_result_complete(cac_data):
+                logger.warning(f"[auto-verify] incomplete CAC data for RC={rc_number}; staying pending")
+                return
+
+            submitted_tin_norm = submitted_tin.strip().replace("-", "").replace(" ", "")
+            cac_tin = (cac_data.get("tax_id") or "").strip()
+            tax_id_matches = bool(submitted_tin_norm and cac_tin and submitted_tin_norm == cac_tin)
+            status_active = (cac_data.get("status") or "").upper() == "ACTIVE"
+
+            if not (tax_id_matches and status_active):
+                logger.info(
+                    f"[auto-verify] vendor {vendor_id} did not pass auto-verification "
+                    f"(tax_match={tax_id_matches}, active={status_active}); staying pending"
+                )
+                return
+
+            # Reload the vendor (it may have been admin-modified meanwhile)
+            result = await db.execute(select(Vendor).where(Vendor.id == UUID(vendor_id)))
+            vendor = result.scalar_one_or_none()
+            if not vendor:
+                logger.warning(f"[auto-verify] vendor {vendor_id} not found; skipping")
+                return
+            if vendor.verification_status != "pending":
+                return  # Already approved/rejected/deactivated by an admin
+
+            vendor.verification_status = "verified"
+            vendor.verification_date = datetime.now(timezone.utc).replace(tzinfo=None)
+            await db.commit()
+
+            # Notify the vendor that they're verified
+            vendor_user_id = vendor.user_id
+            try:
+                db.add(Notification(
+                    user_id=vendor_user_id,
+                    type="verification",
+                    title="You're verified!",
+                    message="Congratulations! Your supplier account has been verified and is now live on the marketplace.",
+                    read=False,
+                ))
+                await db.commit()
+            except Exception as e:
+                logger.error(f"[auto-verify] failed to notify vendor {vendor_id}: {e}")
+
+            admin_result = await db.execute(select(User).where(User.role.in_(["admin", "super_admin"])))
+            for admin in admin_result.scalars().all():
+                db.add(Notification(
+                    user_id=admin.id,
+                    type="verification",
+                    title="Supplier auto-verified",
+                    message=f"Supplier '{vendor.business_name}' was auto-verified via CAC.",
+                    read=False,
+                ))
+            await db.commit()
+
+            logger.info(f"[auto-verify] vendor {vendor_id} auto-verified successfully")
+    except Exception as e:
+        logger.error(f"[auto-verify] unexpected error for vendor {vendor_id}: {e}")
+
+
 ### Onboard current user as a vendor
 @router.post("/onboard", response_model=VendorResponse, status_code=status.HTTP_201_CREATED)
 async def onboard_vendor(
     vendor_in: VendorCreate,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -72,73 +162,24 @@ async def onboard_vendor(
     # Use default commission from config or category default
     default_commission = getattr(settings, 'DEFAULT_VENDOR_COMMISSION', 10.00)
 
-    # --- CAC auto-verification ---
+    # --- Onboard fast: write the vendor immediately. No blocking CAC lookup
+    # inside the request (so the user is never stuck). If a CAC result was
+    # pre-fetched via /verify-business, we can verify instantly here; otherwise
+    # the vendor starts as pending and auto-verification runs in the background.
     user_id_str = str(current_user.id)
-    cac_data = _cac_cache.pop(user_id_str, None)  # Consume cached result
-
-    if not cac_data and vendor_in.cac_business_registration_number and not settings.DEBUG:
-        # Not pre-fetched; fetch fresh with retry
-        from app.tasks.cac_tasks import get_cac_business_info
-        for attempt in range(2):
-            cac_data = await asyncio.to_thread(get_cac_business_info, vendor_in.cac_business_registration_number)
-            if _is_cac_result_complete(cac_data):
-                break
-            if attempt == 0:
-                await asyncio.sleep(1.5)
+    cac_data = _cac_cache.pop(user_id_str, None)  # Consume cached result (may be None)
 
     verified = False
     ver_status = "pending"
-    verification_notes = []
-    years_active = None
 
-    if settings.DEBUG:
-        ver_status = "verified"
-    elif cac_data:
-        # Hard check 1: tax_id must match
-        submitted_tin = (vendor_in.tax_identification_number or "").strip().replace("-", "").replace(" ", "")
-        cac_tin = (cac_data.get("tax_id") or "").strip()
-        tax_id_matches = bool(submitted_tin and cac_tin and submitted_tin == cac_tin)
-
-        # Hard check 2: status must be ACTIVE
-        status_active = (cac_data.get("status") or "").upper() == "ACTIVE"
-
-        # Soft check: business name similarity (logged, no penalty)
-        name_cac = (cac_data.get("business_name") or "").upper().strip()
-        name_input = (vendor_in.business_name or "").upper().strip()
-        name_similar = name_cac and name_input and (name_input in name_cac or name_cac in name_input)
-
-        # Soft check: years active
-        dor = cac_data.get("date_of_registration", "")
-        if dor:
-            try:
-                from dateutil.parser import parse as dateparse
-                reg_date = dateparse(dor).replace(tzinfo=None)
-                now = datetime.utcnow()
-                years_active = round((now - reg_date).days / 365.25, 1)
-            except Exception:
-                years_active = None
-
-        if tax_id_matches and status_active:
-            ver_status = "verified"
-            verified = True
-        else:
-            ver_status = "pending"
-            if not tax_id_matches:
-                verification_notes.append("Tax ID mismatch")
-            if not status_active:
-                verification_notes.append(f"CAC status is '{cac_data.get('status', 'unknown')}', not ACTIVE")
-
-        # Log soft check results
-        logger.info(
-            f"CAC verification for user {user_id_str}: "
-            f"tax_id_match={tax_id_matches}, status_active={status_active}, "
-            f"name_similar={name_similar}, years_active={years_active}, "
-            f"result={'verified' if verified else 'manual'}"
-        )
-    elif vendor_in.cac_business_registration_number:
-        verification_notes.append("CAC lookup returned incomplete data after retries")
-        logger.warning(f"CAC lookup incomplete for user {user_id_str}, RC={vendor_in.cac_business_registration_number}")
-
+    # Always start as pending. The background task (_auto_verify_vendor_background)
+    # will flip to verified when the CAC lookup succeeds and the TIN matches.
+    # The instant-verify fast path has been removed so that the background task
+    # runs in all environments and the vendor row transitions pending → verified.
+    # if settings.DEBUG:
+    #     ver_status = "verified"
+    #     verified = True
+    
     # onboard vendor
     vendor = Vendor(
         user_id=current_user.id,
@@ -151,7 +192,7 @@ async def onboard_vendor(
         tax_identification_number=vendor_in.tax_identification_number,
         verification_status=ver_status,
         commission_rate=default_commission,
-        verification_date=datetime.now(timezone.utc) if verified else None,
+        verification_date=datetime.now(timezone.utc).replace(tzinfo=None) if verified else None,
     )
     db.add(vendor)
     await db.flush()  # Get vendor.id before creating bank account
@@ -187,6 +228,37 @@ async def onboard_vendor(
     await db.refresh(vendor)
     
     logger.info(f"User {current_user.id} registered as vendor: {vendor.business_name}")
+    
+    # Notify admins of a new vendor application pending verification so it
+    # surfaces in their review queue (works in both dev & production).
+    if ver_status == "pending":
+        try:
+            admin_result = await db.execute(
+                select(User).where(User.role.in_(["admin", "super_admin"]))
+            )
+            admins = admin_result.scalars().all()
+            for admin in admins:
+                db.add(Notification(
+                    user_id=admin.id,
+                    type="vendor_verification",
+                    title="New supplier application awaiting verification",
+                    message=f"New supplier '{vendor.business_name}' has submitted an application and needs verification.",
+                    read=False,
+                ))
+            await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to notify admins of new vendor {vendor.id}: {e}")
+    
+    # Auto-verify in the background so the user is never stuck on a
+    # verification window. If the auto-check eventually passes, this task
+    # flips the same vendor row from pending → verified (self-healing).
+    if ver_status == "pending" and vendor_in.cac_business_registration_number and not settings.DEBUG:
+        background_tasks.add_task(
+            _auto_verify_vendor_background,
+            vendor_id=str(vendor.id),
+            rc_number=vendor_in.cac_business_registration_number,
+            submitted_tin=vendor_in.tax_identification_number or "",
+        )
     
     return vendor
 
@@ -264,6 +336,22 @@ async def get_vendor_status(
             detail="Vendor profile not found. Please register as a vendor first."
         )
 
+    # Tier + cap metadata for the dashboard banner
+    from app.models.vendor_verification_tier import VendorVerificationTier
+    tiers_res = await db.execute(
+        select(VendorVerificationTier)
+        .where(VendorVerificationTier.is_active.is_(True))
+        .order_by(VendorVerificationTier.sort_order)
+    )
+    tiers = tiers_res.scalars().all()
+    current_tier = next((t for t in tiers if t.tier_code == vendor.verification_tier), None)
+    trans_cap = float(current_tier.transaction_cap) if current_tier else 5_000_000.0
+    volume = float(vendor.transaction_volume or 0)
+    volume_pct = round((volume / trans_cap) * 100, 1) if trans_cap else 0
+
+    current_rank = current_tier.sort_order if current_tier else 1
+    next_tier = next((t for t in tiers if t.sort_order > current_rank), None)
+
     return {
         "verification_status": vendor.verification_status,
         "verification_date": vendor.verification_date.isoformat() if vendor.verification_date else None,
@@ -271,6 +359,18 @@ async def get_vendor_status(
         "total_reviews": vendor.total_reviews or 0,
         "total_sales": float(vendor.total_sales) if vendor.total_sales else 0,
         "is_featured": vendor.is_featured or False,
+        "tier": vendor.verification_tier,
+        "tier_name": current_tier.display_name if current_tier else vendor.verification_tier,
+        "transaction_cap": trans_cap,
+        "transaction_volume": volume,
+        "volume_pct": volume_pct,
+        "next_tier": {
+            "tier_code": next_tier.tier_code,
+            "display_name": next_tier.display_name,
+            "transaction_cap": float(next_tier.transaction_cap),
+            "commission_rate": float(next_tier.commission_rate),
+            "perks": next_tier.perks or [],
+        } if next_tier else None,
     }
 
 ### Get demand alerts for vendor (products out of stock that customers want)
@@ -416,7 +516,6 @@ async def delete_vendor_draft(
     if draft:
         await db.delete(draft)
         await db.commit()
-
 
 ### Deactivate vendor account
 @router.put("/me/deactivate")

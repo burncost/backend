@@ -44,7 +44,8 @@ class Order(Base):
     order_number = Column(String(50), unique=True, nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     status = Column(
-        SQLEnum(OrderStatus, native_enum=False, length=20),
+        SQLEnum(OrderStatus, native_enum=False, length=20,
+                values_callable=lambda e: [m.value for m in e]),
         default=OrderStatus.PENDING_PAYMENT,
         index=True
     )
@@ -56,11 +57,13 @@ class Order(Base):
     discount_amount = Column(Numeric(15, 2), default=0.00)
     total_amount = Column(Numeric(15, 2), nullable=False)
     payment_status = Column(
-        SQLEnum(PaymentStatus, native_enum=False, length=25),
+        SQLEnum(PaymentStatus, native_enum=False, length=25,
+                values_callable=lambda e: [m.value for m in e]),
         default=PaymentStatus.PENDING
     )
     payment_method = Column(
-        SQLEnum(PaymentMethod, native_enum=False, length=20)
+        SQLEnum(PaymentMethod, native_enum=False, length=20,
+                values_callable=lambda e: [m.value for m in e])
     )
     customer_notes = Column(Text)
     admin_notes = Column(Text)
@@ -99,7 +102,8 @@ class OrderItem(Base):
     unit_price = Column(Numeric(15, 2), nullable=False)
     total_price = Column(Numeric(15, 2), nullable=False)
     vendor_status = Column(
-        SQLEnum(OrderStatus, native_enum=False, length=20),
+        SQLEnum(OrderStatus, native_enum=False, length=20,
+                values_callable=lambda e: [m.value for m in e]),
         default=OrderStatus.CONFIRMED
     )
     vendor_notes = Column(Text)

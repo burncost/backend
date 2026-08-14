@@ -1,4 +1,5 @@
 from app.models.user import User, UserProfile
+from app.models.audit_log import AuditLog
 from app.models.vendor import Vendor
 from app.models.vendor_address import VendorAddress
 from app.models.vendor_bank_account import VendorBankAccount
@@ -17,10 +18,12 @@ from app.models.demand_alert import DemandAlert
 from app.models.shipping_zone import ShippingZone, ShippingZoneMapping
 from app.models.vendor_shipping_override import VendorShippingOverride
 from app.models.vendor_draft import VendorDraft
+from app.models.vendor_verification_tier import VendorVerificationTier
 
 __all__ = [
     "User",
     "UserProfile",
+    "AuditLog",
     "Vendor",
     "VendorAddress",
     "VendorBankAccount",
@@ -47,4 +50,5 @@ __all__ = [
     "ShippingZoneMapping",
     "VendorShippingOverride",
     "VendorDraft",
+    "VendorVerificationTier",
 ]

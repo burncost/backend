@@ -10,6 +10,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from json_repair import repair_json
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.schemas.boq import BOQGenerationRequest
 from app.services.mitm_engine import MITMEngine
 from app.services.price_service import PriceService
@@ -21,12 +23,17 @@ logger = logging.getLogger(__name__)
 class BOQGenerator:
     """Service for generating Bills of Quantities from building parameters."""
 
-    def __init__(self, db: Optional[AsyncIOMotorDatabase] = None):
+    def __init__(
+        self,
+        db: Optional[AsyncIOMotorDatabase] = None,
+        pg_db: Optional[AsyncSession] = None,
+    ):
         self.db = db
+        self.pg_db = pg_db
         self.api_key = os.getenv("AI_SERVICE_API_KEY", "")
         self.api_url = os.getenv("AI_SERVICE_URL", "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent")
-        self.mitm = MITMEngine(PriceService(mongo_db=db))
-        self.price_service = PriceService(mongo_db=db)
+        self.mitm = MITMEngine(PriceService(mongo_db=db, pg_db=pg_db))
+        self.price_service = PriceService(mongo_db=db, pg_db=pg_db)
 
     async def create_boq(
         self,

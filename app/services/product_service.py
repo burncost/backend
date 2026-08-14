@@ -12,6 +12,7 @@ from sqlalchemy.orm import joinedload
 from app.models.product import Product, ProductImage
 from app.models.category import Category
 from app.models.brand import Brand
+from app.models.vendor import Vendor
 from app.schemas.product import ProductCreate, ProductUpdate, ProductFilter, ProductResponse
 from app.crud import product as product_crud
 
@@ -24,13 +25,37 @@ class ProductService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    @staticmethod
+    def _coerce_product_dict(product_dict: dict) -> dict:
+        """Fill None scalar fields with documented defaults so the API
+        response schema (non-nullable int/bool/Decimal) never fails.
+
+        ORM Python-side defaults only apply when rows are inserted through
+        SQLAlchemy; rows seeded via raw SQL can leave these columns NULL.
+        """
+        for f in ("minimum_order_quantity", "view_count", "sales_count", "quantity", "review_count"):
+            if product_dict.get(f) is None:
+                product_dict[f] = 1 if f == "minimum_order_quantity" else 0
+        if product_dict.get("rating") is None:
+            product_dict["rating"] = 0
+        for f in ("is_featured", "is_verified"):
+            if product_dict.get(f) is None:
+                product_dict[f] = False
+        return product_dict
+
     async def list_products(
         self,
         filters: ProductFilter,
         page: int = 1,
-        page_size: int = 20
+        page_size: int = 20,
+        only_verified: bool = False
     ) -> Dict[str, Any]:
-        """Get products with filtering, search, and pagination using real DB queries."""
+        """Get products with filtering, search, and pagination using real DB queries.
+
+        When `only_verified=True`, only products belonging to VERIFIED vendors are
+        returned — this is used by the public marketplace so that a pending vendor's
+        products stay private (visible only to the vendor themselves via my-products).
+        """
         query = select(
             Product, Category.name, Category.division, Category.material_type, Brand.name
         ).join(
@@ -38,6 +63,12 @@ class ProductService:
         ).outerjoin(
             Brand, Product.brand_id == Brand.id
         )
+
+        # Marketplace gate: only surface products from verified vendors.
+        if only_verified:
+            query = query.join(Vendor, Vendor.id == Product.vendor_id).where(
+                Vendor.verification_status == "verified"
+            )
 
         # Apply filters
         if filters.category_id:
@@ -103,7 +134,7 @@ class ProductService:
                 "category_material_type": category_material_type,
                 "brand_name": brand_name,
             }
-            products.append(product_dict)
+            products.append(self._coerce_product_dict(product_dict))
 
         return {
             "products": products,
@@ -126,13 +157,13 @@ class ProductService:
             return None
 
         product, category_name, category_division, category_material_type, brand_name = row
-        return {
+        return self._coerce_product_dict({
             **product.__dict__,
             "category": category_name,
             "category_division": category_division,
             "category_material_type": category_material_type,
             "brand_name": brand_name,
-        }
+        })
 
     async def create_product(self, product_in: ProductCreate, vendor_id: UUID) -> Product:
         """Create a new product listing in the database."""

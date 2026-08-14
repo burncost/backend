@@ -29,7 +29,8 @@ class Product(Base):
     description = Column(Text)
     short_description = Column(Text)
     status = Column(
-        SQLEnum(ProductStatus, native_enum=False, length=20),
+        SQLEnum(ProductStatus, native_enum=False, length=20,
+                values_callable=lambda e: [m.value for m in e]),
         default=ProductStatus.DRAFT,
         index=True
     )

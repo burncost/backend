@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
-from app.api.deps import get_current_vendor, get_current_user
+from app.api.deps import get_current_vendor, get_current_user, get_current_verified_vendor
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload, joinedload
@@ -204,6 +204,20 @@ async def create_order(
             total_price=item_data["total_price"],
         )
         db.add(order_item)
+
+    # --- Soft tier transaction-cap enforcement ---
+    from app.models.vendor_verification_tier import VendorVerificationTier
+    for vid in {i["vendor_id"] for i in order_items}:
+        vr = (await db.execute(select(Vendor).where(Vendor.id == vid))).scalar_one_or_none()
+        tr = (await db.execute(select(VendorVerificationTier).where(VendorVerificationTier.tier_code == vr.verification_tier))).scalar_one_or_none() if vr else None
+        if not (vr and tr):
+            continue
+        order_share = sum(i["total_price"] for i in order_items if str(i["vendor_id"]) == str(vid))
+        if float(vr.transaction_volume or 0) + order_share > float(tr.transaction_cap):
+            order.status = "on_hold"
+            db.add(Notification(user_id=vr.user_id, type="verification",
+                title="Transaction limit reached",
+                message=f"You're at your {tr.display_name} cap of ₦{float(tr.transaction_cap):,.0f}. Upgrade to keep selling.", read=False))
 
     # Clear the cart
     for cart_item in cart_items:
@@ -575,7 +589,7 @@ async def update_order_status(
     new_status: str = Query(..., alias="status", pattern="^(pending|confirmed|processing|shipped|in_transit|delivered|cancelled)$"),
     driver_name: Optional[str] = Query(None),
     driver_phone: Optional[str] = Query(None),
-    current_vendor: dict = Depends(get_current_vendor),
+    current_vendor: dict = Depends(get_current_verified_vendor),
     db: AsyncSession = Depends(get_db)
 ):
     try:
@@ -657,7 +671,7 @@ async def vendor_update_order(
     order_id: str,
     update_data: VendorOrderUpdate,
     background_tasks: BackgroundTasks,
-    current_vendor: dict = Depends(get_current_vendor),
+    current_vendor: dict = Depends(get_current_verified_vendor),
     db: AsyncSession = Depends(get_db)
 ):
     # Accept both UUID and order number

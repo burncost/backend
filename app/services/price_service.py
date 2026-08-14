@@ -307,6 +307,51 @@ class PriceService:
         self._cache_timestamp: Optional[datetime] = None
         self.engine = PriceEngine(mongo_db)
 
+    async def _get_pg_session(self) -> Optional[AsyncSession]:
+        """Return the injected Postgres session, or lazily create one."""
+        if self.pg_db is not None:
+            return self.pg_db
+        try:
+            from app.core.database import AsyncSessionLocal
+            return AsyncSessionLocal()
+        except Exception as e:
+            logger.warning(f"Could not create Postgres session: {e}")
+            return None
+
+    async def _load_prices_from_postgres(self) -> Dict[str, DBProduct]:
+        """Load prices from the PostgreSQL material_rates table."""
+        session = await self._get_pg_session()
+        if session is None:
+            return {}
+
+        products = {}
+        try:
+            from sqlalchemy import select
+            from app.models.material_rate import MaterialRate
+            result = await session.execute(select(MaterialRate))
+            rates = result.scalars().all()
+            for r in rates:
+                code = f"MAT-{str(r.id)[:8].upper()}"
+                p = DBProduct(
+                    product_code=code,
+                    name=r.material_name,
+                    category=str(r.category_id),
+                    unit=r.unit,
+                    unit_price=float(r.current_price),
+                    city=r.state or "Abuja",
+                    supplier=str(r.supplier_id) if r.supplier_id else None,
+                    last_updated=str(r.updated_at or ""),
+                )
+                products[code] = p
+            logger.info(f"Loaded {len(products)} prices from PostgreSQL material_rates")
+        except Exception as e:
+            logger.warning(f"Failed to load from PostgreSQL material_rates: {e}")
+        finally:
+            if self.pg_db is None:
+                await session.close()
+
+        return products
+
     async def _load_prices_from_mongo(self) -> Dict[str, DBProduct]:
         """Load prices from MongoDB material_rates collection."""
         if self.mongo_db is None:
@@ -347,6 +392,11 @@ class PriceService:
             if db_products:
                 self._price_cache = db_products
                 return self._price_cache
+
+        db_products = await self._load_prices_from_postgres()
+        if db_products:
+            self._price_cache = db_products
+            return self._price_cache
 
         self._price_cache = {}
         logger.info("No DB prices loaded — will use internet search fallback")

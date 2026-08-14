@@ -33,9 +33,14 @@ class Vendor(Base):
     cac_business_registration_number = Column(String(100), unique=True, nullable=True)
     tax_identification_number = Column(String(50), nullable=True)
     verification_status = Column(
-        SQLEnum(VendorVerificationStatus, native_enum=False, length=20),
+        SQLEnum(VendorVerificationStatus, native_enum=False, length=20,
+                values_callable=lambda e: [m.value for m in e]),
         default=VendorVerificationStatus.PENDING
     )
+    # Verification tier: cac_only (1), documented (2), trusted (3)
+    verification_tier = Column(String(20), default="cac_only", nullable=False)
+    # Soft-limit transaction volume (NGN), checked against tier cap
+    transaction_volume = Column(Numeric(15, 2), default=0.00)
     verification_date = Column(DateTime, nullable=True)
     verified_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     commission_rate = Column(Numeric(5, 2), default=10.00)
