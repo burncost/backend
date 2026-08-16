@@ -105,6 +105,18 @@ async def _auto_verify_vendor_background(
             except Exception as e:
                 logger.error(f"[auto-verify] failed to notify vendor {vendor_id}: {e}")
 
+            # Send "account verified" email to the vendor
+            try:
+                vendor_user = (await db.execute(select(User).where(User.id == vendor_user_id))).scalar_one_or_none()
+                if vendor_user and vendor_user.email:
+                    from app.services.notification_service import NotificationService
+                    await NotificationService().send_vendor_verified_email(
+                        email=vendor_user.email,
+                        business_name=vendor.business_name,
+                    )
+            except Exception as e:
+                logger.error(f"[auto-verify] failed to email vendor {vendor_id}: {e}")
+
             admin_result = await db.execute(select(User).where(User.role.in_(["admin", "super_admin"])))
             for admin in admin_result.scalars().all():
                 db.add(Notification(

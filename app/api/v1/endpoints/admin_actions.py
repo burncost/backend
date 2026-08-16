@@ -2,7 +2,7 @@
 import logging
 from datetime import datetime
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
@@ -69,6 +69,7 @@ async def admin_action_queue(
             "business_name": v.business_name,
             "city": v.city, "state": v.state,
             "cac_number": v.cac_business_registration_number,
+            "tin": v.tax_identification_number,
             "verification_status": _status(v),
             "verification_tier": v.verification_tier,
             "transaction_volume": float(v.transaction_volume or 0),
@@ -179,6 +180,7 @@ async def admin_vendor_documents(vendor_id: UUID, current_user: dict = Depends(a
 @router.post("/vendors/actions/{vendor_id}/review")
 async def admin_review_vendor_action(
     vendor_id: UUID, payload: dict,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(admin_guard), db: AsyncSession = Depends(get_db),
 ):
     action = (payload.get("action") or "").strip().lower()
@@ -219,5 +221,41 @@ async def admin_review_vendor_action(
     db.add(Notification(user_id=v.user_id, title="Verification update",
                         message=f"Your {target} verification was {action}d.", type="verification", read=False))
     await db.commit()
+
+    # Send email to the vendor when approved/rejected
+    try:
+        vendor_user = (await db.execute(select(User).where(User.id == v.user_id))).scalar_one_or_none()
+        if vendor_user and vendor_user.email:
+            from app.services.notification_service import NotificationService
+            if action == "approve":
+                if _TIER_RANK.get(target, 0) > 0:
+                    # Tier upgrade approval
+                    from app.models.vendor_verification_tier import VendorVerificationTier
+                    tier_row = (await db.execute(
+                        select(VendorVerificationTier).where(VendorVerificationTier.tier_code == target)
+                    )).scalar_one_or_none()
+                    tier_name = tier_row.display_name if tier_row else target
+                    background_tasks.add_task(
+                        NotificationService().send_tier_upgrade_email,
+                        email=vendor_user.email,
+                        business_name=v.business_name,
+                        new_tier_name=tier_name,
+                    )
+                else:
+                    # New vendor verification approval
+                    background_tasks.add_task(
+                        NotificationService().send_vendor_verified_email,
+                        email=vendor_user.email,
+                        business_name=v.business_name,
+                    )
+            elif action == "reject":
+                background_tasks.add_task(
+                    NotificationService().send_vendor_rejection_email,
+                    email=vendor_user.email,
+                    business_name=v.business_name,
+                )
+    except Exception as e:
+        logger.error(f"Failed to send verification email for vendor {vendor_id}: {e}")
+
     return {"vendor_id": str(v.id), "verification_tier": v.verification_tier,
             "verification_status": v.verification_status.value if hasattr(v.verification_status, "value") else str(v.verification_status)}

@@ -1,14 +1,19 @@
 """Vendor verification tier endpoints (Tier 1 CAC / Tier 2 Documented / Tier 3 Trusted)."""
-from fastapi import APIRouter, Depends, HTTPException, status
+import logging
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import Optional, Dict
 
 from app.core.database import get_db
+from app.services.notification_service import NotificationService
+
+logger = logging.getLogger(__name__)
 from app.api.deps import get_current_user, get_current_admin
 from app.models.vendor import Vendor
 from app.models.vendor_document import VendorDocument
 from app.models.vendor_verification_tier import VendorVerificationTier
+from app.models.user import User
 
 router = APIRouter()
 
@@ -76,11 +81,13 @@ async def upgrade_eligibility(
 @router.post("/upgrade")
 async def upgrade_vendor_tier(
     payload: dict,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     target = (payload.get("tier_code") or "").strip()
     documents: Dict[str, str] = payload.get("documents") or {}
+    tin = (payload.get("tin") or "").strip()
     if target not in ("documented", "trusted"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="target tier must be documented or trusted")
 
@@ -114,6 +121,10 @@ async def upgrade_vendor_tier(
             review_status="pending",
         ))
 
+    # Save TIN if provided (user can submit TIN later during tier upgrade)
+    if tin:
+        vend.tax_identification_number = tin
+
     # Tier 2 auto-ish: effective immediately. Tier 3: manual admin review.
     if target == "documented" and not tier.requires_manual_review:
         vend.verification_tier = "documented"
@@ -125,6 +136,26 @@ async def upgrade_vendor_tier(
         manual = True
 
     await db.commit()
+
+    # Send upgrade/review-submitted email to the vendor
+    try:
+        user = (await db.execute(select(User).where(User.id == vend.user_id))).scalar_one_or_none()
+        if user and user.email:
+            if not manual:
+                await NotificationService().send_tier_upgrade_email(
+                    email=user.email,
+                    business_name=vend.business_name,
+                    new_tier_name=tier.display_name,
+                )
+            else:
+                await NotificationService().send_tier_review_submitted_email(
+                    email=user.email,
+                    business_name=vend.business_name,
+                    tier_name=tier.display_name,
+                )
+    except Exception as e:
+        logger.error(f"Failed to send tier upgrade email for vendor {vend.id}: {e}")
+
     return {
         "tier": vend.verification_tier,
         "verification_status": vend.verification_status,

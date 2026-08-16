@@ -168,6 +168,82 @@ class NotificationService:
         </div></body></html>"""
         return await self.send_email(email, f"{business_name} - Vendor Application Approved!", html)
 
+    async def send_vendor_verified_email(self, email: str, business_name: str) -> bool:
+        """Send vendor-account-verified notification (auto or manual verification)."""
+        dashboard_link = f"{settings.FRONTEND_URL}/supplier-dashboard"
+        html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+        <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
+        <div style="text-align:center;margin-bottom:20px;">
+            <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
+        </div>
+        <h2 style="color:#FF6B00;">You're Verified! ✅</h2>
+        <p>Congratulations <strong>{business_name}</strong>,</p>
+        <p>Your supplier account has been verified and is now live on the Burncost marketplace.</p>
+        <p>You can now start uploading products and receiving orders from customers across Nigeria.</p>
+        <div style="text-align:center;margin:24px 0;">
+            <a href="{dashboard_link}" style="background:#FF6B00;color:white;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:bold;">Go to Supplier Dashboard</a>
+        </div>
+        <p style="color:#888;font-size:12px;">© 2026 Burncost. All rights reserved.</p>
+        </div></body></html>"""
+        return await self.send_email(email, f"{business_name} - Your account has been verified!", html)
+
+    async def send_vendor_rejection_email(self, email: str, business_name: str) -> bool:
+        """Send vendor-account rejection notification."""
+        dashboard_link = f"{settings.FRONTEND_URL}/supplier-dashboard"
+        html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+        <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
+        <div style="text-align:center;margin-bottom:20px;">
+            <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
+        </div>
+        <h2 style="color:#FF6B00;">Verification Update</h2>
+        <p>Hi <strong>{business_name}</strong>,</p>
+        <p>We were unable to verify your supplier application at this time.</p>
+        <p>You can update your business information and re-submit for review from your supplier dashboard.</p>
+        <div style="text-align:center;margin:24px 0;">
+            <a href="{dashboard_link}" style="background:#FF6B00;color:white;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:bold;">Go to Supplier Dashboard</a>
+        </div>
+        <p style="color:#888;font-size:12px;">© 2026 Burncost. All rights reserved.</p>
+        </div></body></html>"""
+        return await self.send_email(email, f"{business_name} - Verification Update", html)
+
+    async def send_tier_upgrade_email(self, email: str, business_name: str, new_tier_name: str) -> bool:
+        """Send vendor tier-upgrade notification."""
+        dashboard_link = f"{settings.FRONTEND_URL}/supplier-dashboard"
+        html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+        <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
+        <div style="text-align:center;margin-bottom:20px;">
+            <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
+        </div>
+        <h2 style="color:#FF6B00;">Tier Upgrade Successful! 🎉</h2>
+        <p>Congratulations <strong>{business_name}</strong>,</p>
+        <p>Your supplier account has been upgraded to <strong>{new_tier_name}</strong>.</p>
+        <p>You now enjoy a higher transaction cap and reduced commission rates. Let's grow your business together!</p>
+        <div style="text-align:center;margin:24px 0;">
+            <a href="{dashboard_link}" style="background:#FF6B00;color:white;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:bold;">Go to Supplier Dashboard</a>
+        </div>
+        <p style="color:#888;font-size:12px;">© 2026 Burncost. All rights reserved.</p>
+        </div></body></html>"""
+        return await self.send_email(email, f"{business_name} - Upgraded to {new_tier_name}!", html)
+
+    async def send_tier_review_submitted_email(self, email: str, business_name: str, tier_name: str) -> bool:
+        """Send vendor tier-upgrade review-submitted notification."""
+        dashboard_link = f"{settings.FRONTEND_URL}/supplier-dashboard"
+        html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+        <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
+        <div style="text-align:center;margin-bottom:20px;">
+            <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
+        </div>
+        <h2 style="color:#FF6B00;">Upgrade Request Received</h2>
+        <p>Hi <strong>{business_name}</strong>,</p>
+        <p>Your <strong>{tier_name}</strong> upgrade request has been received.</p>
+        <p>Our team is reviewing your submitted documents. You'll be notified once a decision is made.</p>
+        <div style="text-align:center;margin:24px 0;">
+            <a href="{dashboard_link}" style="background:#FF6B00;color:white;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:bold;">Go to Supplier Dashboard</a>
+        </div>
+        <p style="color:#888;font-size:12px;">© 2026 Burncost. All rights reserved.</p>
+        </div></body></html>"""
+        return await self.send_email(email, f"{business_name} - {tier_name} upgrade under review", html)
+
     async def send_payment_receipt(self, email: str, amount: float, reference: str) -> bool:
         """Send payment receipt email."""
         html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
