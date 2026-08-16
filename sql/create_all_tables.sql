@@ -597,6 +597,24 @@ CREATE INDEX IF NOT EXISTS ix_audit_logs_user_id ON audit_logs (user_id);
 CREATE INDEX IF NOT EXISTS ix_audit_logs_action ON audit_logs (action);
 CREATE INDEX IF NOT EXISTS ix_audit_logs_created_at ON audit_logs (created_at);
 
+-- =============================================================
+-- 31. VENDOR REVIEWS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS vendor_reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    reviewer_name VARCHAR(100),
+    rating INTEGER NOT NULL,
+    comment TEXT,
+    is_verified_purchase BOOLEAN DEFAULT FALSE,
+    is_approved BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_vendor_reviews_vendor_id ON vendor_reviews (vendor_id);
+CREATE INDEX IF NOT EXISTS ix_vendor_reviews_user_id ON vendor_reviews (user_id);
+
 -- Add deferred FK for product_reviews -> orders (orders created later)
 ALTER TABLE product_reviews
   ADD CONSTRAINT product_reviews_order_id_fkey

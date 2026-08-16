@@ -19,6 +19,7 @@ from app.models.shipping_zone import ShippingZone, ShippingZoneMapping
 from app.models.vendor_shipping_override import VendorShippingOverride
 from app.models.vendor_draft import VendorDraft
 from app.models.vendor_verification_tier import VendorVerificationTier
+from app.models.vendor_review import VendorReview
 
 __all__ = [
     "User",
@@ -51,4 +52,5 @@ __all__ = [
     "VendorShippingOverride",
     "VendorDraft",
     "VendorVerificationTier",
+    "VendorReview",
 ]

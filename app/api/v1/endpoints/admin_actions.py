@@ -16,6 +16,7 @@ from app.models.vendor_bank_account import VendorBankAccount
 from app.models.order import Order
 from app.models.notification import Notification
 from app.models.user import User, UserProfile
+from app.services.risk_service import risk_from_vendor
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -111,18 +112,8 @@ async def admin_vendor_detail(
     user = vendor.user
     profile = user.profile if user else None
 
-    # Risk heuristic mirrors admin.list_vendors _risk()
     vstatus = _status(vendor)
-    score = 10
-    if vstatus != "verified":
-        score += 30
-    if vstatus in ("suspended", "rejected"):
-        score += 30
-    if vendor.total_reviews and vendor.rating and float(vendor.rating) < 3.0:
-        score += 20
-    if not vendor.total_reviews:
-        score += 10
-    risk_score = min(score, 95)
+    risk_score = risk_from_vendor(vendor)
 
     return {
         "id": str(vendor.id),

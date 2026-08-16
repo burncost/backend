@@ -10,12 +10,167 @@ from app.models.user import User
 from app.api.deps import get_current_user, get_current_vendor
 from app.schemas.review import ReviewOut, ProductReviewsResponse
 from app.models.vendor import Vendor
+from app.models.vendor_review import VendorReview
 
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+### Create a review for a vendor (rating the supplier directly)
+@router.post("/vendor", status_code=status.HTTP_201_CREATED)
+async def create_vendor_review(
+    vendor_id: UUID,
+    rating: int = Query(..., ge=1, le=5),
+    comment: str = Query(""),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user.role == "anonymous" or str(current_user.id) == "anonymous":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to submit a review"
+        )
+
+    vendor = (await db.execute(select(Vendor).where(Vendor.id == vendor_id))).scalar_one_or_none()
+    if not vendor:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Vendor not found")
+
+    existing = (await db.execute(
+        select(VendorReview).where(
+            VendorReview.vendor_id == vendor_id,
+            VendorReview.user_id == current_user.id
+        )
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="You have already reviewed this vendor")
+
+    user = (await db.execute(select(User).where(User.id == current_user.id))).scalar_one_or_none()
+    reviewer_name = user.profile.first_name if user and user.profile else current_user.email
+
+    review = VendorReview(
+        vendor_id=vendor_id,
+        user_id=current_user.id,
+        reviewer_name=reviewer_name,
+        rating=rating,
+        comment=comment,
+    )
+    db.add(review)
+    await db.flush()
+
+    # Recompute vendor rating + review count from the new aggregate
+    avgreview = await db.execute(
+        select(func.count(VendorReview.id), func.avg(VendorReview.rating))
+        .where(VendorReview.vendor_id == vendor_id)
+    )
+    vtotal, vavg = avgreview.first()
+    vendor.total_reviews = vtotal or 0
+    vendor.rating = round(float(vavg or 0), 2)
+
+    await db.commit()
+    await db.refresh(review)
+    logger.info(f"Vendor review created for {vendor_id} by {current_user.id}")
+    return review
+
+
+### List reviews for a vendor with aggregate stats
+@router.get("/vendor-reviews/{vendor_id}")
+async def list_vendor_reviews(
+    vendor_id: UUID,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(VendorReview)
+        .where(VendorReview.vendor_id == vendor_id)
+        .order_by(VendorReview.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    reviews = result.scalars().all()
+
+    stats = await db.execute(
+        select(func.count(VendorReview.id), func.avg(VendorReview.rating))
+        .where(VendorReview.vendor_id == vendor_id)
+    )
+    total, avg = stats.first()
+
+    return {
+        "average_rating": round(float(avg or 0), 2),
+        "total_reviews": total or 0,
+        "reviews": reviews,
+    }
+
+
+### Update a vendor review
+@router.put("/vendor/{review_id}")
+async def update_vendor_review(
+    review_id: UUID,
+    rating: Optional[int] = Query(None, ge=1, le=5),
+    comment: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    review = (await db.execute(select(VendorReview).where(VendorReview.id == review_id))).scalar_one_or_none()
+    if not review:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Vendor review not found")
+    if str(review.user_id) != str(current_user.id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not authorized to update this review")
+
+    if rating is not None:
+        review.rating = rating
+    if comment is not None:
+        review.comment = comment
+
+    # Recompute vendor rating
+    vendor = (await db.execute(select(Vendor).where(Vendor.id == review.vendor_id))).scalar_one_or_none()
+    if vendor:
+        stats = await db.execute(
+            select(func.count(VendorReview.id), func.avg(VendorReview.rating))
+            .where(VendorReview.vendor_id == vendor.id)
+        )
+        total, avg = stats.first()
+        vendor.total_reviews = total or 0
+        vendor.rating = round(float(avg or 0), 2)
+
+    await db.commit()
+    await db.refresh(review)
+    logger.info(f"Vendor review {review_id} updated by {current_user.id}")
+    return review
+
+
+### Delete a vendor review
+@router.delete("/vendor/{review_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_vendor_review(
+    review_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    review = (await db.execute(select(VendorReview).where(VendorReview.id == review_id))).scalar_one_or_none()
+    if not review:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Vendor review not found")
+    if str(review.user_id) != str(current_user.id) and current_user.role not in ["admin", "super_admin"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this review")
+
+    vendor_id = review.vendor_id
+    await db.delete(review)
+
+    # Recompute vendor rating after deletion
+    vendor = (await db.execute(select(Vendor).where(Vendor.id == vendor_id))).scalar_one_or_none()
+    if vendor:
+        stats = await db.execute(
+            select(func.count(VendorReview.id), func.avg(VendorReview.rating))
+            .where(VendorReview.vendor_id == vendor_id)
+        )
+        total, avg = stats.first()
+        vendor.total_reviews = total or 0
+        vendor.rating = round(float(avg or 0), 2)
+
+    await db.commit()
+    return None
 
 
 ### Create a review for a product

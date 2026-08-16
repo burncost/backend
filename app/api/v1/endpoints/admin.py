@@ -22,6 +22,7 @@ from app.models.order import Order, OrderItem
 from app.models.product import Product
 from app.models.audit_log import AuditLog
 from app.repositories.boq_repository import BOQRepository
+from app.services.risk_service import risk_from_vendor
 
 import logging
 import uuid
@@ -186,12 +187,9 @@ async def admin_overview_stats(
             select(func.count(Vendor.id)).where(Vendor.verification_status == "verified")
         )
     ).scalar() or 0
-    # High-risk heuristic mirrors /vendors risk_only filter (zero reviews).
-    high_risk_vendors = (
-        await db.execute(
-            select(func.count(Vendor.id)).where(func.coalesce(Vendor.total_reviews, 0) == 0)
-        )
-    ).scalar() or 0
+    # High-risk count uses the shared risk score (High bucket = score > 60).
+    _all_vendors = (await db.execute(select(Vendor))).scalars().all()
+    high_risk_vendors = sum(1 for v in _all_vendors if risk_from_vendor(v) > 60)
 
     # Gross merchandise value (delivered orders)
     gmv = (
@@ -311,9 +309,6 @@ async def admin_list_vendors(
     if verification:
         query = query.where(Vendor.verification_status == verification)
         count_query = count_query.where(Vendor.verification_status == verification)
-    if risk_only:
-        query = query.where(func.coalesce(Vendor.total_reviews, 0) == 0)
-        count_query = count_query.where(func.coalesce(Vendor.total_reviews, 0) == 0)
     if search:
         like = f"%{search}%"
         query = query.where(
@@ -327,27 +322,24 @@ async def admin_list_vendors(
 
     total = (await db.execute(count_query)).scalar() or 0
 
-    query = (
-        query.order_by(Vendor.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-    )
-    result = await db.execute(query)
-    vendors = result.scalars().all()
-
-    # Risk heuristic: low rating + zero reviews + not verified → higher risk
-    def _risk(v: Vendor) -> int:
-        vstatus = v.verification_status.value if hasattr(v.verification_status, "value") else str(v.verification_status)
-        score = 10
-        if vstatus != "verified":
-            score += 30
-        if vstatus in ("suspended", "rejected"):
-            score += 30
-        if v.total_reviews and v.rating and float(v.rating) < 3.0:
-            score += 20
-        if not v.total_reviews:
-            score += 10
-        return min(score, 95)
+    # risk_only filters on the shared risk score (High bucket = score > 60),
+    # so we must score candidates in Python to keep the count consistent.
+    if risk_only:
+        all_candidates = (await db.execute(
+            query.order_by(Vendor.created_at.desc())
+        )).scalars().all()
+        all_candidates = [v for v in all_candidates if risk_from_vendor(v) > 60]
+        total = len(all_candidates)
+        start = (page - 1) * page_size
+        vendors = all_candidates[start:start + page_size]
+    else:
+        query = (
+            query.order_by(Vendor.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        result = await db.execute(query)
+        vendors = result.scalars().all()
 
     return {
         "vendors": [
@@ -369,7 +361,7 @@ async def admin_list_vendors(
                 "delivery_time": v.delivery_time,
                 "response_time": v.response_time,
                 "specializations": v.specializations or [],
-                "risk_score": _risk(v),
+                "risk_score": risk_from_vendor(v),
                 "created_at": v.created_at.isoformat() if v.created_at else None,
             }
             for v in vendors
