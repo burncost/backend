@@ -4,7 +4,9 @@
 -- Run after: alembic upgrade head  (or standalone)
 -- =============================================================
 
-CREATE TYPE user_role AS ENUM ('customer', 'vendor', 'admin', 'super_admin');
+-- user_role must include all roles in Backend/app/models/user.py (UserRole):
+-- customer, vendor, admin, super_admin, manager, support, marketing
+CREATE TYPE user_role AS ENUM ('customer', 'vendor', 'admin', 'super_admin', 'manager', 'support', 'marketing');
 -- wait for success, then:
 CREATE TYPE user_status AS ENUM ('active', 'suspended', 'pending_verification', 'deactivated');
 -- wait for success, then:
@@ -477,7 +479,6 @@ CREATE INDEX IF NOT EXISTS ix_token_usage_user_id ON token_usage (user_id);
 -- =============================================================
 -- 24. TOKEN TRANSACTIONS
 -- =============================================================
-CREATE TYPE transactiontype AS ENUM ('purchase', 'consumption', 'refund', 'free_tier', 'expiry');
 CREATE TABLE IF NOT EXISTS token_transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -706,6 +707,70 @@ ALTER TABLE material_rates
 -- NOTE: users.role, users.status, token_transactions.transaction_type are
 -- native PG ENUM columns; Postgres rejects invalid casing at insert, so
 -- they need no CHECK constraint.
+
+-- =============================================================
+-- DEFAULT USERS SEED (incl. ADMIN USERS)
+-- =============================================================
+-- Seeds default system + admin accounts so the platform/admin app can be
+-- used immediately. All default admins share the default password below
+-- and MUST change it on first login.
+--
+--   Default password : Admin@123
+--   bcrypt hash      : $2b$12$NOvAelP3Llez4cvww7gCr.5EABB/AoZZESt1RraTCeeE9bK0dG5Ra
+--
+-- support@burncost.com (support) and marketing@burncost.com (marketing)
+-- can be created later via the admin User Management page.
+
+-- Super Admin
+INSERT INTO users (email, phone_number, password_hash, role, status, email_verified)
+VALUES (
+  'superadmin@burncost.com',
+  '08000000001',
+  '$2b$12$NOvAelP3Llez4cvww7gCr.5EABB/AoZZESt1RraTCeeE9bK0dG5Ra',
+  'super_admin',
+  'active',
+  TRUE
+)
+ON CONFLICT (email) DO NOTHING;
+
+INSERT INTO user_profiles (user_id, first_name, other_name, last_name, business_name)
+SELECT id, 'Super', 'Admin', 'Burncost', 'Burncost'
+FROM users WHERE email = 'superadmin@burncost.com'
+ON CONFLICT (user_id) DO NOTHING;
+
+-- Admin
+INSERT INTO users (email, phone_number, password_hash, role, status, email_verified)
+VALUES (
+  'admin@burncost.com',
+  '08000000002',
+  '$2b$12$NOvAelP3Llez4cvww7gCr.5EABB/AoZZESt1RraTCeeE9bK0dG5Ra',
+  'admin',
+  'active',
+  TRUE
+)
+ON CONFLICT (email) DO NOTHING;
+
+INSERT INTO user_profiles (user_id, first_name, other_name, last_name, business_name)
+SELECT id, 'Admin', 'User', 'Burncost', 'Burncost'
+FROM users WHERE email = 'admin@burncost.com'
+ON CONFLICT (user_id) DO NOTHING;
+
+-- Manager
+INSERT INTO users (email, phone_number, password_hash, role, status, email_verified)
+VALUES (
+  'manager@burncost.com',
+  '08000000003',
+  '$2b$12$NOvAelP3Llez4cvww7gCr.5EABB/AoZZESt1RraTCeeE9bK0dG5Ra',
+  'manager',
+  'active',
+  TRUE
+)
+ON CONFLICT (email) DO NOTHING;
+
+INSERT INTO user_profiles (user_id, first_name, other_name, last_name, business_name)
+SELECT id, 'Manager', 'User', 'Burncost', 'Burncost'
+FROM users WHERE email = 'manager@burncost.com'
+ON CONFLICT (user_id) DO NOTHING;
 
 -- =============================================================
 -- DONE

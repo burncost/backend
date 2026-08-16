@@ -5,14 +5,17 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 from typing import Optional
 
 from app.core.database import get_db
 from app.api.deps import require_roles
 from app.models.vendor import Vendor, VendorVerificationStatus
 from app.models.vendor_document import VendorDocument
+from app.models.vendor_bank_account import VendorBankAccount
 from app.models.order import Order
 from app.models.notification import Notification
+from app.models.user import User, UserProfile
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -85,6 +88,90 @@ async def admin_action_queue(
         "actions": actions[start:start + page_size],
         "total": len(actions), "page": page, "page_size": page_size,
         "total_pages": max(1, (len(actions) + page_size - 1) // page_size),
+    }
+
+
+@router.get("/vendors/{vendor_id}/detail")
+async def admin_vendor_detail(
+    vendor_id: UUID, current_user: dict = Depends(admin_guard), db: AsyncSession = Depends(get_db)
+):
+    """Full vendor details for the admin review screen."""
+    vendor = (await db.execute(
+        select(Vendor)
+        .options(
+            selectinload(Vendor.user).selectinload(User.profile),
+            selectinload(Vendor.bank_accounts),
+            selectinload(Vendor.documents),
+        )
+        .where(Vendor.id == vendor_id)
+    )).scalar_one_or_none()
+    if not vendor:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Vendor not found")
+
+    user = vendor.user
+    profile = user.profile if user else None
+
+    # Risk heuristic mirrors admin.list_vendors _risk()
+    vstatus = _status(vendor)
+    score = 10
+    if vstatus != "verified":
+        score += 30
+    if vstatus in ("suspended", "rejected"):
+        score += 30
+    if vendor.total_reviews and vendor.rating and float(vendor.rating) < 3.0:
+        score += 20
+    if not vendor.total_reviews:
+        score += 10
+    risk_score = min(score, 95)
+
+    return {
+        "id": str(vendor.id),
+        "user_id": str(vendor.user_id),
+        "business_name": vendor.business_name,
+        "business_type": vendor.business_type,
+        "city": vendor.city,
+        "state": vendor.state,
+        "business_address": vendor.business_address,
+        "cac_number": vendor.cac_business_registration_number,
+        "tax_identification_number": vendor.tax_identification_number,
+        "verification_status": vstatus,
+        "verification_tier": vendor.verification_tier,
+        "verification_date": vendor.verification_date.isoformat() if vendor.verification_date else None,
+        "rating": float(vendor.rating) if vendor.rating else 0.0,
+        "total_reviews": vendor.total_reviews or 0,
+        "total_sales": float(vendor.total_sales) if vendor.total_sales else 0.0,
+        "business_image": vendor.business_image,
+        "transaction_volume": float(vendor.transaction_volume or 0),
+        "risk_score": risk_score,
+        "created_at": vendor.created_at.isoformat() if vendor.created_at else None,
+        "contact": {
+            "first_name": profile.first_name if profile else None,
+            "last_name": profile.last_name if profile else None,
+            "email": user.email if user else None,
+            "phone_number": user.phone_number if user else None,
+        },
+        "bank_accounts": [
+            {
+                "bank_name": b.bank_name,
+                "account_number": b.account_number,
+                "account_name": b.account_name,
+                "is_primary": b.is_primary,
+                "verified": b.verified,
+            }
+            for b in vendor.bank_accounts
+        ],
+        "documents": [
+            {
+                "id": str(d.id),
+                "document_type": d.document_type,
+                "document_url": d.document_url,
+                "tier": d.tier,
+                "review_status": d.review_status,
+                "verified": d.verified,
+                "reviewed_at": d.reviewed_at.isoformat() if d.reviewed_at else None,
+            }
+            for d in vendor.documents
+        ],
     }
 
 

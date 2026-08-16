@@ -506,8 +506,22 @@ async def resend_verification(
 
 ##logout
 @router.post("/logout")
-async def logout(request: Request, response: Response):
-    refresh_token = request.cookies.get("refresh_token")
+async def logout(
+    request: Request,
+    response: Response,
+    token_data: TokenRefresh = Body(default=None)
+):
+    # Accept refresh token from (highest→lowest priority): Bearer header, JSON body, or cookie.
+    # The Admin app stores tokens in localStorage and sends the refresh token via the
+    # Bearer header, while cookie-based clients (customer Frontend) rely on the cookie.
+    refresh_token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        refresh_token = auth_header[7:]
+    if not refresh_token and token_data and token_data.refresh_token:
+        refresh_token = token_data.refresh_token
+    if not refresh_token:
+        refresh_token = request.cookies.get("refresh_token")
 
     if refresh_token:
         try:

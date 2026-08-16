@@ -186,6 +186,12 @@ async def admin_overview_stats(
             select(func.count(Vendor.id)).where(Vendor.verification_status == "verified")
         )
     ).scalar() or 0
+    # High-risk heuristic mirrors /vendors risk_only filter (zero reviews).
+    high_risk_vendors = (
+        await db.execute(
+            select(func.count(Vendor.id)).where(func.coalesce(Vendor.total_reviews, 0) == 0)
+        )
+    ).scalar() or 0
 
     # Gross merchandise value (delivered orders)
     gmv = (
@@ -212,6 +218,7 @@ async def admin_overview_stats(
         "refund_requests": refund_requests,
         "pending_vendors": pending_vendors,
         "verified_vendors": verified_vendors,
+        "high_risk_vendors": high_risk_vendors,
         "gmv": float(gmv),
         "audit_events_7d": audit_recent,
     }
