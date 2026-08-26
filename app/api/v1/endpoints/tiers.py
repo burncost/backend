@@ -24,11 +24,37 @@ def _serialize(t: VendorVerificationTier) -> dict:
         "display_name": t.display_name,
         "sort_order": t.sort_order,
         "transaction_cap": float(t.transaction_cap),
-        "commission_rate": float(t.commission_rate),
+        # "commission_rate": float(t.commission_rate),  # Phase 13: commission removed from output
         "required_document_types": t.required_document_types or [],
         "requires_manual_review": t.requires_manual_review,
         "perks": t.perks or [],
     }
+
+
+async def assign_tier_by_volume(db: AsyncSession, vendor: Vendor) -> None:
+    """Re-assign a verified vendor's tier from their transaction volume.
+
+    Caps: T1 (cac_only) ≤₦3M · T2 (documented) ₦3–10M · T3 (trusted) >₦10M.
+    Only applies to verified suppliers (pending vendors keep their tier until
+    their RC/CAC application is approved).
+    """
+    if not vendor or vendor.verification_status != "verified":
+        return
+    tiers = (await db.execute(
+        select(VendorVerificationTier)
+        .where(VendorVerificationTier.is_active.is_(True))
+        .order_by(VendorVerificationTier.sort_order)
+    )).scalars().all()
+    if not tiers:
+        return
+    volume = float(vendor.transaction_volume or 0)
+    chosen = tiers[-1]  # highest tier when volume exceeds every cap
+    for t in tiers:
+        if volume <= float(t.transaction_cap):
+            chosen = t
+            break
+    if chosen.tier_code != vendor.verification_tier:
+        vendor.verification_tier = chosen.tier_code
 
 
 @router.get("/tiers")
@@ -134,6 +160,10 @@ async def upgrade_vendor_tier(
         vend.verification_tier = "trusted"
         vend.verification_status = "pending"
         manual = True
+
+    # Phase 13: on verification, assign the tier that matches transaction volume.
+    if vend.verification_status == "verified":
+        await assign_tier_by_volume(db, vend)
 
     await db.commit()
 

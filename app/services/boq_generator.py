@@ -491,7 +491,7 @@ class BOQGenerator:
 
             client = get_gemini_client()
             prompt = f"""You are a Nigerian quantity surveyor. Parse the following quote text and extract line items.
-For each item, estimate the market rate in NGN based on current Nigerian prices.
+Do NOT estimate market rates — extract only the quoted values. Market rates are supplied from the database.
 
 Quote text:
 {quote_text}
@@ -503,17 +503,10 @@ Return ONLY valid JSON with this structure:
       "description": "item description",
       "quantity": number,
       "unit": "m2/m3/nr/ls/etc",
-      "quoted_rate": number,
-      "estimated_market_rate": number,
-      "deviation_pct": number,
-      "status": "fair" | "inflated" | "unverified"
+      "quoted_rate": number
     }}
   ],
   "total_quoted": number,
-  "total_market": number,
-  "total_overcharge": number,
-  "inflated_count": number,
-  "fair_count": number,
   "summary_note": "brief analysis"
 }}"""
 
@@ -541,14 +534,64 @@ Return ONLY valid JSON with this structure:
                 else:
                     raise Exception("Failed to parse Gemini response")
 
+            total_market = 0.0
+            total_quoted = float(result.get("total_quoted", 0))
+            inflated_count = 0
+            fair_count = 0
+            unverified_count = 0
+            estimated_items = []
+
             for item in result.get("items", []):
                 db_rate = await self.price_service.get_rate(item["description"])
+                quoted_rate = float(item.get("quoted_rate", 0))
                 if db_rate and db_rate.get("rate"):
-                    item["db_rate"] = db_rate["rate"]
-                    item["deviation_pct"] = round(
-                        abs(item["quoted_rate"] - db_rate["rate"]) / db_rate["rate"] * 100, 1
-                    )
-                    item["status"] = "inflated" if item["deviation_pct"] > 25 else "fair"
+                    item["market_rate"] = db_rate["rate"]
+                    item["price_source"] = db_rate.get("price_source", "database")
+                    item["verified"] = db_rate.get("verified", True)
+                    item["confidence"] = db_rate.get("confidence", 1.0)
+                    total_market += item["quantity"] * db_rate["rate"]
+                    if item["verified"]:
+                        item["deviation_pct"] = round(
+                            abs(quoted_rate - db_rate["rate"]) / db_rate["rate"] * 100, 1
+                        )
+                        if item["deviation_pct"] > 25:
+                            item["status"] = "inflated"
+                            inflated_count += 1
+                        else:
+                            item["status"] = "fair"
+                            fair_count += 1
+                    else:
+                        # Flagged estimate — do not claim inflation
+                        item["status"] = "unverified"
+                        item["deviation_pct"] = None
+                        unverified_count += 1
+                        estimated_items.append({
+                            "description": item["description"],
+                            "quantity": item["quantity"],
+                            "unit": item["unit"],
+                        })
+                else:
+                    item["market_rate"] = None
+                    item["status"] = "unverified"
+                    item["verified"] = False
+                    item["price_source"] = "unavailable"
+                    unverified_count += 1
+
+            result["total_market"] = round(total_market, 2)
+            result["total_overcharge"] = round(max(total_quoted - total_market, 0), 2)
+            result["inflated_count"] = inflated_count
+            result["fair_count"] = fair_count
+            result["unverified_count"] = unverified_count
+
+            # Raise demand alerts for estimate/unverified items so suppliers
+            # can respond with real prices (final total still computable).
+            if estimated_items and self.pg_db:
+                created = await self.price_service.notify_vendors(
+                    estimated_items,
+                    project_title="Quote verification",
+                    user_id=user_id,
+                )
+                result["demand_alerts_created"] = created
 
             return result
 
@@ -561,6 +604,7 @@ Return ONLY valid JSON with this structure:
                 "total_overcharge": 0,
                 "inflated_count": 0,
                 "fair_count": 0,
+                "unverified_count": 0,
                 "summary_note": f"Verification failed: {str(e)}"
             }
 
@@ -595,19 +639,51 @@ Return ONLY valid JSON with this structure:
         enriched_elements, discrepancies, out_of_stock = await self.price_service.enrich_boq_elements(
             boq["elements"], city
         )
+
+        # Drawing-derived quantities: stamp provenance so consumers can trace
+        # each item back to the drawing (quantity_source provenance).
+        drawing_extracted = getattr(request, "drawing_extracted", False) or bool(
+            getattr(request, "drawing_extracted_data", None)
+        )
+        if drawing_extracted:
+            for element in enriched_elements:
+                for item in element.get("items", []):
+                    item["quantity_source"] = "drawing"
+
         boq["elements"] = enriched_elements
+        boq["drawing_extracted"] = drawing_extracted
         boq["price_discrepancies"] = discrepancies
         boq["out_of_stock_items"] = out_of_stock
 
-        if out_of_stock and user_id:
+        # Collect flagged AI-estimate items so suppliers can provide real
+        # prices via demand alerts (final total already includes the estimate).
+        estimated_items = []
+        for element in enriched_elements:
+            for item in element.get("items", []):
+                if item.get("price_source") == "ai_estimate" or item.get("rate_source") == "ai_estimate":
+                    estimated_items.append({
+                        "item_code": item.get("item_code", item.get("itemCode", "")),
+                        "description": item.get("description", ""),
+                        "quantity": item.get("quantity", 0),
+                        "unit": item.get("unit", ""),
+                        "city": city,
+                        "estimated": True,
+                    })
+        boq["estimated_items"] = estimated_items
+        boq["estimated_count"] = len(estimated_items)
+
+        if user_id:
             project_title = enriched["project_info"]["project_title"]
-            notified_count = await self.price_service.notify_vendors(
-                out_of_stock_items=out_of_stock,
-                project_title=project_title,
-                user_id=user_id,
-            )
-            for item in boq["out_of_stock_items"]:
-                item["vendor_notified"] = True
+            demand_items = out_of_stock + estimated_items
+            if demand_items:
+                notified_count = await self.price_service.notify_vendors(
+                    out_of_stock_items=demand_items,
+                    project_title=project_title,
+                    user_id=user_id,
+                )
+                for item in boq["out_of_stock_items"]:
+                    item["vendor_notified"] = True
+                boq["demand_alerts_created"] = notified_count
 
         totals = self.price_service.recalculate_totals(boq["elements"])
         total = totals["total_contract_sum"]
@@ -708,7 +784,9 @@ DERIVED QUANTITIES (pre-calculated):
 {j.dumps(derived, indent=2)}
 
 IMPORTANT RULES:
-1. Use current Nigerian market rates (NGN) for {city}
+1. Do NOT provide market rates/prices. Generate quantities and specifications ONLY.
+   Prices are added separately from verified database rates by the price enrichment service.
+   If a price is unavoidable in an item, set rate=0 — do not estimate or invent prices.
 2. Apply these wastage factors: blocks 5%, concrete 5%, tiles 10%, roofing 12%, reinforcement 5%
 3. Structure the BOQ in this Nigerian standard order:
    - Preliminaries (site setup, insurance, scaffolding)
@@ -741,7 +819,8 @@ Return ONLY valid JSON with this exact structure:
           "unit": string,
           "rate": number,
           "amount": number,
-          "estimated": bool
+          "estimated": bool,
+          "quantity_source": "mitm" | "drawing" | "user" | "ai"
         }}
       ]
     }}
@@ -901,6 +980,7 @@ Return ONLY valid JSON with this exact structure:
                 "quantity": qty, "unit": unit,
                 "rate": round(rate), "amount": round(qty * rate),
                 "estimated": True,
+                "quantity_source": "mitm",  # Nigerian default ratio based
             })
 
         elements = []

@@ -3,6 +3,7 @@ Token Service — manages user token balance, consumption, and purchases.
 """
 from typing import Optional, Dict, Any, List
 import logging
+import asyncio
 from datetime import datetime
 from decimal import Decimal
 
@@ -15,6 +16,11 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Phase 10: per-user in-process lock so concurrent token deductions can't
+# double-spend the same balance/free-tier allowance.
+_REDIS_LOCKS: Dict[str, asyncio.Lock] = {}
+_REDIS_LOCKS_GUARD = asyncio.Lock()
+
 # ── Token cost configuration ────────────────────────────────────────────────
 
 TOKEN_COSTS: Dict[str, int] = {
@@ -24,10 +30,24 @@ TOKEN_COSTS: Dict[str, int] = {
     "export_excel": 0.5,
     "export_docx": 0.5,
     "boq_regenerate": 1,
+    # Phase 4/8 — AI procurement intelligence operations
+    "drawing_analysis": 1,
+    "quotation_analysis": 1,
+    "supplier_optimisation": 2,
+    "procurement_intelligence": 2,
+    # Server-side chat message allowance (differentiated per tier)
+    "chat_message": 0,  # 0 token cost; limits enforced separately per tier
 }
 
 FREE_TIER_MONTHLY_TOKENS = 2
 SIGNUP_FREE_TOKENS = 100
+
+# Server-side chat message limits per tier (Phase 8)
+CHAT_MESSAGE_LIMITS = {
+    "anonymous": 20,      # per month per IP
+    "authenticated": 200, # free accounts per month
+    "premium": 500,       # users who have purchased tokens
+}
 
 # ── Token pack pricing ──────────────────────────────────────────────────────
 
@@ -94,6 +114,24 @@ class TokenService:
             logger.warning(f"Unknown action type: {action_type}")
             return False
 
+        # Per-user lock: prevents concurrent requests from double-spending.
+        async with _REDIS_LOCKS_GUARD:
+            lock = _REDIS_LOCKS.get(user_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                _REDIS_LOCKS[user_id] = lock
+        async with lock:
+            return await self._deduct_locked(user_id, action_type, cost, boq_id, description)
+
+    async def _deduct_locked(
+        self,
+        user_id: str,
+        action_type: str,
+        cost: int,
+        boq_id: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> bool:
+        """Deduct tokens while holding the per-user lock (no double-spend)."""
         usage = await self.get_or_create_usage(user_id)
 
         # Check free tier first
@@ -207,6 +245,40 @@ class TokenService:
         await self.db.commit()
         await self.db.refresh(usage)
         return usage
+
+    # ── Chat message limits (Phase 8) ────────────────────────────────────────
+
+    async def increment_chat_messages(self, user_id: str) -> int:
+        """Increment monthly chat message count for an authenticated user."""
+        usage = await self.get_or_create_usage(user_id)
+        current_month = datetime.utcnow().strftime("%Y-%m")
+        if usage.chat_messages_month != current_month:
+            usage.chat_messages_month = current_month
+            usage.chat_messages_used_this_month = 0
+        usage.chat_messages_used_this_month += 1
+        await self.db.commit()
+        return usage.chat_messages_used_this_month
+
+    async def chat_message_limit_for(self, user_id: Optional[str]) -> int:
+        """Return the monthly chat message limit for a user tier (None = anonymous)."""
+        if user_id is None:
+            return CHAT_MESSAGE_LIMITS["anonymous"]
+        usage = await self.get_or_create_usage(user_id)
+        # Users who have purchased (lifetime_purchased > signup bonus) => premium
+        if usage.lifetime_purchased > SIGNUP_FREE_TOKENS:
+            return CHAT_MESSAGE_LIMITS["premium"]
+        return CHAT_MESSAGE_LIMITS["authenticated"]
+
+    async def chat_messages_remaining(self, user_id: Optional[str]) -> int:
+        """Return remaining chat messages for a user/IP in the current month."""
+        limit = await self.chat_message_limit_for(user_id)
+        if user_id is None:
+            return limit  # anonymous enforced per-IP via client_ip dict in endpoint
+        usage = await self.get_or_create_usage(user_id)
+        current_month = datetime.utcnow().strftime("%Y-%m")
+        if usage.chat_messages_month != current_month:
+            return limit
+        return max(0, limit - usage.chat_messages_used_this_month)
 
     # ── Free tier ────────────────────────────────────────────────────────────
 

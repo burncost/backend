@@ -195,6 +195,178 @@ async def analyze_drawing(
     )
 
 
+### Generate BOQ from drawing (automatic pipeline: analyze → map → generate)
+@router.post("/generate-from-drawing", status_code=status.HTTP_201_CREATED)
+async def generate_boq_from_drawing(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_mongodb),
+    pg_db: AsyncSession = Depends(get_db),
+):
+    """
+    Upload a drawing → Gemini Vision extraction → DrawingToBOQMapper →
+    full BOQ generation in one call.
+    When drawing confidence is low, returns a targeted-manual-input fallback
+    with the extracted geometry pre-filled so the user only confirms dimensions.
+    Token cost: boq_generate_drawing (2).
+    """
+    # Validate MIME type + size (mirror analyze_drawing)
+    if file.content_type not in _ACCEPTED_MIMES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Unsupported file type: {file.content_type}. "
+                f"Accepted: PDF, JPEG, PNG, WebP, TIFF. "
+                f"CAD files (.dwg/.dxf) are NOT accepted."
+            )
+        )
+    content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="File size exceeds 20MB limit for drawing analysis.",
+        )
+    await file.seek(0)
+
+    # ── 1. Analyze drawing (free, matches /analyze-drawing behavior) ──
+    ai_service = AIService()
+    metadata = {
+        "file_name": file.filename or "uploaded_drawing",
+        "file_type": file.content_type or "image/png",
+        "file_size_bytes": len(content),
+    }
+    analysis = await ai_service.analyze_document(
+        file_content=content,
+        file_type=file.filename or "drawing.png",
+        extracted_metadata=metadata,
+    )
+
+    if not analysis.get("processed"):
+        errors = analysis.get("processingErrors", ["AI analysis failed"])
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "AI analysis could not extract building data from this drawing.",
+                "fallback": "manual",
+                "notes": ["Please enter dimensions manually."],
+                "errors": errors,
+            },
+        )
+
+    # Build extracted geometry (same shape as /analyze-drawing)
+    rooms = analysis.get("rooms", [])
+    elements = analysis.get("detectedElements", [])
+    materials = analysis.get("detectedMaterials", [])
+    extracted_geometry = {
+        "source": "gemini_vision",
+        "format": "pdf" if file.content_type == "application/pdf" else "image",
+        "file_name": file.filename,
+        "file_size_bytes": len(content),
+        "rooms": [
+            {
+                "name": r.get("roomName", f"Room {i+1}"),
+                "area_m2": r.get("area") or 0,
+                "perimeter_m": r.get("perimeter") or 0,
+            }
+            for i, r in enumerate(rooms)
+        ],
+        "floor_area_m2": sum(r.get("area") or 0 for r in rooms),
+        "elements": elements,
+        "materials": materials,
+    }
+    has_structural = any(
+        e.get("elementType") in ("column", "beam", "foundation", "slab")
+        for e in elements
+    )
+    has_sections = any(
+        e.get("elementType") in ("external_wall", "internal_wall")
+        for e in elements
+    )
+    drawing_type = (
+        "complete_set" if (has_structural and has_sections)
+        else "floor_and_sections" if has_sections
+        else "floor_plan_only"
+    )
+
+    room_confidences = [r.get("confidence", 0.5) for r in rooms if "confidence" in r]
+    element_confidences = [e.get("confidence", 0.5) for e in elements if "confidence" in e]
+    all_confidences = room_confidences + element_confidences
+    avg_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0.5
+
+    from app.services.drawing_to_boq_mapper import DrawingToBOQMapper
+    mapper = DrawingToBOQMapper()
+    mapped = mapper.map(
+        extracted_geometry=extracted_geometry,
+        drawing_quality=None,
+        project_meta={"city": "Abuja", "project_title": file.filename or "Drawing BOQ"},
+    )
+
+    # ── 2. Targeted manual fallback when confidence too low / no geometry ──
+    if mapped["needs_manual_fallback"] or avg_confidence < 0.4:
+        return {
+            "success": True,
+            "path": "targeted_manual",
+            "drawing_type": drawing_type,
+            "confidence": round(avg_confidence, 2),
+            "extracted_geometry": extracted_geometry,
+            "fallback_reason": mapped.get("fallback_reason") or (
+                "Drawing confidence is low. Review extracted dimensions, "
+                "then call /generate-from-params with pre-filled data."
+            ),
+        }
+
+    # ── 3. Deduct tokens (drawing cost) then generate ──
+    token_service = TokenService(pg_db)
+    has_tokens = await token_service.deduct_tokens(
+        user_id=current_user["id"],
+        action_type="boq_generate_drawing",
+        description=f"BOQ generation from drawing: {file.filename}",
+    )
+    if not has_tokens:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Insufficient tokens. Purchase more tokens or use your free tier.",
+        )
+
+    boq_generator = BOQGenerator(db, pg_db=pg_db)
+    boq = await boq_generator.generate_from_parameters(
+        request=mapped["request"],
+        user_id=current_user["id"],
+    )
+    boq["drawing_analysis"] = {
+        "drawing_type": drawing_type,
+        "confidence": round(avg_confidence, 2),
+        "extracted_geometry": extracted_geometry,
+    }
+
+    # Save to MongoDB (mirror generate-from-params)
+    if db:
+        from datetime import datetime as _dt
+        now = _dt.utcnow()
+        boq_doc = {
+            "projectId": request_title(boq, file.filename),
+            "boqNumber": f"BOQ-{now.strftime('%Y%m%d%H%M%S')}",
+            "title": request_title(boq, file.filename),
+            "status": "generated",
+            "version": 1,
+            "generationMethod": "drawing",
+            "createdBy": current_user["id"],
+            "boqData": boq,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        result = await db["boqs"].insert_one(boq_doc)
+        boq["_id"] = str(result.inserted_id)
+
+    return boq
+
+
+def request_title(boq: Dict[str, Any], fallback: str) -> str:
+    """Resolve the BOQ project title for persistence."""
+    pi = boq.get("project_info") or {}
+    return pi.get("project_title") or fallback or "Drawing BOQ"
+
+
 ### Generate BOQ from building parameters
 
 @router.post("/generate-from-params", status_code=status.HTTP_201_CREATED)
@@ -589,15 +761,39 @@ async def place_boq_order(
             detail="At least one item is required to place an order"
         )
 
+    from sqlalchemy import text
+
+    # Phase 10: idempotency — order_number is derived from the BOQ + user so a
+    # retry returns the existing order instead of duplicating it.
+    order_number = f"ORD-{boq_id[:8].upper()}-{current_user['id'][:8]}"
+    existing = await pg_db.execute(
+        text("SELECT id, order_number FROM orders WHERE order_number = :on"),
+        {"on": order_number},
+    )
+    existing_row = existing.fetchone()
+    if existing_row:
+        existing_order = await pg_db.execute(
+            text("""
+                SELECT id, order_number, status, total_amount, payment_status
+                FROM orders WHERE id = :oid
+            """),
+            {"oid": existing_row[0]},
+        )
+        row = existing_order.fetchone()
+        return BOQOrderResponse(
+            success=True,
+            order_id=str(row[0]),
+            order_number=str(row[1]),
+            message="This BOQ has already been ordered — returning the existing order.",
+            items_ordered=len(order_request.items),
+            total_amount=float(row[3] or 0),
+        )
+
     try:
         # Calculate total
         total_amount = sum(item.quantity * item.rate for item in order_request.items)
 
-        # Generate order number
-        order_number = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{current_user['id'][:8]}"
-
         # Create order in PostgreSQL
-        from sqlalchemy import text
         order_result = await pg_db.execute(
             text("""
                 INSERT INTO orders (

@@ -114,6 +114,30 @@ class NotificationService:
         </div></body></html>"""
         return await self.send_email(email, f"Welcome to Burncost, {full_name}!", html)
 
+    async def send_oauth_welcome_email(self, email: str, full_name: str, role: str = "customer") -> bool:
+        """Send a welcome email for OAuth signups that encourages completing the profile."""
+        dashboard_path = "supplier-dashboard" if role == "vendor" else "dashboard"
+        dashboard_link = f"{settings.FRONTEND_URL}/{dashboard_path}"
+        html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+        <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
+        <div style="text-align:center;margin-bottom:20px;">
+            <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
+        </div>
+        <h2 style="color:#FF6B00;">Welcome to Burncost, {full_name}! 🎉</h2>
+        <p>Thank you for joining Burncost — Nigeria's trusted marketplace for construction materials.</p>
+        <p>Your account is active. To get the most out of Burncost, please complete your profile:</p>
+        <ul style="line-height:1.8;">
+            <li>🛠️ Complete your profile details</li>
+            <li>🏢 Add your business information (if you're a supplier)</li>
+            <li>🔍 Browse suppliers, compare prices and order materials</li>
+        </ul>
+        <div style="text-align:center;margin:24px 0;">
+            <a href="{dashboard_link}" style="background:#FF6B00;color:white;padding:12px 32px;border-radius:6px;text-decoration:none;font-weight:bold;">Complete Your Profile</a>
+        </div>
+        <p style="color:#888;font-size:12px;">© 2026 Burncost. All rights reserved.</p>
+        </div></body></html>"""
+        return await self.send_email(email, f"Welcome to Burncost, {full_name}!", html)
+
     async def send_verification_email(self, email: str, verification_token: str, full_name: str) -> bool:
         """Send email verification link."""
         verify_link = f"{settings.API_URL}/auth/verify-email?token={verification_token}"

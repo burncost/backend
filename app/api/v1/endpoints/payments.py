@@ -15,6 +15,13 @@ from app.models.notification import Notification
 from app.api.deps import get_current_user, get_current_admin, get_current_vendor
 from app.services.payment_service import PaymentService
 from app.services.notification_service import NotificationService
+from app.services.payment_fraud_guard import (
+    verify_order_payment,
+    verify_webhook_signature,
+    audit_payment_event,
+    payment_attempt_limit,
+    record_fraud_flag,
+)
 
 import logging
 
@@ -108,10 +115,11 @@ async def list_vendor_payments(
     orders = result.scalars().all()
 
     # Compute summary for vendor
-    # Fetch vendor's commission rate
-    vendor_result = await db.execute(select(Vendor).where(Vendor.id == vendor_id))
-    vendor = vendor_result.scalar_one_or_none()
-    commission_rate = float(vendor.commission_rate) / 100.0 if vendor else 0.10
+    # ── Phase 13: commission removed from internal calc (kept commented for future) ──
+    # vendor_result = await db.execute(select(Vendor).where(Vendor.id == vendor_id))
+    # vendor = vendor_result.scalar_one_or_none()
+    # commission_rate = float(vendor.commission_rate) / 100.0 if vendor else 0.10
+    # ── /Phase 13 ─────────────────────────────────────────────────────────────────
 
     # Fetch all order items for this vendor to compute actual vendor share
     all_order_ids = select(OrderItem.order_id).where(OrderItem.vendor_id == vendor_id).distinct().subquery()
@@ -128,7 +136,8 @@ async def list_vendor_payments(
     next_payout_date = None
 
     for item, payment_status in rows:
-        vendor_share = float(item.total_price) * (1 - commission_rate)
+        # vendor_share = float(item.total_price) * (1 - commission_rate)  # Phase 13: commission disabled
+        vendor_share = float(item.total_price)  # full amount, no commission
         if payment_status == PaymentStatus.COMPLETED:
             total_earned += vendor_share
         else:
@@ -171,6 +180,7 @@ async def list_vendor_payments(
 @router.post("/process")
 async def process_payment(
     payment_data: dict,
+    request: Request,
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
@@ -190,13 +200,17 @@ async def process_payment(
     """
     order_id = payment_data.get("order_id")
     payment_method = payment_data.get("payment_method", "card")
-    amount = payment_data.get("amount")
 
     if not order_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="order_id is required"
         )
+
+    # Phase 11: rate-limit payment attempts per user/IP to blunt skimming/brute force.
+    client_ip = request.client.host if request.client else "unknown"
+    if not await payment_attempt_limit(10, 60, str(current_user.id), client_ip):
+        raise HTTPException(status_code=429, detail="Too many payment attempts. Please try again shortly.")
 
     # Verify order exists and belongs to user
     try:
@@ -221,15 +235,51 @@ async def process_payment(
             detail="Order does not belong to current user"
         )
 
+    # Phase 13: final order placement requires a verified email (soft gate).
+    if not current_user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Please verify your email to complete this order. Check your inbox for the verification link.",
+        )
+
     if order.payment_status == PaymentStatus.COMPLETED:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Order has already been paid"
         )
 
+    # Phase 11: NEVER trust a client-supplied amount — the server total is
+    # the single source of truth (payment manipulation protection).
+    # A client-supplied amount that disagrees with the DB total is a fraud
+    # signal and is flagged, not honoured.
+    client_amount = payment_data.get("amount")
+    server_amount = float(order.total_amount)
+    if client_amount is not None and abs(float(client_amount) - server_amount) > 0.01:
+        await record_fraud_flag(
+            db,
+            alert_type="Payment Manipulation",
+            description=f"Client supplied amount ₦{client_amount} differs from order total ₦{server_amount} for order {order.order_number}.",
+            amount=server_amount,
+            user_id=str(current_user.id),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Amount does not match the order total."
+        )
+
     # Initialize payment via Flutterwave (or Paystack fallback, or mock)
     reference = f"BURNCOST-{order.order_number}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
     user_email = current_user.email
+
+    # Phase 11: audit every payment initialization.
+    await audit_payment_event(
+        db,
+        user_id=str(current_user.id),
+        action="initialize",
+        reference=reference,
+        ip=client_ip,
+        amount=server_amount,
+    )
 
     payment_result = await payment_service.initialize_payment(
         amount=float(order.total_amount),
@@ -272,6 +322,14 @@ async def process_payment(
                 if product.quantity <= 0:
                     product.status = "out_of_stock"
 
+        # Phase 13: grow each vendor's transaction volume and re-check tier.
+        from app.api.v1.endpoints.tiers import assign_tier_by_volume
+        for item in order.items:
+            vend = (await db.execute(select(Vendor).where(Vendor.id == item.vendor_id))).scalar_one_or_none()
+            if vend:
+                vend.transaction_volume = (vend.transaction_volume or 0) + item.total_price
+                await assign_tier_by_volume(db, vend)
+
         # Create payment notification
         notification = Notification(
             user_id=current_user.id,
@@ -282,7 +340,7 @@ async def process_payment(
         db.add(notification)
         await db.commit()
 
-        logger.info(f"Payment processed for order {order_id}: method={payment_method}, amount={amount}")
+        logger.info(f"Payment processed for order {order_id}: method={payment_method}, amount={server_amount}")
 
         # Send order confirmation + payment receipt emails in background
         email_items = [
@@ -382,6 +440,13 @@ async def verify_payment(
                 if order and order.payment_status != PaymentStatus.COMPLETED:
                     order.payment_status = PaymentStatus.COMPLETED
                     order.status = "confirmed"
+                    # Phase 13: grow each vendor's transaction volume and re-check tier.
+                    from app.api.v1.endpoints.tiers import assign_tier_by_volume
+                    for item in order.items:
+                        vend = (await db.execute(select(Vendor).where(Vendor.id == item.vendor_id))).scalar_one_or_none()
+                        if vend:
+                            vend.transaction_volume = (vend.transaction_volume or 0) + item.total_price
+                            await assign_tier_by_volume(db, vend)
                     notification = Notification(
                         user_id=order.user_id,
                         type="payment",
@@ -407,16 +472,16 @@ async def flutterwave_webhook(
     import hashlib
     import json
 
-    # Get the signature from headers
+    # Phase 11: fail-closed signature verification — reject when the secret is
+    # unset or the signature is absent/invalid (never process an unverified webhook).
+    payload_bytes = await request.body()
     signature = request.headers.get("verif-hash", "")
     secret_hash = os.getenv("FLUTTERWAVE_SECRET_HASH", "")
-
-    # Verify webhook signature
-    if secret_hash and signature != secret_hash:
-        logger.warning("Invalid Flutterwave webhook signature")
+    if not verify_webhook_signature("flutterwave", payload_bytes, signature, secret_hash):
+        logger.warning("Invalid/missing Flutterwave webhook signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    payload = await request.json()
+    payload = json.loads(payload_bytes)
     event = payload.get("event", "")
     data = payload.get("data", {})
 
@@ -434,7 +499,24 @@ async def flutterwave_webhook(
                     select(Order).where(Order.order_number == order_number)
                 )
                 order = result.scalar_one_or_none()
-                if order and order.payment_status != PaymentStatus.COMPLETED:
+                if not order:
+                    return {"status": "ok"}
+
+                # Phase 11: reconcile gateway amount vs DB order total — never
+                # confirm a mismatched amount (payment manipulation protection).
+                gateway_amount = float(data.get("amount") or 0)
+                order_amount = float(order.total_amount)
+                if abs(gateway_amount - order_amount) > 0.01:
+                    await record_fraud_flag(
+                        db,
+                        alert_type="Payment Manipulation",
+                        description=f"Webhook amount ₦{gateway_amount} differs from order total ₦{order_amount} for {order.order_number}.",
+                        amount=order_amount,
+                        user_id=str(order.user_id),
+                    )
+                    return {"status": "ok", "flagged": True}
+
+                if order.payment_status != PaymentStatus.COMPLETED:
                     order.payment_status = PaymentStatus.COMPLETED
                     order.status = "confirmed"
                     # Create notification
@@ -442,10 +524,13 @@ async def flutterwave_webhook(
                         user_id=order.user_id,
                         type="payment",
                         title="Payment Received",
-                        message=f"Payment of ₦{float(order.total_amount):,.2f} for order {order.order_number} was successful.",
+                        message=f"Payment of ₦{order_amount:,.2f} for order {order.order_number} was successful.",
                     )
                     db.add(notification)
                     await db.commit()
+                    # Audit the webhook-confirmed payment.
+                    await audit_payment_event(db, user_id=str(order.user_id), action="webhook_verify",
+                                              reference=tx_ref, amount=order_amount)
                     logger.info(f"Webhook: Payment confirmed for order {order_number}")
 
     return {"status": "ok"}
@@ -463,14 +548,12 @@ async def paystack_webhook(
     import hashlib
     import json
 
-    # Verify Paystack signature
+    # Phase 11: fail-closed signature verification — never process an unverified webhook.
     payload_bytes = await request.body()
     signature = request.headers.get("x-paystack-signature", "")
     secret = os.getenv("PAYSTACK_SECRET_KEY", "")
-    expected_signature = hashlib.sha512(payload_bytes + secret.encode()).hexdigest()
-
-    if signature and signature != expected_signature:
-        logger.warning("Invalid Paystack webhook signature")
+    if not verify_webhook_signature("paystack", payload_bytes, signature, secret):
+        logger.warning("Invalid/missing Paystack webhook signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     payload = json.loads(payload_bytes)
@@ -489,17 +572,36 @@ async def paystack_webhook(
                     select(Order).where(Order.order_number == order_number)
                 )
                 order = result.scalar_one_or_none()
-                if order and order.payment_status != PaymentStatus.COMPLETED:
+                if not order:
+                    return {"status": "ok"}
+
+                # Phase 11: reconcile gateway amount vs DB order total — never
+                # confirm a mismatched amount (payment manipulation protection).
+                gateway_amount = float(data.get("amount") or 0) / 100.0  # Paystack returns kobo
+                order_amount = float(order.total_amount)
+                if abs(gateway_amount - order_amount) > 0.01:
+                    await record_fraud_flag(
+                        db,
+                        alert_type="Payment Manipulation",
+                        description=f"Paystack webhook amount ₦{gateway_amount} differs from order total ₦{order_amount} for {order.order_number}.",
+                        amount=order_amount,
+                        user_id=str(order.user_id),
+                    )
+                    return {"status": "ok", "flagged": True}
+
+                if order.payment_status != PaymentStatus.COMPLETED:
                     order.payment_status = PaymentStatus.COMPLETED
                     order.status = "confirmed"
                     notification = Notification(
                         user_id=order.user_id,
                         type="payment",
                         title="Payment Received",
-                        message=f"Payment of ₦{float(order.total_amount):,.2f} for order {order.order_number} was successful.",
+                        message=f"Payment of ₦{order_amount:,.2f} for order {order.order_number} was successful.",
                     )
                     db.add(notification)
                     await db.commit()
+                    await audit_payment_event(db, user_id=str(order.user_id), action="webhook_verify",
+                                              reference=reference, amount=order_amount)
                     logger.info(f"Webhook: Payment confirmed for order {order_number}")
 
     return {"status": "ok"}

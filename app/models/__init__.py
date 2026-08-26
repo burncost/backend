@@ -20,6 +20,13 @@ from app.models.vendor_shipping_override import VendorShippingOverride
 from app.models.vendor_draft import VendorDraft
 from app.models.vendor_verification_tier import VendorVerificationTier
 from app.models.vendor_review import VendorReview
+from app.models.negotiation import Negotiation, NegotiationCounterOffer, DiscountConfiguration, NegotiationAuditEntry
+from app.models.fraud import FraudAlert, FraudAlertAccount, FraudAlertTransaction
+from app.models.price_boq import PriceAnomaly, PriceAnomalyHistory, BOQAnalysis, BOQAnalysisItem, BOQAnalysisFlag
+from app.models.dispute import Dispute, DisputeEvidence, DisputeResolution, DisputeTimeline
+from app.models.system_setting import SystemSetting
+from app.models.ai_agent_log import AIAgentLog
+from app.models.quotation import Quotation, QuotationLineItem
 
 __all__ = [
     "User",
@@ -53,4 +60,24 @@ __all__ = [
     "VendorDraft",
     "VendorVerificationTier",
     "VendorReview",
+    "Negotiation",
+    "NegotiationCounterOffer",
+    "DiscountConfiguration",
+    "NegotiationAuditEntry",
+    "FraudAlert",
+    "FraudAlertAccount",
+    "FraudAlertTransaction",
+    "PriceAnomaly",
+    "PriceAnomalyHistory",
+    "BOQAnalysis",
+    "BOQAnalysisItem",
+    "BOQAnalysisFlag",
+    "Dispute",
+    "DisputeEvidence",
+    "DisputeResolution",
+    "DisputeTimeline",
+    "SystemSetting",
+    "AIAgentLog",
+    "Quotation",
+    "QuotationLineItem",
 ]

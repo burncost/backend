@@ -29,7 +29,7 @@ class SupplierListItem(BaseModel):
     state: str | None = None
     business_image: str | None = None
     verification_status: str
-    commission_rate: float = 0.0
+    # commission_rate: float = 0.0  # Phase 13: commission removed from output
     rating: float = 0.0
     total_reviews: int = 0
     total_sales: float = 0.0
@@ -90,7 +90,7 @@ async def list_suppliers(
             state=s.state,
             business_image=s.business_image,
             verification_status=s.verification_status,
-            commission_rate=float(s.commission_rate) if s.commission_rate else 0.0,
+            # commission_rate=float(s.commission_rate) if s.commission_rate else 0.0,  # Phase 13: commission removed
             rating=float(s.rating) if s.rating else 0.0,
             total_reviews=s.total_reviews or 0,
             total_sales=float(s.total_sales) if s.total_sales else 0.0,

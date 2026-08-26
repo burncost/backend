@@ -192,7 +192,7 @@ class ChatAIService:
                 contents=contents,
                 config=genai_types.GenerateContentConfig(
                     temperature=0.2,
-                    max_output_tokens=4096,
+                    max_output_tokens=600,
                     tools=gemini_tools,
                 ),
             )

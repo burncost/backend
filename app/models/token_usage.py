@@ -33,6 +33,10 @@ class TokenUsage(Base):
     free_tier_used_this_month = Column(Integer, default=0, nullable=False)
     free_tier_month = Column(String(7), nullable=True)  # "2026-07"
 
+    # Server-side chat message limits (mirrors free_tier_* pattern)
+    chat_messages_used_this_month = Column(Integer, default=0, nullable=False)
+    chat_messages_month = Column(String(7), nullable=True)  # "2026-07"
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

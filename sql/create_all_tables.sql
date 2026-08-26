@@ -19,8 +19,11 @@ CREATE TYPE transactiontype AS ENUM ('purchase', 'consumption', 'refund', 'free_
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE NOT NULL,
-    phone_number VARCHAR(20) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
+    phone_number VARCHAR(20) UNIQUE,             -- nullable (OAuth / minimal signup)
+    password_hash VARCHAR(255),                  -- nullable (OAuth accounts)
+    auth_provider VARCHAR(20) DEFAULT 'email',   -- email | google | facebook
+    oauth_id VARCHAR(255) UNIQUE,                -- provider id for OAuth
+    avatar_url TEXT,                             -- provider avatar
     role user_role NOT NULL DEFAULT 'customer',
     status user_status NOT NULL DEFAULT 'pending_verification',
     email_verified BOOLEAN DEFAULT FALSE,
@@ -31,6 +34,8 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE INDEX IF NOT EXISTS ix_users_email ON users (email);
 CREATE INDEX IF NOT EXISTS ix_users_phone_number ON users (phone_number);
+CREATE INDEX IF NOT EXISTS ix_users_auth_provider ON users (auth_provider);
+CREATE INDEX IF NOT EXISTS ix_users_oauth_id ON users (oauth_id);
 
 -- =============================================================
 -- 2. USER PROFILES
@@ -471,6 +476,9 @@ CREATE TABLE IF NOT EXISTS token_usage (
     lifetime_consumed INTEGER NOT NULL DEFAULT 0,
     free_tier_used_this_month INTEGER NOT NULL DEFAULT 0,
     free_tier_month VARCHAR(7),
+    -- Server-side chat message limits (mirrors free_tier_* pattern)
+    chat_messages_used_this_month INTEGER NOT NULL DEFAULT 0,
+    chat_messages_month VARCHAR(7),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -789,6 +797,423 @@ INSERT INTO user_profiles (user_id, first_name, other_name, last_name, business_
 SELECT id, 'Manager', 'User', 'Burncost', 'Burncost'
 FROM users WHERE email = 'manager@burncost.com'
 ON CONFLICT (user_id) DO NOTHING;
+
+-- =============================================================
+-- 32. NEGOTIATIONS (Phase 2)
+-- =============================================================
+CREATE TABLE IF NOT EXISTS negotiations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    negotiation_number VARCHAR(50) UNIQUE NOT NULL,
+    builder_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    supplier_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+    product_id UUID REFERENCES products(id),
+    product_name VARCHAR(500) NOT NULL,
+    category VARCHAR(100),
+    quantity NUMERIC(15,2) DEFAULT 1,
+    unit VARCHAR(50) DEFAULT 'piece',
+    requested_discount NUMERIC(5,2) NOT NULL,
+    counter_offer NUMERIC(5,2),
+    final_discount NUMERIC(5,2),
+    value NUMERIC(15,2) DEFAULT 0,
+    status VARCHAR(50) DEFAULT 'pending',
+    admin_note TEXT,
+    flagged BOOLEAN DEFAULT FALSE,
+    suspended BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_negotiations_negotiation_number ON negotiations (negotiation_number);
+CREATE INDEX IF NOT EXISTS ix_negotiations_builder_id ON negotiations (builder_id);
+CREATE INDEX IF NOT EXISTS ix_negotiations_supplier_id ON negotiations (supplier_id);
+CREATE INDEX IF NOT EXISTS ix_negotiations_status ON negotiations (status);
+CREATE INDEX IF NOT EXISTS ix_negotiations_created_at ON negotiations (created_at);
+CREATE INDEX IF NOT EXISTS ix_negotiations_status_created ON negotiations (status, created_at);
+
+-- =============================================================
+-- 33. NEGOTIATION COUNTER OFFERS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS negotiation_counter_offers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    negotiation_id UUID NOT NULL REFERENCES negotiations(id) ON DELETE CASCADE,
+    offered_by VARCHAR(20) NOT NULL,
+    discount_percent NUMERIC(5,2) NOT NULL,
+    note TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_negotiation_counter_offers_negotiation_id ON negotiation_counter_offers (negotiation_id);
+
+-- =============================================================
+-- 34. DISCOUNT CONFIGURATIONS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS discount_configurations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_number VARCHAR(50) UNIQUE NOT NULL,
+    supplier_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+    product_id UUID REFERENCES products(id),
+    product_name VARCHAR(500) NOT NULL,
+    category VARCHAR(100),
+    discount_enabled BOOLEAN DEFAULT TRUE,
+    max_discount_pct NUMERIC(5,2) DEFAULT 15,
+    auto_approval_threshold NUMERIC(5,2) DEFAULT 5,
+    auto_rejection_threshold NUMERIC(5,2) DEFAULT 18,
+    min_order_qty INTEGER DEFAULT 1,
+    min_order_value NUMERIC(15,2) DEFAULT 0,
+    quote_expiration_hours INTEGER DEFAULT 48,
+    last_modified_by VARCHAR(100),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_discount_configurations_config_number ON discount_configurations (config_number);
+CREATE INDEX IF NOT EXISTS ix_discount_configurations_supplier_id ON discount_configurations (supplier_id);
+
+-- =============================================================
+-- 35. NEGOTIATION AUDIT ENTRIES
+-- =============================================================
+CREATE TABLE IF NOT EXISTS negotiation_audit_entries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    negotiation_id UUID NOT NULL REFERENCES negotiations(id) ON DELETE CASCADE,
+    action VARCHAR(100) NOT NULL,
+    performed_by VARCHAR(100),
+    prev_value VARCHAR(255),
+    new_value VARCHAR(255),
+    note TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_negotiation_audit_entries_negotiation_id ON negotiation_audit_entries (negotiation_id);
+CREATE INDEX IF NOT EXISTS ix_negotiation_audit_entries_created_at ON negotiation_audit_entries (created_at);
+
+-- =============================================================
+-- 36. FRAUD ALERTS (Phase 3)
+-- =============================================================
+CREATE TABLE IF NOT EXISTS fraud_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    alert_number VARCHAR(50) UNIQUE NOT NULL,
+    alert_type VARCHAR(100) NOT NULL,
+    severity VARCHAR(20) DEFAULT 'medium',
+    description TEXT,
+    risk_score INTEGER DEFAULT 0,
+    amount NUMERIC(15,2) DEFAULT 0,
+    status VARCHAR(50) DEFAULT 'under_review',
+    detected_at TIMESTAMP DEFAULT NOW(),
+    resolved_at TIMESTAMP,
+    resolved_by VARCHAR(100),
+    is_negotiation BOOLEAN DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS ix_fraud_alerts_alert_number ON fraud_alerts (alert_number);
+CREATE INDEX IF NOT EXISTS ix_fraud_alerts_detected_at ON fraud_alerts (detected_at);
+CREATE INDEX IF NOT EXISTS ix_fraud_alerts_status_severity ON fraud_alerts (status, severity);
+
+-- =============================================================
+-- 37. FRAUD ALERT ACCOUNTS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS fraud_alert_accounts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    alert_id UUID NOT NULL REFERENCES fraud_alerts(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    account_id VARCHAR(50),
+    account_name VARCHAR(255),
+    account_email VARCHAR(255),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_fraud_alert_accounts_alert_id ON fraud_alert_accounts (alert_id);
+
+-- =============================================================
+-- 38. FRAUD ALERT TRANSACTIONS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS fraud_alert_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    alert_id UUID NOT NULL REFERENCES fraud_alerts(id) ON DELETE CASCADE,
+    transaction_id VARCHAR(50),
+    amount NUMERIC(15,2) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_fraud_alert_transactions_alert_id ON fraud_alert_transactions (alert_id);
+
+-- =============================================================
+-- 39. PRICE ANOMALIES (Phase 4)
+-- =============================================================
+CREATE TABLE IF NOT EXISTS price_anomalies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    anomaly_number VARCHAR(50) UNIQUE NOT NULL,
+    product_id UUID REFERENCES products(id),
+    supplier_id UUID REFERENCES vendors(id),
+    item_name VARCHAR(500) NOT NULL,
+    supplier_name VARCHAR(255),
+    market_price NUMERIC(15,2) DEFAULT 0,
+    quoted_price NUMERIC(15,2) DEFAULT 0,
+    variance_pct NUMERIC(5,2) DEFAULT 0,
+    status VARCHAR(20) DEFAULT 'flagged',
+    detected_at TIMESTAMP DEFAULT NOW(),
+    reviewed_at TIMESTAMP,
+    reviewed_by VARCHAR(100)
+);
+CREATE INDEX IF NOT EXISTS ix_price_anomalies_anomaly_number ON price_anomalies (anomaly_number);
+CREATE INDEX IF NOT EXISTS ix_price_anomalies_detected_at ON price_anomalies (detected_at);
+CREATE INDEX IF NOT EXISTS ix_price_anomalies_status ON price_anomalies (status);
+
+-- =============================================================
+-- 40. PRICE ANOMALY HISTORY
+-- =============================================================
+CREATE TABLE IF NOT EXISTS price_anomaly_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    anomaly_id UUID NOT NULL REFERENCES price_anomalies(id) ON DELETE CASCADE,
+    price NUMERIC(15,2) DEFAULT 0,
+    recorded_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_price_anomaly_history_anomaly_id ON price_anomaly_history (anomaly_id);
+
+-- =============================================================
+-- 41. BOQ ANALYSES
+-- =============================================================
+CREATE TABLE IF NOT EXISTS boq_analyses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    boq_number VARCHAR(50) UNIQUE NOT NULL,
+    title VARCHAR(500) NOT NULL,
+    status VARCHAR(50) DEFAULT 'completed',
+    created_by VARCHAR(255),
+    version INTEGER DEFAULT 1,
+    confidence NUMERIC(5,2) DEFAULT 0,
+    total_items INTEGER DEFAULT 0,
+    flagged_items INTEGER DEFAULT 0,
+    total_value NUMERIC(15,2) DEFAULT 0,
+    quoted_value NUMERIC(15,2) DEFAULT 0,
+    potential_savings NUMERIC(15,2) DEFAULT 0,
+    avg_variance NUMERIC(5,2) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_boq_analyses_boq_number ON boq_analyses (boq_number);
+CREATE INDEX IF NOT EXISTS ix_boq_analyses_created_at ON boq_analyses (created_at);
+
+-- =============================================================
+-- 42. BOQ ANALYSIS ITEMS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS boq_analysis_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    boq_id UUID NOT NULL REFERENCES boq_analyses(id) ON DELETE CASCADE,
+    category VARCHAR(100),
+    item_name VARCHAR(500) NOT NULL,
+    quantity NUMERIC(15,2) DEFAULT 0,
+    quoted_price NUMERIC(15,2) DEFAULT 0,
+    market_price NUMERIC(15,2) DEFAULT 0,
+    variance_pct NUMERIC(5,2) DEFAULT 0,
+    potential_saving NUMERIC(15,2) DEFAULT 0,
+    status VARCHAR(20) DEFAULT 'normal'
+);
+CREATE INDEX IF NOT EXISTS ix_boq_analysis_items_boq_id ON boq_analysis_items (boq_id);
+
+-- =============================================================
+-- 43. BOQ ANALYSIS FLAGS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS boq_analysis_flags (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    boq_id UUID NOT NULL REFERENCES boq_analyses(id) ON DELETE CASCADE,
+    item_id UUID,  -- FK added below after boq_analysis_items exists
+    severity VARCHAR(20) DEFAULT 'medium',
+    issue TEXT,
+    recommendation TEXT,
+    status VARCHAR(20) DEFAULT 'open',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_boq_analysis_flags_boq_id ON boq_analysis_flags (boq_id);
+
+-- =============================================================
+-- 44. DISPUTES (Phase 5)
+-- =============================================================
+CREATE TABLE IF NOT EXISTS disputes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    dispute_number VARCHAR(50) UNIQUE NOT NULL,
+    order_id UUID REFERENCES orders(id),
+    dispute_type VARCHAR(100) NOT NULL,
+    status VARCHAR(30) DEFAULT 'open',
+    priority VARCHAR(20) DEFAULT 'medium',
+    description TEXT,
+    buyer_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    supplier_id UUID REFERENCES vendors(id) ON DELETE SET NULL,
+    buyer_name VARCHAR(255),
+    supplier_name VARCHAR(255),
+    order_number VARCHAR(50),
+    amount NUMERIC(15,2) DEFAULT 0,
+    filed_by VARCHAR(100),
+    filed_at TIMESTAMP DEFAULT NOW(),
+    resolved_at TIMESTAMP,
+    resolved_by VARCHAR(100)
+);
+CREATE INDEX IF NOT EXISTS ix_disputes_dispute_number ON disputes (dispute_number);
+CREATE INDEX IF NOT EXISTS ix_disputes_status ON disputes (status);
+CREATE INDEX IF NOT EXISTS ix_disputes_filed_at ON disputes (filed_at);
+
+-- =============================================================
+-- 45. DISPUTE EVIDENCE
+-- =============================================================
+CREATE TABLE IF NOT EXISTS dispute_evidence (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    dispute_id UUID NOT NULL REFERENCES disputes(id) ON DELETE CASCADE,
+    submitted_by VARCHAR(20) DEFAULT 'buyer',
+    evidence_type VARCHAR(100),
+    description TEXT,
+    url TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_dispute_evidence_dispute_id ON dispute_evidence (dispute_id);
+
+-- =============================================================
+-- 46. DISPUTE RESOLUTIONS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS dispute_resolutions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    dispute_id UUID NOT NULL REFERENCES disputes(id) ON DELETE CASCADE,
+    resolution_type VARCHAR(50) DEFAULT 'full_refund_buyer',
+    amount_refunded NUMERIC(15,2) DEFAULT 0,
+    amount_released NUMERIC(15,2) DEFAULT 0,
+    notes TEXT,
+    decided_by VARCHAR(100),
+    decided_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_dispute_resolutions_dispute_id ON dispute_resolutions (dispute_id);
+
+-- =============================================================
+-- 47. DISPUTE TIMELINE
+-- =============================================================
+CREATE TABLE IF NOT EXISTS dispute_timeline (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    dispute_id UUID NOT NULL REFERENCES disputes(id) ON DELETE CASCADE,
+    event VARCHAR(255),
+    description TEXT,
+    actor VARCHAR(100),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_dispute_timeline_dispute_id ON dispute_timeline (dispute_id);
+
+-- =============================================================
+-- 48. SYSTEM SETTINGS (Phase 6)
+-- =============================================================
+CREATE TABLE IF NOT EXISTS system_settings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    key VARCHAR(100) UNIQUE NOT NULL,
+    value TEXT NOT NULL DEFAULT '',
+    section VARCHAR(50) DEFAULT 'general',
+    description TEXT,
+    updated_by VARCHAR(100),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_system_settings_key ON system_settings (key);
+
+-- Add deferred FK for boq_analysis_flags -> boq_analysis_items
+ALTER TABLE boq_analysis_flags
+  ADD CONSTRAINT boq_analysis_flags_item_id_fkey
+  FOREIGN KEY (item_id) REFERENCES boq_analysis_items(id);
+
+-- =============================================================
+-- ENUM CHECK CONSTRAINTS (Phase 2-6 string-status columns)
+-- =============================================================
+ALTER TABLE negotiations
+  ADD CONSTRAINT chk_negotiations_status CHECK (status IS NULL OR status IN ('pending','approved','rejected','auto_approved','auto_rejected','counter_offered','counter_accepted','counter_declined','expired'));
+ALTER TABLE negotiation_counter_offers
+  ADD CONSTRAINT chk_negotiation_counter_offers_offered_by CHECK (offered_by IS NULL OR offered_by IN ('builder','supplier','admin'));
+ALTER TABLE fraud_alerts
+  ADD CONSTRAINT chk_fraud_alerts_severity CHECK (severity IS NULL OR severity IN ('low','medium','high','critical'));
+ALTER TABLE fraud_alerts
+  ADD CONSTRAINT chk_fraud_alerts_status CHECK (status IS NULL OR status IN ('under_review','cleared','blocked'));
+ALTER TABLE price_anomalies
+  ADD CONSTRAINT chk_price_anomalies_status CHECK (status IS NULL OR status IN ('flagged','warning','normal','approved','rejected'));
+ALTER TABLE boq_analyses
+  ADD CONSTRAINT chk_boq_analyses_status CHECK (status IS NULL OR status IN ('completed','processing','failed'));
+ALTER TABLE boq_analysis_items
+  ADD CONSTRAINT chk_boq_analysis_items_status CHECK (status IS NULL OR status IN ('flagged','warning','normal'));
+ALTER TABLE boq_analysis_flags
+  ADD CONSTRAINT chk_boq_analysis_flags_severity CHECK (severity IS NULL OR severity IN ('high','medium','low'));
+ALTER TABLE boq_analysis_flags
+  ADD CONSTRAINT chk_boq_analysis_flags_status CHECK (status IS NULL OR status IN ('open','resolved'));
+ALTER TABLE disputes
+  ADD CONSTRAINT chk_disputes_status CHECK (status IS NULL OR status IN ('open','in_review','resolved','escalated'));
+ALTER TABLE disputes
+  ADD CONSTRAINT chk_disputes_priority CHECK (priority IS NULL OR priority IN ('low','medium','high','critical'));
+ALTER TABLE dispute_resolutions
+  ADD CONSTRAINT chk_dispute_resolutions_type CHECK (resolution_type IS NULL OR resolution_type IN ('full_refund_buyer','no_refund_supplier','partial_split'));
+ALTER TABLE dispute_evidence
+  ADD CONSTRAINT chk_dispute_evidence_submitted_by CHECK (submitted_by IS NULL OR submitted_by IN ('buyer','supplier'));
+
+-- =============================================================
+-- QUOTATIONS (user-uploaded supplier quotations for verification)
+-- =============================================================
+CREATE TABLE IF NOT EXISTS quotations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    quotation_number VARCHAR(50) UNIQUE NOT NULL,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    supplier_name VARCHAR(255),
+    city VARCHAR(100),
+    currency VARCHAR(10) DEFAULT 'NGN',
+    status VARCHAR(20) DEFAULT 'pending',  -- pending / verified / flagged / reviewed
+    total_quoted NUMERIC(15,2) DEFAULT 0,
+    total_market NUMERIC(15,2) DEFAULT 0,
+    total_overcharge NUMERIC(15,2) DEFAULT 0,
+    inflated_count INTEGER DEFAULT 0,
+    fair_count INTEGER DEFAULT 0,
+    unverified_count INTEGER DEFAULT 0,
+    price_source VARCHAR(20) DEFAULT 'database',  -- database / ai_estimate / unavailable
+    demand_alerts_created INTEGER DEFAULT 0,
+    raw_text TEXT,
+    source_filename VARCHAR(255),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_quotations_quotation_number ON quotations (quotation_number);
+CREATE INDEX IF NOT EXISTS ix_quotations_user_id ON quotations (user_id);
+CREATE INDEX IF NOT EXISTS ix_quotations_city ON quotations (city);
+CREATE INDEX IF NOT EXISTS ix_quotations_created_at ON quotations (created_at);
+CREATE INDEX IF NOT EXISTS ix_quotations_user_created ON quotations (user_id, created_at);
+
+-- =============================================================
+-- QUOTATION LINE ITEMS
+-- =============================================================
+CREATE TABLE IF NOT EXISTS quotation_line_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    quotation_id UUID NOT NULL REFERENCES quotations(id) ON DELETE CASCADE,
+    description VARCHAR(500) NOT NULL,
+    quantity NUMERIC(15,2) DEFAULT 0,
+    unit VARCHAR(50),
+    quoted_rate NUMERIC(15,2) DEFAULT 0,
+    quoted_amount NUMERIC(15,2) DEFAULT 0,
+    market_rate NUMERIC(15,2),
+    price_source VARCHAR(20) DEFAULT 'database',
+    verified BOOLEAN DEFAULT FALSE,
+    confidence NUMERIC(5,2) DEFAULT 0,
+    deviation_pct NUMERIC(5,2),
+    status VARCHAR(20) DEFAULT 'unverified'  -- fair / inflated / unverified
+);
+CREATE INDEX IF NOT EXISTS ix_quotation_line_items_quotation_id ON quotation_line_items (quotation_id);
+CREATE INDEX IF NOT EXISTS ix_quotation_line_items_qid ON quotation_line_items (quotation_id);
+
+-- =============================================================
+-- AI AGENT LOGS (observability for AI agent tool/intent execution)
+-- =============================================================
+CREATE TABLE IF NOT EXISTS ai_agent_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    conversation_id VARCHAR(100),
+    intent VARCHAR(100),                    -- price_query, boq_generation, ...
+    tool_name VARCHAR(100),                 -- search_products, compare_prices, ...
+    tool_args JSONB,
+    execution_status VARCHAR(20) DEFAULT 'success',  -- success / error / skipped
+    result_summary VARCHAR(1000),
+    execution_result JSONB,
+    price_source VARCHAR(20),               -- database | ai_estimate | unavailable
+    quantity_source VARCHAR(20),            -- drawing | mitm | user | ai
+    confidence INTEGER,
+    fallback_used VARCHAR(50),
+    estimated_items INTEGER DEFAULT 0,
+    tokens_used INTEGER DEFAULT 0,
+    latency_ms INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_user_id ON ai_agent_logs (user_id);
+CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_conversation_id ON ai_agent_logs (conversation_id);
+CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_intent ON ai_agent_logs (intent);
+CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_tool_name ON ai_agent_logs (tool_name);
+CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_created_at ON ai_agent_logs (created_at);
+CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_user_created ON ai_agent_logs (user_id, created_at);
 
 -- =============================================================
 -- DONE

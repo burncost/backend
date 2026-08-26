@@ -201,6 +201,9 @@ async def admin_review_vendor_action(
         v.verification_tier = target
         v.verification_status = VendorVerificationStatus.VERIFIED
         v.verification_date = now
+        # Phase 13: on admin approval, assign the tier that matches volume.
+        from app.api.v1.endpoints.tiers import assign_tier_by_volume
+        await assign_tier_by_volume(db, v)
         pending = (await db.execute(select(VendorDocument).where(
             VendorDocument.vendor_id == v.id, VendorDocument.tier == target,
             VendorDocument.review_status == "pending"))).scalars().all()

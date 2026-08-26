@@ -30,8 +30,12 @@ class User(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String(255), unique=True, nullable=False, index=True)
-    phone_number = Column(String(20), unique=True, nullable=False, index=True)
-    password_hash = Column(String(255), nullable=False)
+    phone_number = Column(String(20), unique=True, nullable=True, index=True)
+    password_hash = Column(String(255), nullable=True)
+    # OAuth fields (Phase 12)
+    auth_provider = Column(String(20), default="email", index=True)  # email | google | facebook
+    oauth_id = Column(String(255), unique=True, nullable=True, index=True)
+    avatar_url = Column(Text, nullable=True)
 
     role = Column(
         SQLEnum(

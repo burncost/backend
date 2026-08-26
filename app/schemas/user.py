@@ -7,12 +7,14 @@ import re
 
 class UserBase(BaseModel):
     email: EmailStr
-    phone_number: str = Field(..., min_length=10, max_length=20)
+    phone_number: Optional[str] = Field(None, max_length=20)
     
     ### Validate Nigerian phone number format
     @field_validator('phone_number')
     @classmethod
-    def validate_nigerian_phone(cls, v: str) -> str:
+    def validate_nigerian_phone(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
         # Remove spaces and dashes
         v = v.strip().replace(' ', '').replace('-', '')
         
@@ -40,12 +42,12 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
-    first_name: str = Field(..., min_length=2, max_length=100)
+    first_name: Optional[str] = Field(None, max_length=100)
     other_name: Optional[str] = Field(None, max_length=100)
-    last_name: str = Field(..., min_length=2, max_length=100)
+    last_name: Optional[str] = Field(None, max_length=100)
     business_name: Optional[str] = Field(None, max_length=100)
 
-    location: str = Field(..., min_length=2, max_length=100)
+    location: Optional[str] = Field(None, max_length=100)
     role:str = Field(..., max_length=50)
     
     @field_validator('password')
@@ -61,6 +63,12 @@ class UserCreate(UserBase):
         if not re.search(r'\d', v):
             raise ValueError('Password must contain at least one digit')
         return v
+
+### One-time role/business-name completion for fresh OAuth accounts (Phase 13)
+class OAuthCompleteRequest(BaseModel):
+    role: str = Field(..., max_length=50)
+    business_name: Optional[str] = Field(None, max_length=100)
+
 
 ### Schema for updating user profile
 class UserUpdate(BaseModel):

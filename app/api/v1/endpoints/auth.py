@@ -21,12 +21,19 @@ from app.schemas.user import (
     UserLogin,
     TokenResponse,
     TokenRefresh,
-    UserResponse
+    UserResponse,
+    OAuthCompleteRequest,
 )
 from app.crud import user as user_crud, vendor as vendor_crud
 from app.services.auth_service import AuthService
 from app.services.notification_service import NotificationService
 from app.services.token_service import TokenService
+from app.services.payment_fraud_guard import (
+    record_fraud_flag,
+    record_failed_login,
+    clear_failed_logins,
+    is_login_locked,
+)
 
 import redis.asyncio as airedis
 
@@ -38,6 +45,195 @@ else:
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+### OAuth Google (Phase 12)
+@router.post("/google")
+async def oauth_google(
+    response: Response,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    code: str = Body(...),
+    state: str = Body(default=None),
+    role: str = Body(default=None),
+    business_name: str = Body(default=None),
+    redirect_uri: str = Body(default=None),
+):
+    """OAuth login with Google (auth code flow)."""
+    auth_service = AuthService()
+    user_info = await auth_service.google_oauth_login(code, redirect_uri=redirect_uri)
+    if not user_info:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google OAuth failed")
+
+    result = await auth_service.oauth_create_or_login(
+        db, provider="google", oauth_id=user_info.get("id"),
+        email=user_info.get("email"), full_name=user_info.get("fullName"),
+        first_name=user_info.get("firstName"), last_name=user_info.get("lastName"),
+        avatar_url=user_info.get("avatarUrl"), email_verified=bool(user_info.get("emailVerified")),
+        role=role, business_name=business_name,
+    )
+    if not result:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not create/log in OAuth user")
+
+    # Send a welcome email for brand-new OAuth signups, encouraging profile completion.
+    if result.get("is_new"):
+        notification_service = NotificationService()
+        background_tasks.add_task(
+            notification_service.send_oauth_welcome_email,
+            email=result["email"],
+            full_name=user_info.get("fullName") or result["email"].split("@")[0],
+            role=result.get("role", "customer"),
+        )
+
+    return _oauth_response(response, result)
+
+
+### OAuth Facebook (Phase 12)
+@router.post("/facebook")
+async def oauth_facebook(
+    response: Response,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    code: str = Body(...),
+    state: str = Body(default=None),
+    role: str = Body(default=None),
+    business_name: str = Body(default=None),
+    redirect_uri: str = Body(default=None),
+):
+    """OAuth login with Facebook (auth code flow)."""
+    auth_service = AuthService()
+    user_info = await auth_service.facebook_oauth_login(code, redirect_uri=redirect_uri)
+    if not user_info:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Facebook OAuth failed")
+
+    result = await auth_service.oauth_create_or_login(
+        db, provider="facebook", oauth_id=user_info.get("id"),
+        email=user_info.get("email"), full_name=user_info.get("fullName"),
+        first_name=user_info.get("firstName"), last_name=user_info.get("lastName"),
+        avatar_url=user_info.get("avatarUrl"), email_verified=bool(user_info.get("emailVerified")),
+        role=role, business_name=business_name,
+    )
+    if not result:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not create/log in OAuth user")
+
+    # Send a welcome email for brand-new OAuth signups, encouraging profile completion.
+    if result.get("is_new"):
+        notification_service = NotificationService()
+        background_tasks.add_task(
+            notification_service.send_oauth_welcome_email,
+            email=result["email"],
+            full_name=user_info.get("fullName") or result["email"].split("@")[0],
+            role=result.get("role", "customer"),
+        )
+
+    return _oauth_response(response, result)
+
+
+### One-time role/business-name completion for fresh OAuth accounts (Phase 13)
+@router.post("/oauth/complete")
+async def oauth_complete(
+    response: Response,
+    payload: OAuthCompleteRequest,
+    current_user = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a new OAuth user's role (+ optional business name) once, create the
+    UserProfile and (for vendors) the Vendor row, then re-issue a JWT with the
+    updated role."""
+    from app.models.user import UserRole, UserProfile
+    from app.models.vendor import Vendor
+
+    if payload.role not in ("customer", "vendor"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid role. Choose 'customer' or 'vendor'.",
+        )
+
+    current_user.role = UserRole(payload.role)
+
+    profile = current_user.profile
+    if profile is None:
+        profile = UserProfile(
+            user_id=current_user.id,
+            first_name=(current_user.email or "New").split("@")[0] or "New",
+            last_name="User",
+        )
+        if payload.business_name:
+            profile.business_name = payload.business_name
+        db.add(profile)
+    elif payload.business_name:
+        profile.business_name = payload.business_name
+
+    if payload.role == "vendor":
+        existing_vendor = await vendor_crud.get_by_user_id(db, user_id=current_user.id)
+        if not existing_vendor:
+            db.add(Vendor(
+                user_id=current_user.id,
+                business_name=(payload.business_name or "").strip() or "My Business",
+                business_type="general",
+                city="",
+                state="",
+                business_address="",
+                verification_status="pending",
+                verification_tier="cac_only",
+            ))
+
+    await db.commit()
+    await db.refresh(current_user)
+
+    # Re-issue tokens with the newly assigned role.
+    access_token = create_access_token(data={"sub": str(current_user.id), "role": current_user.role})
+    refresh_token = create_refresh_token(data={"sub": str(current_user.id)})
+
+    max_age = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    is_prod = settings.DEBUG == False
+    response.set_cookie(
+        key="access_token", value=access_token, httponly=True,
+        secure=is_prod, samesite="None" if is_prod else "Lax",
+        max_age=max_age, path="/",
+    )
+    response.set_cookie(
+        key="refresh_token", value=refresh_token, httponly=True,
+        secure=is_prod, samesite="None" if is_prod else "Lax",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES * 60, path="/",
+    )
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_in": max_age,
+        "role": current_user.role.value,
+        "business_name": (profile.business_name if profile else payload.business_name),
+        "message": "Profile completed",
+    }
+
+
+def _oauth_response(response: Response, result: dict):
+    """Set JWT cookies and return the OAuth token payload."""
+    access_token = result["access_token"]
+    refresh_token = result["refresh_token"]
+    max_age = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    is_prod = settings.DEBUG == False
+    response.set_cookie(
+        key="access_token", value=access_token, httponly=True,
+        secure=is_prod, samesite="None" if is_prod else "Lax",
+        max_age=max_age, path="/",
+    )
+    response.set_cookie(
+        key="refresh_token", value=refresh_token, httponly=True,
+        secure=is_prod, samesite="None" if is_prod else "Lax",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES * 60, path="/",
+    )
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_in": max_age,
+        "role": result.get("role"),
+        "name": result.get("email"),
+        "is_new": result.get("is_new"),
+        "provider": result.get("provider"),
+    }
+
 
 ### Register a new user
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -54,7 +250,9 @@ async def register(
             detail="Email already registered"
         )
     
-    existing_phone = await user_crud.get_by_phone(db, phone=user_in.phone_number)
+    existing_phone = None
+    if user_in.phone_number:
+        existing_phone = await user_crud.get_by_phone(db, phone=user_in.phone_number)
     if existing_phone:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -64,6 +262,22 @@ async def register(
     try:
         # Create user
         user = await user_crud.create(db, obj_in=user_in)
+
+        # Auto-create a Vendor row for vendor-role signups so products can be added
+        # immediately. Populate from signup data where available; the rest are
+        # placeholders the user can update later via onboarding/settings.
+        if user_in.role and user_in.role.lower() == "vendor":
+            from app.models.vendor import Vendor
+            db.add(Vendor(
+                user_id=user.id,
+                business_name=(user_in.business_name or (user.profile.business_name if user.profile else "") or "My Business").strip(),
+                business_type="general",
+                city=((user.profile.location if user.profile else "") or "").strip(),
+                state="",
+                business_address="",
+                verification_status="pending",
+                commission_rate=10.00,
+            ))
         
         # Capture values as plain strings BEFORE any more commits
         # (grant_signup_tokens does 2 more commits which expires session state)
@@ -127,17 +341,29 @@ async def register(
 ### Login user and return JWT tokens
 @router.post("/login", response_model=TokenResponse)
 async def login(
+    request: Request,
     response: Response,
     credentials: UserLogin,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Phase 11 (ATO protection): lockout after repeated failed logins.
+    if await is_login_locked(credentials.email, client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Please try again in a few minutes.",
+        )
+
     # Get user
     user = await user_crud.get_by_email(db, email=credentials.email)
 
     # logger.info(f"\nRedis check: {redis_client.ping()}\n")
 
     if not user:
+        # Phase 11: count failure and flag after repeated attempts (ATO).
+        await record_failed_login(db, credentials.email, client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -145,6 +371,14 @@ async def login(
     
     # Verify password
     if not verify_password(credentials.password, user.password_hash):
+        # Phase 11: count failure and flag after repeated attempts (ATO).
+        await record_failed_login(db, credentials.email, client_ip)
+        await record_fraud_flag(
+            db,
+            alert_type="Account Takeover",
+            description=f"Suspected brute-force on account {credentials.email} from {client_ip}.",
+            user_id=str(user.id),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -163,25 +397,6 @@ async def login(
             detail="Account is deactivated. Please contact support to reactivate."
         )
     
-    # Only allow verified accounts to login (production only)
-    if not settings.DEBUG and user.status == "pending_verification":
-        notification_service = NotificationService()
-        full_name = user.profile.first_name if user and user.profile else user.email.split('@')[0]
-        verification_token = create_access_token(
-            data={"sub": str(user.id), "type": "email_verification"},
-            expires_delta=timedelta(hours=48)
-        )
-        background_tasks.add_task(
-            notification_service.send_verification_email,
-            email=user.email,
-            verification_token=verification_token,
-            full_name=full_name
-        )
-        return JSONResponse(
-            status_code=status.HTTP_403_FORBIDDEN,
-            content={"detail":"Please check your inbox and verify your email to get started."}
-        )
-        
     vendor = await vendor_crud.get_by_user_id(db, user_id=user.id)
 
     vendor_verified = vendor.verification_status if vendor else "n.a"
@@ -260,6 +475,9 @@ async def login(
 
     # Update last login
     await user_crud.update_last_login(db, user_id=user.id)
+
+    # Phase 11: clear failed-login counters after a successful login.
+    await clear_failed_logins(credentials.email, client_ip)
     
     logger.info(f"User logged in: {user.email}")
 

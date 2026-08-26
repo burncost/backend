@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Price Service
 Interfaces with the building materials database to:
@@ -115,13 +117,15 @@ FINISH_MULTIPLIERS: Dict[str, float] = {
 
 
 # ─────────────────────────────────────────
-# PRICE ENGINE — real DB queries + internet fallback
+# PRICE ENGINE — real DB queries + flagged estimate fallback
 # ─────────────────────────────────────────
 
 class PriceEngine:
     """
     PriceEngine queries the MongoDB material_rates collection for real prices.
-    Falls back to internet search via Gemini if no DB match.
+    No hallucinated prices — DB only. For unmatched items the caller uses
+    get_market_rate_estimate which returns a clearly-flagged AI estimate
+    (never presented as a verified market price).
     """
 
     def __init__(self, mongo_db: Optional[AsyncIOMotorDatabase] = None):
@@ -193,34 +197,36 @@ class PriceEngine:
             except Exception as e:
                 logger.warning(f"MongoDB query failed: {e}")
 
-        # No mock fallback — return None so caller can try internet search
+        # No mock fallback — return None so caller can try flagged estimate
         return None
 
-    async def internet_search_rate(self, description: str, city: str = "Abuja") -> Optional[Dict[str, Any]]:
+    async def get_market_rate_estimate(self, description: str, city: str = "Abuja") -> Optional[Dict[str, Any]]:
         """
-        Search the internet for current market price using Gemini.
-        Returns rate info if found, None otherwise.
+        Return a clearly-flagged AI estimate for a material with no DB match.
+        The result is tagged price_source='ai_estimate' and verified=false —
+        it is NEVER presented as a verified market price. Callers must
+        surface the flag to the user and create a demand alert so suppliers
+        can respond with real prices.
         """
         try:
             client = get_gemini_client()
-            prompt = f"""You are a Nigerian quantity surveyor with access to current market prices.
-Search your knowledge for the current market price of this construction material in {city}, Nigeria:
+            prompt = f"""You are a Nigerian quantity surveyor. Provide a rough ESTIMATE (not a verified price)
+for this construction material in {city}, Nigeria:
 
 Material: {description}
 City: {city}
 
+This is an ESTIMATE only — it must never be presented as a verified market price.
+
 Return ONLY valid JSON with this exact structure:
 {{
-  "rate": number (price in NGN per unit),
+  "rate": number (estimated price in NGN per unit, or null if unknown),
   "unit": "string (e.g. m², m³, nr, bag, kg, length, ls)",
   "product_name": "string (full product name)",
-  "product_code": "string (auto-generated code like MAT-001)",
-  "source": "internet_search",
-  "city": "{city}",
-  "confidence": number (0-1 how confident you are in this price)
+  "confidence": number (0-1 how confident you are in this estimate)
 }}
 
-If you don't know the price, return: {{"rate": null, "source": "not_found"}}"""
+If you cannot provide an estimate, return: {{"rate": null, "confidence": 0}}"""
 
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
@@ -249,13 +255,15 @@ If you don't know the price, return: {{"rate": null, "source": "not_found"}}"""
                 "rate": float(result["rate"]),
                 "unit": result.get("unit", ""),
                 "product_name": result.get("product_name", description),
-                "product_code": result.get("product_code", ""),
-                "source": "internet_search",
+                "product_code": "",
+                "price_source": "ai_estimate",
+                "source": "ai_estimate",
+                "verified": False,
+                "confidence": float(result.get("confidence", 0.3)),
                 "city": city,
-                "confidence": result.get("confidence", 0.5),
             }
         except Exception as e:
-            logger.warning(f"Internet search failed for '{description}': {e}")
+            logger.warning(f"Market rate estimate failed for '{description}': {e}")
             return None
 
     async def get_prices_by_category(self, category: str, city: str = "Abuja") -> List[Dict[str, Any]]:
@@ -289,6 +297,56 @@ If you don't know the price, return: {{"rate": null, "source": "not_found"}}"""
 
 
 # ─────────────────────────────────────────
+# PRICE TRUTH SERVICE — DB-only verified prices + provenance
+# ─────────────────────────────────────────
+
+class PriceTruthService:
+    """
+    Guarantees price truth: only returns DB-verified prices with full provenance.
+    Never invents or hallucinates a price. Callers that need a total for an
+    item with no DB match use get_market_rate_estimate (flagged ai_estimate)
+    and must create a demand alert so suppliers can respond with real prices.
+    """
+
+    def __init__(self, price_service: "PriceService"):
+        self.price_service = price_service
+
+    async def get_verified_rate(
+        self, description: str, city: str = "Abuja"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return a DB-verified price only, with provenance.
+        Returns None when no verified DB price exists — never an estimate.
+        """
+        prices = await self.price_service._load_prices()
+        description_lower = description.lower()
+
+        for desc_key, keywords in DESCRIPTION_KEYWORDS.items():
+            if desc_key.lower() in description_lower:
+                product = await self.price_service._search_by_keywords(keywords, city)
+                if product:
+                    return self._provenance(product)
+        return None
+
+    @staticmethod
+    def _provenance(product: DBProduct) -> Dict[str, Any]:
+        """Build a price-passport-style provenance payload."""
+        return {
+            "rate": product.unit_price,
+            "unit": product.unit,
+            "product_name": product.name,
+            "product_code": product.product_code,
+            "price_source": "database",
+            "source": "database",
+            "verified": True,
+            "confidence": 1.0,
+            "city": product.city,
+            "supplier_id": product.supplier,
+            "last_verified_at": product.last_updated or None,
+        }
+
+
+# ─────────────────────────────────────────
 # PRICE SERVICE
 # ─────────────────────────────────────────
 
@@ -296,8 +354,9 @@ class PriceService:
     """
     Retrieves product prices from database and enriches BOQ items.
     Supports MongoDB (material_rates collection) and PostgreSQL.
-    Falls back to internet search via Gemini if no DB match.
-    No mock/hardcoded data is used.
+    Verified prices come from the DB only. For unmatched items, a clearly-flagged
+    AI estimate may be returned (price_source='ai_estimate', verified=false) so a
+    total can always be produced — never presented as a verified market price.
     """
 
     def __init__(self, mongo_db: Optional[AsyncIOMotorDatabase] = None, pg_db: Optional[AsyncSession] = None):
@@ -399,7 +458,7 @@ class PriceService:
             return self._price_cache
 
         self._price_cache = {}
-        logger.info("No DB prices loaded — will use internet search fallback")
+        logger.info("No DB prices loaded — verified prices unavailable; AI estimates may be used")
         return self._price_cache
 
     async def search_products(
@@ -421,50 +480,37 @@ class PriceService:
 
         return results[:limit]
 
+    async def get_verified_rate_on_match(
+        self, description: str, city: str = "Abuja"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        DB-only verified rate lookup used by quotation analysis.
+        Returns None when no verified DB price exists — never an estimate,
+        so inflation flags are never based on invented prices.
+        """
+        verified = await PriceTruthService(self).get_verified_rate(description, city)
+        return verified
+
     async def get_rate(
         self, description: str, city: str = "Abuja", quantity: float = 1.0
     ) -> Optional[Dict[str, Any]]:
         """
         Get the best matching rate for a BOQ item description.
-        Tries DB first, then internet search.
-        Returns rate info including unit price and source.
+        Returns a DB-verified rate (source='database') when found.
+        Otherwise returns a clearly-flagged AI estimate (price_source='ai_estimate',
+        verified=false) so a total can always be produced.
+        Returns None only when neither a DB price nor an estimate is available.
         """
-        prices = await self._load_prices()
-        description_lower = description.lower()
+        # Try DB-verified match first (never hallucinated)
+        verified = await PriceTruthService(self).get_verified_rate(description, city)
+        if verified:
+            return verified
 
-        # Try keyword matching against DB
-        for desc_key, keywords in DESCRIPTION_KEYWORDS.items():
-            if desc_key.lower() in description_lower:
-                product = await self._search_by_keywords(keywords, city)
-                if product:
-                    return {
-                        "rate": product.unit_price,
-                        "unit": product.unit,
-                        "product_name": product.name,
-                        "product_code": product.product_code,
-                        "source": "database",
-                        "city": product.city,
-                    }
-
-        # Try broader search
-        words = [w for w in description_lower.split() if len(w) > 3]
-        if words:
-            product = await self._search_by_keywords(words[:4], city)
-            if product:
-                return {
-                    "rate": product.unit_price,
-                    "unit": product.unit,
-                    "product_name": product.name,
-                    "product_code": product.product_code,
-                    "source": "database",
-                    "city": product.city,
-                }
-
-        # Internet search fallback
-        logger.info(f"DB price not found for '{description}' — trying internet search")
-        internet_result = await self.engine.internet_search_rate(description, city)
-        if internet_result:
-            return internet_result
+        # Flagged AI estimate fallback (never presented as verified)
+        logger.info(f"DB price not found for '{description}' — returning flagged AI estimate")
+        estimate = await self.engine.get_market_rate_estimate(description, city)
+        if estimate:
+            return estimate
 
         return None
 
@@ -560,6 +606,10 @@ class PriceService:
             item["db_product_code"] = matching_product.product_code
             item["db_unit_price"] = matching_product.unit_price
             item["out_of_stock"] = False
+            # Quantity provenance — preserve existing label (user/drawing/ai),
+            # default to "mitm" (Nigerian default ratios) when not set.
+            if not item.get("quantity_source"):
+                item["quantity_source"] = "mitm"
 
             gemini_rate = item.get("adjusted_rate", 0)
             if gemini_rate > 0:
@@ -588,21 +638,25 @@ class PriceService:
 
             return item, None, None
 
-        # Try internet search
-        logger.info(f"No DB match for '{description}' — trying internet search")
-        internet_result = await self.engine.internet_search_rate(description, city)
-        if internet_result:
-            item["db_price_matched"] = True
-            item["db_product_name"] = internet_result.get("product_name", description)
-            item["db_product_code"] = internet_result.get("product_code", "")
-            item["db_unit_price"] = internet_result["rate"]
-            item["adjusted_rate"] = internet_result["rate"]
-            item["amount"] = round(item.get("quantity", 0) * internet_result["rate"], 2)
-            item["rate_source"] = "internet_search"
+        # Flagged AI estimate fallback (never presented as verified)
+        logger.info(f"No DB match for '{description}' — returning flagged AI estimate")
+        estimate = await self.engine.get_market_rate_estimate(description, city)
+        if estimate:
+            item["db_price_matched"] = False
+            item["db_product_name"] = estimate.get("product_name", description)
+            item["db_product_code"] = estimate.get("product_code", "")
+            item["db_unit_price"] = estimate["rate"]
+            item["adjusted_rate"] = estimate["rate"]
+            item["amount"] = round(item.get("quantity", 0) * estimate["rate"], 2)
+            item["rate_source"] = "ai_estimate"
+            item["price_source"] = "ai_estimate"
+            item["verified"] = False
+            item["confidence"] = estimate.get("confidence", 0.3)
             item["out_of_stock"] = False
+            item["estimated"] = True
             return item, None, None
 
-        # No price found anywhere — mark as out of stock
+        # No price or estimate found — mark as out of stock
         item["db_price_matched"] = False
         item["rate_source"] = "unavailable"
         item["out_of_stock"] = True

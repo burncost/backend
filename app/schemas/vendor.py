@@ -17,6 +17,7 @@ class VendorCreate(VendorBase):
     business_address: str = Field(..., max_length=255)
     city: str = Field(..., max_length=100)
     state: str = Field(..., max_length=100)
+    phone_number: Optional[str] = Field(None, max_length=20)
     cac_business_registration_number: Optional[str] = Field(None, max_length=100)
     tax_identification_number: Optional[str] = Field(None, max_length=50)
     verification_status: Optional[str] = Field(None, max_length=50)

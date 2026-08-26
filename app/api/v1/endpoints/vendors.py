@@ -8,7 +8,7 @@ import asyncio
 
 from app.core.database import get_db
 from app.models.vendor import Vendor
-from app.models.user import User
+from app.models.user import User, UserProfile
 from app.models.notification import Notification
 from app.models.vendor_draft import VendorDraft
 from app.schemas.vendor import VendorCreate, VendorUpdate, VendorResponse
@@ -89,6 +89,9 @@ async def _auto_verify_vendor_background(
 
             vendor.verification_status = "verified"
             vendor.verification_date = datetime.now(timezone.utc).replace(tzinfo=None)
+            # Phase 13: assign the tier matching current transaction volume.
+            from app.api.v1.endpoints.tiers import assign_tier_by_volume
+            await assign_tier_by_volume(db, vendor)
             await db.commit()
 
             # Notify the vendor that they're verified
@@ -148,11 +151,8 @@ async def onboard_vendor(
     )
     existing_vendor = result.scalar_one_or_none()
     
-    if existing_vendor:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User already registered as vendor"
-        )
+    # A Vendor row may already exist (auto-created at signup). We update it below
+    # rather than rejecting, so the user can complete/fill in onboarding later.
     
     # Check for duplicate business registration number if provided
     if vendor_in.cac_business_registration_number:
@@ -193,33 +193,59 @@ async def onboard_vendor(
     #     verified = True
     
     # onboard vendor
-    vendor = Vendor(
-        user_id=current_user.id,
-        business_name=vendor_in.business_name,
-        business_type=vendor_in.business_type,
-        business_address=vendor_in.business_address,
-        city=vendor_in.city,
-        state=vendor_in.state,
-        cac_business_registration_number=vendor_in.cac_business_registration_number,
-        tax_identification_number=vendor_in.tax_identification_number,
-        verification_status=ver_status,
-        commission_rate=default_commission,
-        verification_date=datetime.now(timezone.utc).replace(tzinfo=None) if verified else None,
-    )
-    db.add(vendor)
-    await db.flush()  # Get vendor.id before creating bank account
+    if existing_vendor:
+        # Auto-created at signup - update it with the submitted onboarding details.
+        vendor = existing_vendor
+        vendor.business_name = vendor_in.business_name
+        vendor.business_type = vendor_in.business_type
+        vendor.business_address = vendor_in.business_address
+        vendor.city = vendor_in.city
+        vendor.state = vendor_in.state
+        vendor.cac_business_registration_number = vendor_in.cac_business_registration_number
+        vendor.tax_identification_number = vendor_in.tax_identification_number
+        vendor.verification_status = ver_status
+        # Keep existing commission_rate (do not reset).
+    else:
+        vendor = Vendor(
+            user_id=current_user.id,
+            business_name=vendor_in.business_name,
+            business_type=vendor_in.business_type,
+            business_address=vendor_in.business_address,
+            city=vendor_in.city,
+            state=vendor_in.state,
+            cac_business_registration_number=vendor_in.cac_business_registration_number,
+            tax_identification_number=vendor_in.tax_identification_number,
+            verification_status=ver_status,
+            commission_rate=default_commission,
+            verification_date=datetime.now(timezone.utc).replace(tzinfo=None) if verified else None,
+        )
+        db.add(vendor)
+        await db.flush()  # Get vendor.id before creating bank account
     
-    # Create primary bank account
-    bank_account = VendorBankAccount(
-        vendor_id=vendor.id,
-        bank_name=vendor_in.bank_name,
-        account_number=vendor_in.bank_account_number,
-        account_name=vendor_in.bank_account_name,
-        bank_code=vendor_in.bank_code if hasattr(vendor_in, 'bank_code') else None,
-        is_primary=True,
-        verified=False,
-    )
-    db.add(bank_account)
+    # Create or update the primary bank account
+    existing_account = None
+    if existing_vendor:
+        existing_account = (await db.execute(
+            select(VendorBankAccount).where(
+                VendorBankAccount.vendor_id == vendor.id,
+                VendorBankAccount.is_primary.is_(True),
+            )
+        )).scalar_one_or_none()
+    if existing_account:
+        existing_account.bank_name = vendor_in.bank_name
+        existing_account.account_number = vendor_in.bank_account_number
+        existing_account.account_name = vendor_in.bank_account_name
+        existing_account.bank_code = vendor_in.bank_code if hasattr(vendor_in, 'bank_code') else None
+    else:
+        db.add(VendorBankAccount(
+            vendor_id=vendor.id,
+            bank_name=vendor_in.bank_name,
+            account_number=vendor_in.bank_account_number,
+            account_name=vendor_in.bank_account_name,
+            bank_code=vendor_in.bank_code if hasattr(vendor_in, 'bank_code') else None,
+            is_primary=True,
+            verified=False,
+        ))
     
     # Update user role to vendor after onboarding
     user_result = await db.execute(
@@ -227,6 +253,29 @@ async def onboard_vendor(
     )
     user = user_result.scalar_one()
     user.role = "vendor"
+
+    # Persist onboarding data that belongs to the User / UserProfile tables:
+    #   phone_number  -> users.phone_number
+    #   business_name -> user_profiles.business_name
+    # These are committed in the same transaction as the vendor row below.
+    if vendor_in.phone_number:
+        user.phone_number = vendor_in.phone_number
+    if vendor_in.business_name:
+        profile = current_user.profile
+        if profile is None:
+            profile_result = await db.execute(
+                select(UserProfile).where(UserProfile.user_id == current_user.id)
+            )
+            profile = profile_result.scalar_one_or_none()
+        if profile:
+            profile.business_name = vendor_in.business_name
+        else:
+            db.add(UserProfile(
+                user_id=current_user.id,
+                first_name=(current_user.email or "").split("@")[0] or "New",
+                last_name="User",
+                business_name=vendor_in.business_name,
+            ))
     
     # Delete draft after successful onboarding
     draft_result = await db.execute(

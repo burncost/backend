@@ -53,21 +53,20 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
             phone_number=obj_in.phone_number,
             password_hash=get_password_hash(obj_in.password),
             role=role_value,
-            status="pending_verification",
-            # status="active",
+            status="active",
         )
         db.add(db_obj)
         await db.commit()
         await db.refresh(db_obj)
         
-        # Create user profile
+        # Create user profile (missing optional fields get safe defaults)
         profile = UserProfile(
             user_id=db_obj.id,
-            first_name=obj_in.first_name,
+            first_name=(obj_in.first_name or "").strip() or "New",
             other_name=obj_in.other_name,
-            last_name=obj_in.last_name,
+            last_name=(obj_in.last_name or "").strip() or "User",
             business_name=obj_in.business_name,
-            location=obj_in.location,
+            location=obj_in.location or "",
         )
         db.add(profile)
         await db.commit()

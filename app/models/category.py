@@ -1,6 +1,6 @@
 from sqlalchemy import Column, String, Boolean, Integer, DateTime, ForeignKey, Text, Numeric
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from datetime import datetime
 import uuid
 
@@ -39,4 +39,4 @@ class Category(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Self-referential relationship for hierarchy
-    children = relationship("Category", backref="parent", remote_side=[id])
+    children = relationship("Category", backref=backref("parent", remote_side=[id]))

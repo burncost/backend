@@ -8,23 +8,23 @@ logger = logging.getLogger(__name__)
 TIERS = [
     {
         "tier_code": "cac_only", "display_name": "CAC Verified", "sort_order": 1,
-        "transaction_cap": 5_000_000, "commission_rate": 10.00,
+        "transaction_cap": 3_000_000,  # "commission_rate": 10.00,  # Phase 13: commission removed
         "required_document_types": [], "requires_manual_review": False,
-        "perks": ["Start selling immediately", "No documents required", "₦5,000,000 transaction limit"],
+        "perks": ["Start selling immediately", "No documents required", "₦3,000,000 transaction limit"],
     },
     {
         "tier_code": "documented", "display_name": "Documented Business", "sort_order": 2,
-        "transaction_cap": 50_000_000, "commission_rate": 7.50,
+        "transaction_cap": 10_000_000,  # "commission_rate": 7.50,  # Phase 13: commission removed
         "required_document_types": ["cac_certificate", "tax_clearance", "business_license", "utility_bill"],
         "requires_manual_review": False,
-        "perks": ["₦50,000,000 limit", "7.5% commission", "24–48h escrow release", "Verified badge"],
+        "perks": ["₦10,000,000 transaction limit", "24–48h escrow release", "Verified badge"],
     },
     {
         "tier_code": "trusted", "display_name": "Trusted Supplier", "sort_order": 3,
-        "transaction_cap": 500_000_000, "commission_rate": 5.00,
+        "transaction_cap": 100_000_000,  # "commission_rate": 5.00,  # Phase 13: commission removed
         "required_document_types": ["vat_certificate", "director_id", "trade_reference_1", "trade_reference_2", "address_proof"],
         "requires_manual_review": True,
-        "perks": ["₦500,000,000 limit", "5% commission", "T+1 payouts", "Trusted badge", "Priority support"],
+        "perks": ["₦100,000,000 transaction limit", "T+1 payouts", "Trusted badge", "Priority support"],
     },
 ]
 
@@ -59,12 +59,18 @@ async def bootstrap_tiers(conn) -> None:
                "perks": json.dumps(t["perks"])}
         await conn.execute(text("""
             INSERT INTO vendor_verification_tiers
-                (tier_code, display_name, sort_order, transaction_cap, commission_rate,
+                (tier_code, display_name, sort_order, transaction_cap,
                  required_document_types, requires_manual_review, perks)
             VALUES
-                (:tier_code, :display_name, :sort_order, :transaction_cap, :commission_rate,
+                (:tier_code, :display_name, :sort_order, :transaction_cap,
                  CAST(:required_document_types AS jsonb), :requires_manual_review, CAST(:perks AS jsonb))
-            ON CONFLICT (tier_code) DO NOTHING
+            ON CONFLICT (tier_code) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                sort_order = EXCLUDED.sort_order,
+                transaction_cap = EXCLUDED.transaction_cap,
+                required_document_types = EXCLUDED.required_document_types,
+                requires_manual_review = EXCLUDED.requires_manual_review,
+                perks = EXCLUDED.perks
         """), row)
 
     await conn.commit()

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, Body
 from app.api.deps import get_current_vendor, get_current_user, get_current_verified_vendor
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -30,6 +30,21 @@ class VendorOrderUpdate(BaseModel):
     driverName: str = ""
     driverPhone: str = ""
 
+
+### Optional delivery details captured during checkout (Phase 13)
+class OrderCreateRequest(BaseModel):
+    shipping_address: Optional[str] = None
+    shipping_city: Optional[str] = None
+    shipping_state: Optional[str] = None
+    shipping_phone: Optional[str] = None
+
+
+class OrderCompleteRequest(BaseModel):
+    shipping_address: Optional[str] = None
+    shipping_city: Optional[str] = None
+    shipping_state: Optional[str] = None
+    shipping_phone: Optional[str] = None
+
 import logging
 
 router = APIRouter()
@@ -50,6 +65,7 @@ async def create_order(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     promo_code: Optional[str] = Query(None, max_length=50),
+    details: Optional[OrderCreateRequest] = Body(None),
 ):
     user_id = current_user.id
 
@@ -176,6 +192,27 @@ async def create_order(
     # Total
     total_amount = round(subtotal + platform_fee + shipping_fee + vat_amount - discount_amount - promo_discount, 2)
 
+    # Phase 13: delivery completeness + soft email verification. The order is
+    # still persisted as a draft; missing details / unverified email are returned
+    # to the client instead of failing the request.
+    phone = current_user.phone_number or None
+    location = None
+    if current_user.profile and current_user.profile.location:
+        location = current_user.profile.location
+    if details is not None:
+        if details.shipping_phone:
+            phone = details.shipping_phone
+        addr = ", ".join(p for p in [details.shipping_city, details.shipping_state] if p) or (details.shipping_address or "")
+        if addr:
+            location = addr
+
+    missing_fields = []
+    if not phone:
+        missing_fields.append("phone")
+    if not location:
+        missing_fields.append("address")
+    requires_verification = not bool(current_user.email_verified)
+
     # Create the order
     order = Order(
         order_number=_generate_order_number(),
@@ -232,10 +269,20 @@ async def create_order(
     )
     db.add(notification)
 
+    # Persist any supplied delivery details to the user profile (progressive disclosure).
+    if details is not None:
+        if details.shipping_phone:
+            current_user.phone_number = details.shipping_phone
+        loc = ", ".join(p for p in [details.shipping_city, details.shipping_state] if p) or (details.shipping_address or "")
+        if loc and current_user.profile:
+            current_user.profile.location = loc
+
     await db.commit()
     await db.refresh(order)
 
     logger.info(f"Order {order.order_number} created for user {current_user.id}")
+
+    requires_completion = bool(missing_fields) or requires_verification
 
     return {
         "success": True,
@@ -243,6 +290,59 @@ async def create_order(
         "order_id": str(order.id),
         "order_number": order.order_number,
         "total_amount": total_amount,
+        "requires_completion": requires_completion,
+        "missing_fields": missing_fields,
+        "requires_verification": requires_verification,
+    }
+
+
+### Complete delivery details for a draft order (Phase 13)
+@router.post("/{order_id}/complete")
+async def complete_order_details(
+    order_id: str,
+    payload: OrderCompleteRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        uid = UUID(order_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid order ID")
+
+    result = await db.execute(select(Order).where(Order.id == uid))
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if str(order.user_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized to update this order")
+
+    # Persist delivery details to the user profile.
+    if payload.shipping_phone:
+        current_user.phone_number = payload.shipping_phone
+    loc = ", ".join(p for p in [payload.shipping_city, payload.shipping_state] if p) or (payload.shipping_address or "")
+    if loc and current_user.profile:
+        current_user.profile.location = loc
+
+    await db.commit()
+
+    phone = current_user.phone_number or None
+    location = current_user.profile.location if current_user.profile else None
+    missing_fields = []
+    if not phone:
+        missing_fields.append("phone")
+    if not location:
+        missing_fields.append("address")
+
+    requires_verification = not bool(current_user.email_verified)
+    requires_completion = bool(missing_fields) or requires_verification
+
+    return {
+        "order_id": str(order.id),
+        "order_number": order.order_number,
+        "total_amount": float(order.total_amount),
+        "requires_completion": requires_completion,
+        "missing_fields": missing_fields,
+        "requires_verification": requires_verification,
     }
 
 
@@ -548,15 +648,26 @@ async def confirm_delivery(
     return {"message": "Delivery confirmed", "order_id": order_id}
 
 
+# Phase 11: escrow/transfer safety limits.
+ESCROW_TRANSFER_CAP = 1_000_000.0   # NGN per release; above this requires admin approval
+
+
 async def _release_escrow_to_vendor(
     vendor_id: str,
     order_number: str,
     amount: float,
     db_session: AsyncSession,
 ):
-    """Background task: release escrow funds to vendor."""
+    """Background task: release escrow funds to vendor.
+
+    Phase 11 safety:
+      - Only release when the vendor bank details (account number) exist
+        and the transfer amount is within cap.
+      - Releases above the cap are NOT auto-executed — they are logged for
+        admin approval (escrow/transfer safety).
+      - Validates the recipient reference is well-formed before calling the gateway.
+    """
     try:
-        # Get vendor bank details
         from app.models.vendor import Vendor
         vendor_result = await db_session.execute(
             select(Vendor).where(Vendor.id == vendor_id)
@@ -566,12 +677,31 @@ async def _release_escrow_to_vendor(
             logger.warning(f"Vendor {vendor_id} not found for escrow release")
             return
 
-        # Create mock transfer (real transfer in production via PaymentService)
+        # Phase 11: validate recipient — must have a bank account on file.
+        account_number = getattr(vendor, "bank_account_number", None)
+        if not account_number:
+            logger.warning(f"Escrow release blocked: vendor {vendor_id} has no bank account on file (order {order_number})")
+            return
+
+        # Phase 11: enforce transfer amount cap — large payouts staged for admin.
+        if float(amount) > ESCROW_TRANSFER_CAP:
+            logger.warning(
+                f"Escrow release for order {order_number} to vendor {vendor_id} "
+                f"(₦{amount:,.2f}) exceeds cap ₦{ESCROW_TRANSFER_CAP:,.2f} — requires admin approval."
+            )
+            return  # do not auto-execute; flagged for manual/admin review
+
+        # Phase 11: validate the recipient reference is well-formed before calling.
+        recipient_code = f"VENDOR-{account_number[-4:]}"
+        if len(recipient_code) < 8:
+            logger.warning(f"Escrow release skipped: invalid recipient reference for vendor {vendor_id}")
+            return
+
         transfer_ref = f"TRF-{order_number}-{vendor_id[:8]}"
         payment_service = PaymentService()
         await payment_service.create_transfer(
             amount=amount,
-            recipient_code=f"VENDOR-{vendor.bank_account_number[-4:]}",
+            recipient_code=recipient_code,
             reference=transfer_ref,
             reason=f"Escrow release - Order {order_number}",
         )
