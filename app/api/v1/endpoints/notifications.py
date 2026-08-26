@@ -153,3 +153,29 @@ async def clear_notifications(
     )
     await db.commit()
     return None
+
+
+### Delete a single notification
+### (declared AFTER /clear so FastAPI route order resolves "clear" to the static path)
+@router.delete("/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_notification(
+    notification_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    user_id = current_user.id
+    result = await db.execute(
+        select(Notification).where(
+            Notification.id == notification_id,
+            Notification.user_id == user_id
+        )
+    )
+    notification = result.scalar_one_or_none()
+    if not notification:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notification not found"
+        )
+    await db.delete(notification)
+    await db.commit()
+    return None

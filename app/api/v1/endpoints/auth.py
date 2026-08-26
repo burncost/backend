@@ -748,12 +748,15 @@ async def logout(
             await redis_client.delete(f"refresh:{user_id}")
         except:
             pass
-        response.delete_cookie("access_token")
-        response.delete_cookie("refresh_token")
 
+    # Always clear auth cookies on logout, even without a valid refresh token,
+    # so no stale httpOnly crumbs survive the session.
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+
+    if refresh_token:
         return {"message": "Logged out."}
-    
-    return {"message": "No active session found."}
+    return {"message": "No active session found. Cookies cleared."}
 
 ### Forgot password - send reset link
 @router.post("/forgot-password")
