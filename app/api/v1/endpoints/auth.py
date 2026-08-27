@@ -745,9 +745,18 @@ async def logout(
             pass
 
     # Always clear auth cookies on logout, even without a valid refresh token,
-    # so no stale httpOnly crumbs survive the session.
-    response.delete_cookie("access_token", path="/")
-    response.delete_cookie("refresh_token", path="/")
+    # so no stale httpOnly crumbs survive the session. Mirror the Set-Cookie
+    # attributes (secure / samesite) used when the cookies were created so the
+    # browser reliably deletes them — especially SameSite=None in production.
+    is_prod = settings.DEBUG == False
+    response.delete_cookie(
+        "access_token", path="/", secure=is_prod, httponly=True,
+        samesite="None" if is_prod else "Lax",
+    )
+    response.delete_cookie(
+        "refresh_token", path="/", secure=is_prod, httponly=True,
+        samesite="None" if is_prod else "Lax",
+    )
 
     if refresh_token:
         return {"message": "Logged out."}
