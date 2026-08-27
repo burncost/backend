@@ -199,8 +199,6 @@ async def oauth_complete(
     )
 
     return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
         "expires_in": max_age,
         "role": current_user.role.value,
         "business_name": (profile.business_name if profile else payload.business_name),
@@ -225,8 +223,6 @@ def _oauth_response(response: Response, result: dict):
         max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES * 60, path="/",
     )
     return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
         "expires_in": max_age,
         "role": result.get("role"),
         "name": result.get("email"),
@@ -339,7 +335,7 @@ async def register(
             )
 
 ### Login user and return JWT tokens
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login")
 async def login(
     request: Request,
     response: Response,
@@ -418,17 +414,18 @@ async def login(
         ex=60*60*24*7
     )
 
-    response_body = TokenResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        role=role,
-        vendor_verification=vendor_verified,
-        name=user.profile.first_name if user.profile else "",
-        business_name=user.profile.business_name if user.profile else ""
-    )
+    # Tokens are set as HTTP-only cookies below (never exposed to JS).
+    # Only non-sensitive info is returned in the body.
+    role_str = role.value if hasattr(role, "value") else str(role)
+    response_body = {
+        "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "role": role_str,
+        "vendor_verification": vendor_verified,
+        "name": user.profile.first_name if user.profile else "",
+        "business_name": user.profile.business_name if user.profile else ""
+    }
 
-    response = JSONResponse(content=response_body.dict())
+    response = JSONResponse(content=response_body)
     
     if settings.DEBUG == False:
         response.set_cookie(
@@ -646,12 +643,10 @@ async def refresh_token(
             path="/"
         )
 
-    # Return the new tokens in the body so cross-origin clients can capture
-    # and reuse them (dev cookies are Lax/secure=False and are blocked cross-site).
+    # Tokens are set as HTTP-only cookies above (never exposed to JS).
+    # Only non-sensitive info is returned in the body.
     role = user.role.value if hasattr(user.role, "value") else str(user.role)
     return {
-        "access_token": access_token,
-        "refresh_token": new_refresh_token,
         "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         "role": role,
     }
