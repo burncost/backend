@@ -185,6 +185,10 @@ class AuthService:
 
         email = (email or "").strip().lower()
         if not email:
+            logger.error(
+                f"OAuth create/login failed: provider returned no email "
+                f"(provider={provider}, oauth_id={oauth_id})"
+            )
             return None
 
         # 1. Existing user by oauth_id (already linked provider).
@@ -232,12 +236,21 @@ class AuthService:
         # 3. Brand-new OAuth signup (no phone/password required).
         # Strict: the client must send a valid role explicitly — no default is
         # ever written. A missing/invalid role aborts the whole signup.
-        if not user:
+        new_signup = user is None
+        if new_signup:
             if not role:
+                logger.error(
+                    f"OAuth create/login failed: no role provided by client for "
+                    f"new signup (email={email}, provider={provider})"
+                )
                 return None
             try:
                 new_role = UserRole(role)
             except ValueError:
+                logger.error(
+                    f"OAuth create/login failed: invalid role {role!r} for "
+                    f"new signup (email={email}, provider={provider})"
+                )
                 return None
             user = User(
                 email=email,
@@ -252,42 +265,52 @@ class AuthService:
                 role=new_role,
                 last_login=datetime.utcnow(),
             )
-            db.add(user)
-            await db.flush()
+        try:
+            if new_signup:
+                db.add(user)
+                await db.flush()
 
-            # Auto-create profile (first_name/last_name are non-nullable).
-            first = (first_name or full_name or email.split("@")[0]).strip() or "New"
-            last = (last_name or "").strip() or "User"
-            profile = UserProfile(
-                user_id=user.id, first_name=first, last_name=last, avatar_url=avatar_url,
-                business_name=business_name,
+                # Auto-create profile (first_name/last_name are non-nullable).
+                first = (first_name or full_name or email.split("@")[0]).strip() or "New"
+                last = (last_name or "").strip() or "User"
+                profile = UserProfile(
+                    user_id=user.id, first_name=first, last_name=last, avatar_url=avatar_url,
+                    business_name=business_name,
+                )
+                db.add(profile)
+
+                # Fresh OAuth vendor signup gets a Vendor row immediately (cac_only tier).
+                if role == "vendor":
+                    from app.models.vendor import Vendor
+                    db.add(Vendor(
+                        user_id=user.id,
+                        business_name=(business_name or "").strip() or "My Business",
+                        business_type="general",
+                        city="",
+                        state="",
+                        business_address="",
+                        verification_status="pending",
+                        verification_tier="cac_only",
+                    ))
+
+                # Auto-create token usage / grant signup bonus.
+                token_service = TokenService(db)
+                await token_service.grant_signup_tokens(str(user.id))
+                created = True
+            else:
+                # Update last_login for an existing/returning user.
+                user.last_login = datetime.utcnow()
+
+            await db.commit()
+            await db.refresh(user)
+        except Exception as e:
+            await db.rollback()
+            logger.error(
+                f"OAuth create/login failed during DB write/commit: {e!r} "
+                f"(provider={provider}, email={email}, role={role!r}, oauth_id={oauth_id})",
+                exc_info=True,
             )
-            db.add(profile)
-
-            # Fresh OAuth vendor signup gets a Vendor row immediately (cac_only tier).
-            if role == "vendor":
-                from app.models.vendor import Vendor
-                db.add(Vendor(
-                    user_id=user.id,
-                    business_name=(business_name or "").strip() or "My Business",
-                    business_type="general",
-                    city="",
-                    state="",
-                    business_address="",
-                    verification_status="pending",
-                    verification_tier="cac_only",
-                ))
-
-            # Auto-create token usage / grant signup bonus.
-            token_service = TokenService(db)
-            await token_service.grant_signup_tokens(str(user.id))
-            created = True
-        else:
-            # Update last_login for an existing/returning user.
-            user.last_login = datetime.utcnow()
-
-        await db.commit()
-        await db.refresh(user)
+            return None
 
         # 4. Issue JWT (mirrors the email-login token flow).
         access_token = create_access_token(data={"sub": str(user.id), "role": user.role})
