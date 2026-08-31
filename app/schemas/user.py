@@ -70,6 +70,13 @@ class OAuthCompleteRequest(BaseModel):
     business_name: Optional[str] = Field(None, max_length=100)
 
 
+### Register a brand-new OAuth account after the user picks a role (pending-token flow)
+class OAuthRegisterRequest(BaseModel):
+    pending_token: str = Field(..., min_length=8, max_length=64)
+    role: str = Field(..., max_length=50)
+    business_name: Optional[str] = Field(None, max_length=100)
+
+
 ### Schema for updating user profile
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None

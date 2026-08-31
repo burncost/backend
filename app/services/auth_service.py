@@ -39,6 +39,26 @@ class AuthService:
 
     # ── OAuth Google ─────────────────────────────────────────────────────────
 
+    async def oauth_lookup(self, db, *, oauth_id: Optional[str], email: Optional[str]):
+        """Find an existing user by oauth_id or verified email (no writes)."""
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        from app.models.user import User
+
+        if oauth_id:
+            result = await db.execute(
+                select(User).options(selectinload(User.profile)).where(User.oauth_id == oauth_id)
+            )
+            user = result.scalar_one_or_none()
+            if user:
+                return user
+        if email:
+            result = await db.execute(
+                select(User).options(selectinload(User.profile)).where(User.email == email.strip().lower())
+            )
+            return result.scalar_one_or_none()
+        return None
+
     async def google_oauth_login(self, code: str, redirect_uri: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Exchange Google OAuth code and return (create-or-login, JWT) user."""
         logger.info("Processing Google OAuth login")

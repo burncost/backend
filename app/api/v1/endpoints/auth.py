@@ -3,6 +3,8 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timedelta
+import json
+import uuid
 import logging
 
 from app.api.deps import get_current_user
@@ -23,6 +25,7 @@ from app.schemas.user import (
     TokenRefresh,
     UserResponse,
     OAuthCompleteRequest,
+    OAuthRegisterRequest,
 )
 from app.crud import user as user_crud, vendor as vendor_crud
 from app.services.auth_service import AuthService
@@ -65,6 +68,26 @@ async def oauth_google(
     if not user_info:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google OAuth failed")
 
+    # Brand-new account? Do NOT create it yet — ask the user for their role first.
+    existing = await auth_service.oauth_lookup(
+        db, oauth_id=user_info.get("id"), email=user_info.get("email")
+    )
+    if not existing:
+        pending_token = str(uuid.uuid4())
+        try:
+            await redis_client.setex(
+                f"oauth_pending:{pending_token}", 600, json.dumps(user_info)
+            )
+        except Exception:
+            logger.error("Failed to stash pending OAuth signup in Redis", exc_info=True)
+            raise HTTPException(status_code=500, detail="Could not start OAuth signup")
+        return {
+            "needs_role": True,
+            "pending_token": pending_token,
+            "email": user_info.get("email"),
+            "provider": "google",
+        }
+
     result = await auth_service.oauth_create_or_login(
         db, provider="google", oauth_id=user_info.get("id"),
         email=user_info.get("email"), full_name=user_info.get("fullName"),
@@ -106,6 +129,26 @@ async def oauth_facebook(
     if not user_info:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Facebook OAuth failed")
 
+    # Brand-new account? Do NOT create it yet — ask the user for their role first.
+    existing = await auth_service.oauth_lookup(
+        db, oauth_id=user_info.get("id"), email=user_info.get("email")
+    )
+    if not existing:
+        pending_token = str(uuid.uuid4())
+        try:
+            await redis_client.setex(
+                f"oauth_pending:{pending_token}", 600, json.dumps(user_info)
+            )
+        except Exception:
+            logger.error("Failed to stash pending OAuth signup in Redis", exc_info=True)
+            raise HTTPException(status_code=500, detail="Could not start OAuth signup")
+        return {
+            "needs_role": True,
+            "pending_token": pending_token,
+            "email": user_info.get("email"),
+            "provider": "facebook",
+        }
+
     result = await auth_service.oauth_create_or_login(
         db, provider="facebook", oauth_id=user_info.get("id"),
         email=user_info.get("email"), full_name=user_info.get("fullName"),
@@ -126,6 +169,52 @@ async def oauth_facebook(
             role=result.get("role", "customer"),
         )
 
+    return _oauth_response(response, result)
+
+
+### Register a brand-new OAuth account after the user picks a role (pending-token flow)
+@router.post("/oauth/register")
+async def oauth_register(
+    response: Response,
+    payload: OAuthRegisterRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create the OAuth user (User + Profile + optional Vendor) using the verified
+    provider data stashed in Redis under the one-time pending token, then issue JWT cookies."""
+    auth_service = AuthService()
+
+    pending_key = f"oauth_pending:{payload.pending_token}"
+    try:
+        raw = await redis_client.get(pending_key)
+    except Exception:
+        logger.error("Redis lookup failed for pending OAuth signup", exc_info=True)
+        raise HTTPException(status_code=500, detail="Could not complete OAuth signup")
+
+    if not raw:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This signup session expired or was already used. Please sign in with Google again.",
+        )
+    await redis_client.delete(pending_key)  # single-use
+
+    user_info = json.loads(raw)
+
+    if payload.role not in ("customer", "vendor"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid role. Choose 'customer' or 'vendor'.",
+        )
+
+    result = await auth_service.oauth_create_or_login(
+        db, provider=user_info.get("provider", "google"),
+        oauth_id=user_info.get("id"),
+        email=user_info.get("email"), full_name=user_info.get("fullName"),
+        first_name=user_info.get("firstName"), last_name=user_info.get("lastName"),
+        avatar_url=user_info.get("avatarUrl"), email_verified=bool(user_info.get("emailVerified")),
+        role=payload.role, business_name=payload.business_name,
+    )
+    if not result:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not create OAuth user")
     return _oauth_response(response, result)
 
 
