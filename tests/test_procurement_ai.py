@@ -233,3 +233,76 @@ def test_template_items_carry_quantity_source():
     import inspect
     src = inspect.getsource(prompt_source)
     assert "quantity_source" in src
+
+
+# -- Phase 9 regression tests -------------------------------------------------
+
+def test_tool_response_preserves_function_name_in_contents():
+    """Tool results must reach Gemini under their real function name.
+
+    Previously every function_response was named "unknown_tool" because the
+    message carried the name under tool_call_id. That silently dropped tool
+    output, so the model could not see that iron rods exist and fell back to the
+    canned "not in catalog" / "notified vendors" answers."""
+    import json
+    from app.services.ai_service import ChatAIService
+    svc = ChatAIService.__new__(ChatAIService)  # bypass Gemini client init
+    messages = [
+        {"role": "system", "content": "You are a test."},
+        {"role": "user", "content": "Find me 12mm iron rods with the best price"},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "compare_prices", "type": "function",
+            "function": {"name": "compare_prices", "arguments": json.dumps({"description": "12mm iron rods"})},
+        }]},
+        {"role": "tool", "tool_call_id": "compare_prices",
+         "content": json.dumps({"source": "database", "verified": True,
+                                "description": "12mm iron rods", "city": "Abuja",
+                                "offers": [{"rate": 8000.0, "product_name": "12mm Reinforcement Rod"}]})},
+    ]
+    contents = svc._messages_to_contents(messages)
+    fn = None
+    for c in contents:
+        if isinstance(c, dict) and c.get("role") == "user":
+            for p in c.get("parts", []):
+                if isinstance(p, dict) and "function_response" in p:
+                    fn = p["function_response"]
+    assert fn is not None, "expected a function_response part"
+    assert fn["name"] == "compare_prices"
+    assert fn["name"] != "unknown_tool"
+    assert fn["response"]["offers"][0]["rate"] == 8000.0
+
+
+class _FakeProductService:
+    """Records the search term used and returns canned results."""
+    def __init__(self):
+        self.searches = []
+    async def list_products(self, filters, page=1, page_size=20):
+        self.searches.append(filters.search)
+        term = (filters.search or "").lower()
+        if "reinforcement" in term or "rebar" in term:
+            return {"products": [{"id": "p1", "name": "12mm Reinforcement Rod",
+                                  "base_price": 8000.0, "category": "rebar",
+                                  "brand_name": "SteelCo", "quantity": 5,
+                                  "unit_of_measure": "length", "status": "active",
+                                  "rating": 4.5}], "total": 1, "page": page}
+        return {"products": [], "total": 0, "page": page}
+
+
+def test_search_products_falls_back_to_iron_rod_synonyms():
+    from app.services.chat_service import ToolExecutor
+    execu = ToolExecutor(db=MagicMock())
+    execu.product_service = _FakeProductService()
+    import asyncio
+    result = asyncio.run(execu._search_products(search="iron rods"))
+    assert result["products"], "synonym retry should surface the rod"
+    assert result["products"][0]["name"] == "12mm Reinforcement Rod"
+    assert "iron rods" in (execu.product_service.searches[0]).lower()
+    assert any("reinforcement" in s.lower() for s in execu.product_service.searches[1:])
+
+
+def test_normalize_state_abuja_maps_to_fct():
+    from app.services.price_service import normalize_state, CITY_TO_STATE
+    assert normalize_state("Abuja") == "FCT"
+    assert normalize_state("abuja") == "FCT"
+    assert normalize_state("Lagos") == "Lagos"
+    assert normalize_state("Rivers") == "Rivers"

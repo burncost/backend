@@ -15,6 +15,20 @@ from app.services.gemini_client import get_gemini_client
 logger = logging.getLogger(__name__)
 
 
+# --- Tool-result decoding helper -------------------------------------------
+# Gemini's function_response.response must be an OBJECT (not a JSON string).
+# Decoding the stored JSON lets the model reason over the real data
+# (offers / prices / product lists) instead of a quoted blob.
+def _decode_tool_content(content: str) -> Dict[str, Any]:
+    if not content:
+        return {}
+    try:
+        payload = json.loads(content)
+    except (ValueError, TypeError):
+        return {"result": content}
+    return payload if isinstance(payload, dict) else {"result": payload}
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _MIME_MAP: dict[str, str] = {
@@ -259,8 +273,8 @@ class ChatAIService:
                     "role": "user",
                     "parts": [{
                         "function_response": {
-                            "name": msg.get("tool_name", "unknown_tool"),
-                            "response": {"result": content},
+                            "name": (msg.get("tool_name") or msg.get("tool_call_id") or "unknown_tool"),
+                            "response": _decode_tool_content(content),
                         }
                     }],
                 })

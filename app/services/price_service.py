@@ -28,6 +28,35 @@ from app.services.gemini_client import get_gemini_client
 
 logger = logging.getLogger(__name__)
 
+# -- Location normalization -------------------------------------------------
+# material_rates stores the geo column as a STATE value (e.g. "FCT" for the
+# Federal Capital, "Rivers" for Port Harcourt), while the AI/API surface the
+# colloquial CITY name ("Abuja", "Port Harcourt"). Without normalization every
+# city-scoped price lookup matched zero rows and fell back to an AI estimate
+# even when a verified rate existed in the same state.
+CITY_TO_STATE = {
+    "abuja": "FCT",
+    "fct": "FCT",
+    "lagos": "Lagos",
+    "port harcourt": "Rivers",
+    "ph": "Rivers",
+    "rivers": "Rivers",
+    "benin city": "Edo",
+    "edo": "Edo",
+    "ibadan": "Oyo",
+    "oyo": "Oyo",
+    "kano": "Kano",
+    "kaduna": "Kaduna",
+    "enugu": "Enugu",
+}
+
+
+def normalize_state(city):
+    """Map a colloquial city/state name to the value in material_rates.state."""
+    if not city:
+        return city
+    return CITY_TO_STATE.get(city.lower().strip(), city)
+
 
 # ─────────────────────────────────────────
 # DOMAIN MODELS

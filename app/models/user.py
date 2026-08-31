@@ -46,7 +46,6 @@ class User(Base):
             create_type=True,
         ),
         nullable=False,
-        default=UserRole.CUSTOMER,
     )
 
     status = Column(

@@ -43,10 +43,17 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         from app.models.user import UserRole
         role_value = obj_in.role
         if isinstance(role_value, str):
+            matched = None
             for member in UserRole:
                 if member.value == role_value:
-                    role_value = member
+                    matched = member
                     break
+            if matched is None:
+                # Strict: an unrecognized role must never be written (no defaults).
+                raise ValueError(f"Invalid role: {obj_in.role!r}")
+            role_value = matched
+        elif role_value is None:
+            raise ValueError("Role is required")
         
         db_obj = User(
             email=obj_in.email,
@@ -56,20 +63,31 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
             status="active",
         )
         db.add(db_obj)
-        await db.commit()
-        await db.refresh(db_obj)
-        
-        # Create user profile (missing optional fields get safe defaults)
-        profile = UserProfile(
-            user_id=db_obj.id,
-            first_name=(obj_in.first_name or "").strip() or "New",
-            other_name=obj_in.other_name,
-            last_name=(obj_in.last_name or "").strip() or "User",
-            business_name=obj_in.business_name,
-            location=obj_in.location or "",
-        )
-        db.add(profile)
-        await db.commit()
+        try:
+            await db.commit()
+            await db.refresh(db_obj)
+
+            # Create user profile (missing optional fields get safe defaults)
+            profile = UserProfile(
+                user_id=db_obj.id,
+                first_name=(obj_in.first_name or "").strip() or "New",
+                other_name=obj_in.other_name,
+                last_name=(obj_in.last_name or "").strip() or "User",
+                business_name=obj_in.business_name,
+                location=obj_in.location or "",
+            )
+            db.add(profile)
+            await db.commit()
+        except Exception:
+            # Registration failed partway (e.g. profile insert failed after the
+            # user row was committed) — roll back and remove any partial user
+            # row so nothing incomplete is left in the database.
+            await db.rollback()
+            await db.execute(
+                User.__table__.delete().where(User.id == db_obj.id)
+            )
+            await db.commit()
+            raise
         
         # Reload user with profile
         result = await db.execute(

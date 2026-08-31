@@ -230,13 +230,15 @@ class AuthService:
                         user.profile.avatar_url = avatar_url
 
         # 3. Brand-new OAuth signup (no phone/password required).
+        # Strict: the client must send a valid role explicitly — no default is
+        # ever written. A missing/invalid role aborts the whole signup.
         if not user:
-            new_role = UserRole.CUSTOMER
-            if role:
-                try:
-                    new_role = UserRole(role)
-                except ValueError:
-                    new_role = UserRole.CUSTOMER
+            if not role:
+                return None
+            try:
+                new_role = UserRole(role)
+            except ValueError:
+                return None
             user = User(
                 email=email,
                 phone_number=None,

@@ -246,6 +246,16 @@ async def register(
             detail="Email already registered"
         )
     
+    # Strict role validation: only explicit, valid signup roles are accepted.
+    # A missing/invalid role must never fall back to a default — reject before
+    # anything is written to the database.
+    allowed_roles = {"customer", "vendor"}
+    if not user_in.role or user_in.role.lower() not in allowed_roles:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid role (customer or vendor) is required"
+        )
+    
     existing_phone = None
     if user_in.phone_number:
         existing_phone = await user_crud.get_by_phone(db, phone=user_in.phone_number)
@@ -312,6 +322,15 @@ async def register(
         logger.info(f"New user registered: {user_email}")
         return user
         
+    except ValueError as e:
+        # Strict role validation failure (from crud) — nothing was written.
+        logger.error(f"Registration rejected: {str(e)}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
     except IntegrityError as e:
         logger.error(f"Database integrity error during registration: {str(e)}")
         await db.rollback()  # Explicit rollback

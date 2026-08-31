@@ -446,6 +446,7 @@ GENERAL RESPONSE POLICY:
    a. First, search for alternatives in the same category and explain why they also fit the user's needs
    b. If nothing suitable exists, use create_vendor_request to start sourcing
    c. Then say: "I've notified our vendors about this. You'll get quotations once available."
+   d. Only use this fallback after a search_products call returns zero results; if results exist, present them with price, brand, and unit.
 3. When showing products, include: name, price, brand, and why it's a good fit for their project.
 4. After presenting a product, naturally nudge toward action: "Want me to add this to your cart?" or "I can help you place an order."
 5. Use 90% proper English. Only use Pidgin once per conversation at the persuasion moment — e.g. "Oga, this one na the best price for 12mm iron rods for this week."
@@ -496,6 +497,26 @@ class ToolExecutor:
         self.user_id = user_id
         self.product_service = ProductService(db)
 
+    # Map colloquial user terms -> catalog naming so "iron rods" finds products
+    # stored as "Reinforcement Rod" / "rebar". Used only as a fallback when the
+    # literal ILIKE search returns nothing.
+    _MATERIAL_SYNONYMS = {
+        "iron rod": ["reinforcement rod", "reinforcement bar", "rebar", "tmt bar", "steel bar"],
+        "steel bar": ["reinforcement bar", "rebar", "high yield rebar"],
+        "rebar": ["reinforcement rod", "high yield rebar", "tmt bar"],
+    }
+
+    @staticmethod
+    def _synonym_terms(search: str) -> List[str]:
+        """Return catalog-compatible alternative search terms for a colloquial query."""
+        if not search:
+            return []
+        key = search.lower().strip()
+        for canon, alts in ToolExecutor._MATERIAL_SYNONYMS.items():
+            if canon in key:
+                return alts
+        return []
+
     async def execute(self, tool_name: str, args: dict) -> dict:
         method = getattr(self, f"_{tool_name}", None)
         if not method:
@@ -535,6 +556,22 @@ class ToolExecutor:
             filters=filters, page=page, page_size=page_size
         )
         products = result.get("products", [])
+
+        # Colloquial -> catalog fallback (e.g. "iron rods" -> "Reinforcement Rod").
+        # A literal ILIKE search for "iron rods" returns nothing because the
+        # catalog stores the product as "12mm Reinforcement Rod"; without this
+        # retry the agent emits the canned "not in catalog" answer.
+        if not products and filters.search:
+            for alt in self._synonym_terms(filters.search):
+                alt_filters = filters.model_copy(update={"search": alt})
+                alt_result = await self.product_service.list_products(
+                    filters=alt_filters, page=page, page_size=page_size
+                )
+                if alt_result.get("products"):
+                    result = alt_result
+                    products = result.get("products", [])
+                    break
+
         # Serialize for JSON
         serialized = []
         for p in products:

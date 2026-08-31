@@ -15,6 +15,8 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
+from app.services.price_service import normalize_state
+
 logger = logging.getLogger(__name__)
 
 # Phase 10: tiny in-process TTL cache for verified offers. Keyed by
@@ -154,8 +156,8 @@ class ProcurementIntelligenceService:
         try:
             result = await self.pg_db.execute(
                 select(MaterialRate)
-                .where(MaterialRate.state == city)
-                .limit(10)
+                .where(MaterialRate.state == normalize_state(city))
+                .order_by(MaterialRate.material_name)
             )
             rates = result.scalars().all()
             desc_lower = description.lower()
@@ -234,7 +236,7 @@ class ProcurementIntelligenceService:
             result = await self.pg_db.execute(
                 select(MaterialRate, MaterialRateHistory)
                 .join(MaterialRateHistory, MaterialRateHistory.rate_id == MaterialRate.id)
-                .where(MaterialRate.state == city)
+                .where(MaterialRate.state == normalize_state(city))
                 .order_by(MaterialRateHistory.recorded_at.desc())
                 .limit(limit)
             )
