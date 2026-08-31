@@ -14,7 +14,7 @@ class UserBase(BaseModel):
     @classmethod
     def validate_nigerian_phone(cls, v: Optional[str]) -> Optional[str]:
         if not v:
-            return v
+            return None
         # Remove spaces and dashes
         v = v.strip().replace(' ', '').replace('-', '')
         
