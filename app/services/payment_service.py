@@ -12,10 +12,15 @@ class PaymentService:
     """Service for processing payments through Paystack payment gateway."""
 
     def __init__(self):
-        self.paystack_secret_key = os.getenv("PAYSTACK_SECRET_KEY", "")
-        self.paystack_public_key = os.getenv("PAYSTACK_PUBLIC_KEY", "")
+        self.paystack_secret_key = settings.PAYSTACK_SECRET_KEY
+        self.paystack_public_key = settings.PAYSTACK_PUBLIC_KEY
         self.flutterwave_secret_key = settings.FLUTTERWAVE_SECRET_KEY
         self.flutterwave_public_key = settings.FLUTTERWAVE_PUBLIC_KEY
+        # Monnify (Phase 5 / collection) — read at runtime so tests stay inert.
+        self.monnify_api_key = settings.MONNIFY_PUBLIC_KEY
+        self.monnify_secret_key = settings.MONNIFY_SECRET_KEY
+        self.monnify_contract_code = settings.MONNIFY_CONTRACT_CODE
+        self.monnify_base_url = settings.MONNIFY_BASE_URL.rstrip("/")
         # Dev: always mock; Prod: use real gateway if enabled
         self.mock_mode = settings.DEBUG or settings.MOCK_PAYMENT_GATEWAY
 
@@ -25,25 +30,36 @@ class PaymentService:
         email: str,
         reference: str,
         metadata: Optional[Dict[str, Any]] = None,
-        payment_type: str = "card"
+        payment_type: str = "card",
+        provider: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Initialize a payment transaction via Flutterwave v3 (preferred) or Paystack fallback.
-        
-        Args:
-            payment_type: "card", "bank_transfer", or "ussd"
+        """Initialize a payment transaction.
+
+        `provider` (optional): a specific gateway the client requested —
+        "flutterwave" | "paystack" | "monnify". When omitted the existing order is
+        preserved: try Flutterwave, then Paystack, else mock. The server remains the
+        amount authority regardless of any client-chosen provider.
         """
         logger.info(f"Initializing payment: {reference} for {email} - ₦{amount:,.2f} (type={payment_type})")
 
         if self.mock_mode:
             return self._mock_initialize(amount, email, reference, metadata)
 
-        # Try Flutterwave v3 first if key is configured
-        if self.flutterwave_secret_key:
+        # Monnify Standard Checkout (hosted redirect).
+        if provider == "monnify" and self.monnify_secret_key and self.monnify_contract_code:
+            return await self._initialize_monnify(amount, email, reference, metadata)
+
+        # Flutterwave v3 first if key is configured (also the default when none chosen).
+        if (provider in (None, "", "flutterwave")) and self.flutterwave_secret_key:
             return await self._initialize_flutterwave(amount, email, reference, metadata, payment_type)
 
-        # Fallback to Paystack
-        if self.paystack_secret_key:
+        # Fallback / explicit Paystack.
+        if (provider in (None, "", "paystack")) and self.paystack_secret_key:
             return await self._initialize_paystack(amount, email, reference, metadata)
+
+        if provider:
+            logger.warning(f"Requested provider {provider} not configured; returning mock")
+            return self._mock_initialize(amount, email, reference, metadata)
 
         # No provider configured, use mock
         logger.warning("No payment provider configured, using mock payment")
@@ -188,6 +204,82 @@ class PaymentService:
         except Exception as e:
             logger.error(f"Paystack init failed: {str(e)}")
             return self._mock_initialize(amount, email, reference, metadata)
+
+    async def _initialize_monnify(
+        self,
+        amount: float,
+        email: str,
+        reference: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Initialize Monnify Standard Checkout (hosted redirect).
+
+        Amount is sent in minor units (kobo) per Monnify docs: kobo = Naira * 100.
+        """
+        try:
+            import base64
+            import httpx
+
+            auth_header = "Basic " + base64.b64encode(
+                f"{self.monnify_api_key}:{self.monnify_secret_key}".encode("utf-8")
+            ).decode("utf-8")
+
+            async with httpx.AsyncClient() as client:
+                # 1) Get bearer token.
+                token_resp = await client.post(
+                    f"{self.monnify_base_url}/api/v1/auth/login",
+                    headers={"Authorization": auth_header},
+                )
+                token_data = token_resp.json() if token_resp.headers.get("content-type", "").startswith("application/json") else {}
+                body = token_data.get("responseBody") or {}
+                token = body.get("accessToken") or (token_data.get("accessToken") or "")
+                if not token:
+                    logger.error(f"Monnify auth failed: {token_resp.status_code}")
+                    return {"success": False, "error": "Monnify authentication failed", "reference": reference, "provider": "monnify"}
+
+                # 2) Initialize standard checkout transaction.
+                init_resp = await client.post(
+                    f"{self.monnify_base_url}/api/v1/merchant/transactions/init-transaction",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "amount": int(round(float(amount) * 100)),  # kobo
+                        "customerName": (email or "Buyer").split("@")[0],
+                        "customerEmail": email,
+                        "paymentReference": reference,
+                        "contractCode": self.monnify_contract_code,
+                        "redirectUrl": f"{settings.FRONTEND_URL}/dashboard/orders",
+                        "paymentMethods": ["CARD", "ACCOUNT_TRANSFER", "USSD"],
+                        "currencyCode": "NGN",
+                        "paymentDescription": f"Burncost order payment - {reference}",
+                        "meta": metadata or {},
+                    },
+                )
+                init_data = init_resp.json() if init_resp.headers.get("content-type", "").startswith("application/json") else {}
+                init_body = init_data.get("responseBody") or init_data.get("data") or {}
+                checkout_url = init_body.get("checkoutUrl") or ""
+                tx_ref = init_body.get("transactionReference") or reference
+
+                if checkout_url:
+                    return {
+                        "success": True,
+                        "authorization_url": checkout_url,
+                        "reference": tx_ref,
+                        "provider": "monnify",
+                        "status": "pending",
+                    }
+
+                logger.error(f"Monnify init failed: {init_resp.status_code} {init_data}")
+                return {"success": False, "error": "Monnify payment initialization failed", "reference": reference, "provider": "monnify"}
+
+        except ImportError:
+            logger.warning("httpx not installed for Monnify")
+            return {"success": False, "error": "HTTP client not available", "reference": reference, "provider": "monnify"}
+        except Exception as e:
+            logger.error(f"Monnify init failed: {str(e)}")
+            return {"success": False, "error": str(e), "reference": reference, "provider": "monnify"}
 
     async def verify_payment(self, reference: str, provider: str = "flutterwave") -> Dict[str, Any]:
         """Verify a payment transaction via Flutterwave v3 or Paystack."""

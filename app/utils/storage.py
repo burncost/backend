@@ -4,6 +4,7 @@ import logging
 import os
 import uuid
 from datetime import datetime
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -12,10 +13,10 @@ class StorageService:
     """Service for file storage operations with Cloudinary and local fallback."""
 
     def __init__(self):
-        self.cloudinary_cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "")
-        self.cloudinary_api_key = os.getenv("CLOUDINARY_API_KEY", "")
-        self.cloudinary_api_secret = os.getenv("CLOUDINARY_API_SECRET", "")
-        self.upload_dir = os.getenv("UPLOAD_DIR", "uploads")
+        self.cloudinary_cloud_name = settings.CLOUDINARY_CLOUD_NAME
+        self.cloudinary_api_key = settings.CLOUDINARY_API_KEY
+        self.cloudinary_api_secret = settings.CLOUDINARY_API_SECRET
+        self.upload_dir = settings.UPLOAD_DIR
         self.use_cloudinary = all([
             self.cloudinary_cloud_name,
             self.cloudinary_api_key,

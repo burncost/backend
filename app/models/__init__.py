@@ -8,6 +8,11 @@ from app.models.product import Product, ProductImage, ProductSpecification, Prod
 from app.models.category import Category
 from app.models.brand import Brand
 from app.models.order import Order, OrderItem
+from app.models.driver import DriverProfile, DriverLocationUpdate
+from app.models.delivery import DeliveryJob
+from app.models.delivery_proof import DeliveryProof
+from app.models.delivery_rating import DeliveryRating
+from app.models.driver_earnings import DriverEarnings
 from app.models.cart import CartItem
 from app.models.address import CustomerAddress
 from app.models.notification import Notification
@@ -26,6 +31,10 @@ from app.models.price_boq import PriceAnomaly, PriceAnomalyHistory, BOQAnalysis,
 from app.models.dispute import Dispute, DisputeEvidence, DisputeResolution, DisputeTimeline
 from app.models.system_setting import SystemSetting
 from app.models.ai_agent_log import AIAgentLog
+from app.models.email_preference import EmailPreference
+from app.models.order_message import OrderMessage
+from app.models.settlement_ledger import VendorSettlementLedger
+from app.models.payment_capture import PaymentCapture
 from app.models.quotation import Quotation, QuotationLineItem
 
 __all__ = [
@@ -45,6 +54,12 @@ __all__ = [
     "Brand",
     "Order",
     "OrderItem",
+    "DriverProfile",
+    "DriverLocationUpdate",
+    "DeliveryJob",
+    "DeliveryProof",
+    "DeliveryRating",
+    "DriverEarnings",
     "CartItem",
     "CustomerAddress",
     "Notification",
@@ -78,6 +93,10 @@ __all__ = [
     "DisputeTimeline",
     "SystemSetting",
     "AIAgentLog",
+    "EmailPreference",
+    "OrderMessage",
+    "VendorSettlementLedger",
+    "PaymentCapture",
     "Quotation",
     "QuotationLineItem",
 ]

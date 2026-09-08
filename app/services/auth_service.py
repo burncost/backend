@@ -312,6 +312,18 @@ class AuthService:
                         verification_status="pending",
                         verification_tier="cac_only",
                     ))
+                # Fresh OAuth driver signup gets a DriverProfile (self-onboarded).
+                if role == "driver":
+                    from app.models.driver import DriverProfile
+                    db.add(DriverProfile(
+                        user_id=user.id,
+                        vendor_id=None,
+                        source="self",
+                        status="active",
+                        full_name=(" ".join([first, last]).strip() or email.split("@")[0]),
+                        phone=None,
+                        availability=False,
+                    ))
 
                 # Auto-create token usage / grant signup bonus.
                 token_service = TokenService(db)

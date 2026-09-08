@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from app.config import settings
 
 celery_app = Celery(
@@ -9,7 +10,8 @@ celery_app = Celery(
         "app.tasks.email_tasks",
         "app.tasks.document_processing_tasks",
         "app.tasks.boq_generation_tasks",
-        "app.tasks.analytics_tasks"
+        "app.tasks.analytics_tasks",
+        "app.tasks.newsletter_tasks",
     ]
 )
 
@@ -27,10 +29,20 @@ celery_app.conf.update(
     worker_max_tasks_per_child=1000,
 )
 
+# Daily market price newsletter (Phase 3) — runs on the emails queue.
+celery_app.conf.beat_schedule = {
+    "send-price-of-day-daily": {
+        "task": "send_price_of_day_newsletter",
+        "schedule": crontab(hour=7, minute=0),
+    },
+}
+
 # Task routes
 celery_app.conf.task_routes = {
     "app.tasks.email_tasks.*": {"queue": "emails"},
     "app.tasks.document_processing_tasks.*": {"queue": "documents"},
     "app.tasks.boq_generation_tasks.*": {"queue": "boq"},
     "app.tasks.analytics_tasks.*": {"queue": "analytics"},
+    "app.tasks.newsletter_tasks.*": {"queue": "emails"},
+    "send_price_of_day_newsletter": {"queue": "emails"},
 }

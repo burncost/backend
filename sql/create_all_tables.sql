@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS vendors (
     state VARCHAR(255) NOT NULL,
     business_address VARCHAR(255) NOT NULL,
     cac_business_registration_number VARCHAR(100) UNIQUE,
-    tax_identification_number VARCHAR(50),
+    nin VARCHAR(50),
     verification_status VARCHAR(20) DEFAULT 'pending',
     verification_tier VARCHAR(20) NOT NULL DEFAULT 'cac_only',
     transaction_volume NUMERIC(15,2) DEFAULT 0.00,

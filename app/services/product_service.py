@@ -65,9 +65,11 @@ class ProductService:
         )
 
         # Marketplace gate: only surface products from verified vendors.
+        # Marketplace gate: show products from ACTIVE vendors (all tiers, incl 0);
+        # only suspended/deactivated/rejected are hidden. Tiers gate selling, not visibility.
         if only_verified:
             query = query.join(Vendor, Vendor.id == Product.vendor_id).where(
-                Vendor.verification_status == "verified"
+                Vendor.verification_status.notin_(["suspended", "deactivated", "rejected"])
             )
 
         # Apply filters

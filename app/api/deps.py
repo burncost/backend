@@ -9,6 +9,7 @@ from app.core.security import get_current_user_id, get_current_user_id_optional
 from app.crud import user as user_crud
 from app.crud import vendor as vendor_crud
 from app.models.vendor import Vendor
+from app.models.driver import DriverProfile
 
 ### Get current authenticated user (raises 401 if not authenticated)
 async def get_current_user(
@@ -103,10 +104,10 @@ async def get_current_verified_vendor(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Vendor profile not found. Please complete vendor registration."
         )
-    if vendor.verification_status != "verified":
+    if (vendor.verification_status.value if hasattr(vendor.verification_status, "value") else str(vendor.verification_status or "")) in ("suspended", "deactivated", "rejected"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Supplier not verified — you can upload products and explore, but cannot transact until your application is approved."
+            detail="Your account is not active for selling. Please contact support."
         )
     return {"id": str(vendor.id), "user_id": str(current_user.id), "business_name": vendor.business_name}
 
@@ -138,3 +139,21 @@ def require_roles(*roles: str):
         return current_user
 
     return role_checker
+
+
+
+### Get current driver profile (must be a driver-role user)
+async def get_current_driver_profile(
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(require_roles("driver")),
+):
+    result = await db.execute(
+        select(DriverProfile).where(DriverProfile.user_id == current_user.id)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Driver profile not found. Please register as a driver or complete onboarding."
+        )
+    return profile

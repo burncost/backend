@@ -242,20 +242,29 @@ async def create_order(
         )
         db.add(order_item)
 
-    # --- Soft tier transaction-cap enforcement ---
-    from app.models.vendor_verification_tier import VendorVerificationTier
+    # --- Soft tier transaction-cap enforcement (Tier 0-3) ---
+    from app.services.vendor_tier_service import tier_cap as v_tier_cap
+    _DISALLOWED = {"suspended", "deactivated", "rejected"}
     for vid in {i["vendor_id"] for i in order_items}:
         vr = (await db.execute(select(Vendor).where(Vendor.id == vid))).scalar_one_or_none()
-        tr = (await db.execute(select(VendorVerificationTier).where(VendorVerificationTier.tier_code == vr.verification_tier))).scalar_one_or_none() if vr else None
-        if not (vr and tr):
+        if not vr:
             continue
-        order_share = sum(i["total_price"] for i in order_items if str(i["vendor_id"]) == str(vid))
-        if float(vr.transaction_volume or 0) + order_share > float(tr.transaction_cap):
+        vstat = vr.verification_status.value if hasattr(vr.verification_status, "value") else str(vr.verification_status or "")
+        if vstat in _DISALLOWED:
             order.status = "on_hold"
             db.add(Notification(user_id=vr.user_id, type="verification",
+                title="Account not active",
+                message="Your account is not active for selling. Please contact support.", read=False))
+            continue
+        tier = vr.verification_tier or "tier_0"
+        cap = v_tier_cap(tier)
+        order_share = sum(i["total_price"] for i in order_items if str(i["vendor_id"]) == str(vid))
+        if cap is not None and (float(vr.transaction_volume or 0) + order_share) > cap:
+            order.status = "on_hold"
+            cap_label = f"N{cap:,.0f}"
+            db.add(Notification(user_id=vr.user_id, type="verification",
                 title="Transaction limit reached",
-                message=f"You're at your {tr.display_name} cap of ₦{float(tr.transaction_cap):,.0f}. Upgrade to keep selling.", read=False))
-
+                message=f"You are at your {tier} cap of {cap_label}. Complete the next step to keep selling.", read=False))
     # Clear the cart
     for cart_item in cart_items:
         await db.delete(cart_item)

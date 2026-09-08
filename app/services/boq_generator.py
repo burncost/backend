@@ -16,6 +16,7 @@ from app.schemas.boq import BOQGenerationRequest
 from app.services.mitm_engine import MITMEngine
 from app.services.price_service import PriceService
 from app.services.gemini_client import get_gemini_client
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,8 @@ class BOQGenerator:
     ):
         self.db = db
         self.pg_db = pg_db
-        self.api_key = os.getenv("AI_SERVICE_API_KEY", "")
-        self.api_url = os.getenv("AI_SERVICE_URL", "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent")
+        self.api_key = settings.AI_SERVICE_API_KEY
+        self.api_url = settings.AI_SERVICE_URL
         self.mitm = MITMEngine(PriceService(mongo_db=db, pg_db=pg_db))
         self.price_service = PriceService(mongo_db=db, pg_db=pg_db)
 

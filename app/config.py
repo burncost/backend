@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     FLUTTERWAVE_SECRET_KEY: Optional[str] = None
     FLUTTERWAVE_PUBLIC_KEY: Optional[str] = None
     MOCK_PAYMENT_GATEWAY: Optional[bool] = None
+    MONNIFY_SECRET_KEY: Optional[str] = None
+    MONNIFY_PUBLIC_KEY: Optional[str] = None
+    MONNIFY_CONTRACT_CODE: Optional[str] = None
+    MONNIFY_BASE_URL: Optional[str] = None
     
     # Email Configuration
     SMTP_HOST: Optional[str] = None

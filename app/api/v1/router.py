@@ -8,6 +8,8 @@ from app.api.v1.endpoints import (
     vendors,
     boqs,
     documents,
+    drivers,
+    deliveries,
     orders,
     categories,
     cart,
@@ -35,9 +37,14 @@ from app.api.v1.endpoints import (
     demand_alerts,
     vendor_reviews,
     admin_shipping,
+    admin_drivers,
+    admin_settlements,
     reports,
     ai,
     projects,
+    public,
+    email_prefs,
+    messaging,
 )
 
 api_router = APIRouter()
@@ -49,6 +56,8 @@ api_router.include_router(tiers.router, prefix="/vendors", tags=["Vendor Tiers"]
 api_router.include_router(products.router, prefix="/products", tags=["Products"])
 api_router.include_router(boqs.router, prefix="/boqs", tags=["BOQs"])
 api_router.include_router(documents.router, prefix="/documents", tags=["Documents"])
+api_router.include_router(drivers.router, prefix="/drivers", tags=["Drivers"])
+api_router.include_router(deliveries.router, prefix="/delivery", tags=["Delivery"])
 api_router.include_router(orders.router, prefix="/orders", tags=["Orders"])
 api_router.include_router(categories.router, prefix="/categories", tags=["Categories"])
 api_router.include_router(cart.router, prefix="/cart", tags=["Cart"])
@@ -72,6 +81,8 @@ api_router.include_router(admin_price_boq.router, prefix="/admin", tags=["Admin 
 api_router.include_router(admin_dispute.router, prefix="/admin", tags=["Admin Dispute"])
 api_router.include_router(admin_settings.router, prefix="/admin", tags=["Admin Settings"])
 api_router.include_router(admin_shipping.router, prefix="/admin", tags=["Admin Shipping"])
+api_router.include_router(admin_drivers.router, prefix="/admin", tags=["Admin Drivers"])
+api_router.include_router(admin_settlements.router, prefix="/admin", tags=["Admin Settlements"])
 api_router.include_router(negotiations.router, prefix="/negotiations", tags=["Negotiations"])
 api_router.include_router(disputes.router, prefix="/disputes", tags=["Disputes"])
 api_router.include_router(demand_alerts.router, prefix="/demand-alerts", tags=["Demand Alerts"])
@@ -79,3 +90,6 @@ api_router.include_router(vendor_reviews.router, prefix="/vendors", tags=["Vendo
 api_router.include_router(reports.router, prefix="/reports", tags=["Reports"])
 api_router.include_router(ai.router, prefix="/ai", tags=["AI Intelligence"])
 api_router.include_router(projects.router, prefix="/projects", tags=["Projects"])
+api_router.include_router(public.router, prefix="/public", tags=["Public"])
+api_router.include_router(email_prefs.router, prefix="/email", tags=["Email"])
+api_router.include_router(messaging.router, prefix="/messages", tags=["Order Messages"])

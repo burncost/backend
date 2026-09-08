@@ -12,12 +12,12 @@ class NotificationService:
 
     def __init__(self):
         self.brevo_api_key = settings.BREVO_API_KEY
-        self.termii_api_key = os.getenv("TERMII_API_KEY", "")
-        self.termii_sender_id = os.getenv("TERMII_SENDER_ID", "Burncost")
-        self.smtp_host = os.getenv("SMTP_HOST", "")
-        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
-        self.smtp_user = os.getenv("SMTP_USER", "")
-        self.smtp_password = os.getenv("SMTP_PASSWORD", "")
+        self.termii_api_key = settings.TERMII_API_KEY
+        self.termii_sender_id = settings.TERMII_SENDER_ID
+        self.smtp_host = settings.SMTP_HOST
+        self.smtp_port = settings.SMTP_PORT
+        self.smtp_user = settings.SMTP_USER
+        self.smtp_password = settings.SMTP_PASSWORD
         self.emails_from = settings.EMAILS_FROM_EMAIL
         self.emails_from_name = settings.EMAILS_FROM_NAME
 

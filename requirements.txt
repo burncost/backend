@@ -52,7 +52,6 @@ PyPDF2
 pdfplumber
 pdf2image
 pymupdf
-reportlab
 
 # CAD Processing
 # ezdxf

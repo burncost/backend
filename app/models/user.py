@@ -13,6 +13,7 @@ class UserRole(str, enum.Enum):
     VENDOR = "vendor"
     ADMIN = "admin"
     SUPER_ADMIN = "super_admin"
+    DRIVER = "driver"
     MANAGER = "manager"
     SUPPORT = "support"
     MARKETING = "marketing"

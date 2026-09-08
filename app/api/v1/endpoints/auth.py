@@ -199,10 +199,10 @@ async def oauth_register(
 
     user_info = json.loads(raw)
 
-    if payload.role not in ("customer", "vendor"):
+    if payload.role not in ("customer", "vendor", "driver"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid role. Choose 'customer' or 'vendor'.",
+            detail="Invalid role. Choose 'customer', 'vendor' or 'driver'.",
         )
 
     result = await auth_service.oauth_create_or_login(
@@ -232,10 +232,10 @@ async def oauth_complete(
     from app.models.user import UserRole, UserProfile
     from app.models.vendor import Vendor
 
-    if payload.role not in ("customer", "vendor"):
+    if payload.role not in ("customer", "vendor", "driver"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid role. Choose 'customer' or 'vendor'.",
+            detail="Invalid role. Choose 'customer', 'vendor' or 'driver'.",
         )
 
     current_user.role = UserRole(payload.role)
@@ -265,6 +265,23 @@ async def oauth_complete(
                 business_address="",
                 verification_status="pending",
                 verification_tier="cac_only",
+            ))
+
+    if payload.role == "driver":
+        from app.models.driver import DriverProfile
+        from sqlalchemy import select
+        existing_driver = await db.execute(
+            select(DriverProfile).where(DriverProfile.user_id == current_user.id)
+        )
+        if not existing_driver.scalar_one_or_none():
+            db.add(DriverProfile(
+                user_id=current_user.id,
+                vendor_id=None,
+                source="self",
+                status="active",
+                full_name=((current_user.profile.first_name if current_user.profile else "") + " " + (current_user.profile.last_name if current_user.profile else "")).strip(),
+                phone=None,
+                availability=False,
             ))
 
     await db.commit()
@@ -338,11 +355,11 @@ async def register(
     # Strict role validation: only explicit, valid signup roles are accepted.
     # A missing/invalid role must never fall back to a default — reject before
     # anything is written to the database.
-    allowed_roles = {"customer", "vendor"}
+    allowed_roles = {"customer", "vendor", "driver"}
     if not user_in.role or user_in.role.lower() not in allowed_roles:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A valid role (customer or vendor) is required"
+            detail="A valid role (customer, vendor or driver) is required"
         )
     
     existing_phone = None
@@ -374,6 +391,21 @@ async def register(
                 commission_rate=10.00,
             ))
         
+        # Auto-create a DriverProfile for driver-role signups (self-onboarded).
+        if user_in.role and user_in.role.lower() == "driver":
+            from app.models.driver import DriverProfile
+            _first = (user.profile.first_name if user.profile else "") or ""
+            _last = (user.profile.last_name if user.profile else "") or ""
+            db.add(DriverProfile(
+                user_id=user.id,
+                vendor_id=None,
+                source="self",
+                status="active",
+                full_name=(" ".join([_first, _last]).strip() or user_in.email.split("@")[0]),
+                phone=user_in.phone_number,
+                availability=False,
+            ))
+
         # Capture values as plain strings BEFORE any more commits
         # (grant_signup_tokens does 2 more commits which expires session state)
         user_email = user.email
@@ -977,3 +1009,48 @@ async def update_password(
     await user_crud.update_password(db, user_id=current_user.id, new_password=payload.newPassword)
 
     return {"message": "Password updated successfully"}
+
+
+
+### Driver activation from a vendor invite
+@router.post("/driver/activate")
+async def driver_activate(
+    token: str = Body(...),
+    phone: str = Body(...),
+    password: str = Body(...),
+    db: AsyncSession = Depends(get_db)
+):
+    from sqlalchemy import select
+    from app.models.user import User
+    from app.models.driver import DriverProfile
+
+    def _digits(v: str) -> str:
+        return "".join(ch for ch in (v or "") if ch.isdigit())[-10:]
+
+    data = decode_token(token)
+    if data.get("type") != "driver_invite":
+        raise HTTPException(status_code=400, detail="Invalid activation token")
+    if _digits(str(data.get("phone") or "")) != _digits(phone):
+        raise HTTPException(status_code=400, detail="Phone does not match this invite")
+    uid = data.get("sub")
+    if not uid:
+        raise HTTPException(status_code=400, detail="Invalid activation token")
+
+    result = await db.execute(select(User).where(User.id == uuid.UUID(str(uid))))
+    user = result.scalar_one_or_none()
+    if not user or (user.role and user.role.value != "driver"):
+        raise HTTPException(status_code=400, detail="Invalid activation token")
+
+    user.password_hash = get_password_hash(password)
+    user.status = "active"
+    user.phone_verified = True
+
+    dres = await db.execute(select(DriverProfile).where(DriverProfile.user_id == user.id))
+    driver = dres.scalar_one_or_none()
+    if driver:
+        driver.status = "active"
+        driver.phone = phone
+        driver.availability = False
+
+    await db.commit()
+    return {"message": "Driver activated. You can now sign in.", "role": "driver"}

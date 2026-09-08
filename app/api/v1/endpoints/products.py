@@ -127,7 +127,7 @@ async def get_product(
 
     # Marketplace detail gate: only verified vendors' products are public, so a
     # pending vendor's product URL stays hidden (they still see it via my-products).
-    if (vendor.verification_status or "") != "verified":
+    if (vendor.verification_status or "") in ("suspended", "deactivated", "rejected"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Product not found"

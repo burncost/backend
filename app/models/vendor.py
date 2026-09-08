@@ -32,6 +32,7 @@ class Vendor(Base):
     business_address = Column(String(255), nullable=False)
     cac_business_registration_number = Column(String(100), unique=True, nullable=True)
     tax_identification_number = Column(String(50), nullable=True)
+    nin = Column(String(50), nullable=True)
     verification_status = Column(
         SQLEnum(VendorVerificationStatus, native_enum=False, length=20,
                 values_callable=lambda e: [m.value for m in e]),

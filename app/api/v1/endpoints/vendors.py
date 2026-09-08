@@ -202,7 +202,7 @@ async def onboard_vendor(
         vendor.city = vendor_in.city
         vendor.state = vendor_in.state
         vendor.cac_business_registration_number = vendor_in.cac_business_registration_number
-        vendor.tax_identification_number = vendor_in.tax_identification_number
+        vendor.nin = vendor_in.nin
         vendor.verification_status = ver_status
         # Keep existing commission_rate (do not reset).
     else:
@@ -214,7 +214,7 @@ async def onboard_vendor(
             city=vendor_in.city,
             state=vendor_in.state,
             cac_business_registration_number=vendor_in.cac_business_registration_number,
-            tax_identification_number=vendor_in.tax_identification_number,
+            nin=vendor_in.nin,
             verification_status=ver_status,
             commission_rate=default_commission,
             verification_date=datetime.now(timezone.utc).replace(tzinfo=None) if verified else None,
@@ -318,7 +318,7 @@ async def onboard_vendor(
             _auto_verify_vendor_background,
             vendor_id=str(vendor.id),
             rc_number=vendor_in.cac_business_registration_number,
-            submitted_tin=vendor_in.tax_identification_number or "",
+            submitted_tin=vendor_in.nin or "",
         )
     
     return vendor
@@ -375,6 +375,9 @@ async def update_my_vendor_profile(
     for field, value in update_data.items():
         setattr(vendor, field, value)
     
+    from app.services.vendor_tier_service import resolve_and_apply
+    profile = current_user.profile if hasattr(current_user, "profile") else None
+    resolve_and_apply(vendor, profile)
     await db.commit()
     await db.refresh(vendor)
     
@@ -397,41 +400,38 @@ async def get_vendor_status(
             detail="Vendor profile not found. Please register as a vendor first."
         )
 
-    # Tier + cap metadata for the dashboard banner
-    from app.models.vendor_verification_tier import VendorVerificationTier
-    tiers_res = await db.execute(
-        select(VendorVerificationTier)
-        .where(VendorVerificationTier.is_active.is_(True))
-        .order_by(VendorVerificationTier.sort_order)
+    # Tier 0-3 metadata + self-heal resolver (raises only)
+    from app.services.vendor_tier_service import (
+        resolve_and_apply, TIER_CAPS, TIER_NEXT_STEP,
     )
-    tiers = tiers_res.scalars().all()
-    current_tier = next((t for t in tiers if t.tier_code == vendor.verification_tier), None)
-    trans_cap = float(current_tier.transaction_cap) if current_tier else 5_000_000.0
+    profile = current_user.profile if hasattr(current_user, "profile") else None
+    resolve_and_apply(vendor, profile)
+    await db.commit()
+    code = vendor.verification_tier or "tier_0"
+    cap = TIER_CAPS.get(code)
+    tier_labels = {
+        "tier_0": "Tier 0",
+        "tier_1": "Tier 1",
+        "tier_2": "Tier 2",
+        "tier_3": "Tier 3 - Burncost Verified",
+    }
     volume = float(vendor.transaction_volume or 0)
-    volume_pct = round((volume / trans_cap) * 100, 1) if trans_cap else 0
-
-    current_rank = current_tier.sort_order if current_tier else 1
-    next_tier = next((t for t in tiers if t.sort_order > current_rank), None)
-
+    volume_pct = round((volume / cap) * 100, 1) if cap else None
+    is_verified = bool(vendor.verification_status and getattr(vendor.verification_status, "value", vendor.verification_status) == "verified")
     return {
-        "verification_status": vendor.verification_status,
+        "verification_status": vendor.verification_status.value if hasattr(vendor.verification_status, "value") else vendor.verification_status,
         "verification_date": vendor.verification_date.isoformat() if vendor.verification_date else None,
         "rating": float(vendor.rating) if vendor.rating else 0,
         "total_reviews": vendor.total_reviews or 0,
         "total_sales": float(vendor.total_sales) if vendor.total_sales else 0,
         "is_featured": vendor.is_featured or False,
-        "tier": vendor.verification_tier,
-        "tier_name": current_tier.display_name if current_tier else vendor.verification_tier,
-        "transaction_cap": trans_cap,
+        "is_verified": is_verified,
+        "tier": code,
+        "tier_name": tier_labels.get(code, code),
+        "transaction_cap": cap,
         "transaction_volume": volume,
         "volume_pct": volume_pct,
-        "next_tier": {
-            "tier_code": next_tier.tier_code,
-            "display_name": next_tier.display_name,
-            "transaction_cap": float(next_tier.transaction_cap),
-            "commission_rate": float(next_tier.commission_rate),
-            "perks": next_tier.perks or [],
-        } if next_tier else None,
+        "next_step": TIER_NEXT_STEP.get(code, ""),
     }
 
 ### Get demand alerts for vendor (products out of stock that customers want)

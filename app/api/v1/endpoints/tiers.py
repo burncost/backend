@@ -113,7 +113,7 @@ async def upgrade_vendor_tier(
 ):
     target = (payload.get("tier_code") or "").strip()
     documents: Dict[str, str] = payload.get("documents") or {}
-    tin = (payload.get("tin") or "").strip()
+    nin = (payload.get("nin") or "").strip()
     if target not in ("documented", "trusted"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="target tier must be documented or trusted")
 
@@ -147,9 +147,9 @@ async def upgrade_vendor_tier(
             review_status="pending",
         ))
 
-    # Save TIN if provided (user can submit TIN later during tier upgrade)
-    if tin:
-        vend.tax_identification_number = tin
+    # Save NIN if provided (user can submit NIN later during tier upgrade)
+    if nin:
+        vend.nin = nin
 
     # Tier 2 auto-ish: effective immediately. Tier 3: manual admin review.
     if target == "documented" and not tier.requires_manual_review:

@@ -8,7 +8,7 @@ from decimal import Decimal
 class VendorBase(BaseModel):
     business_name: str = Field(..., min_length=2, max_length=255)
     cac_business_registration_number: Optional[str] = None
-    tax_identification_number: Optional[str] = None
+    nin: Optional[str] = None
 
 
 class VendorCreate(VendorBase):
@@ -19,7 +19,7 @@ class VendorCreate(VendorBase):
     state: str = Field(..., max_length=100)
     phone_number: Optional[str] = Field(None, max_length=20)
     cac_business_registration_number: Optional[str] = Field(None, max_length=100)
-    tax_identification_number: Optional[str] = Field(None, max_length=50)
+    nin: Optional[str] = Field(None, max_length=50)
     verification_status: Optional[str] = Field(None, max_length=50)
     verification_date: Optional[datetime] = None
     verified_by: Optional[UUID] = None
@@ -41,7 +41,7 @@ class VendorUpdate(BaseModel):
     city: Optional[str] = Field(None, max_length=100)
     state: Optional[str] = Field(None, max_length=100)
     cac_business_registration_number: Optional[str] = Field(None, max_length=100)
-    tax_identification_number: Optional[str] = Field(None, max_length=50)
+    nin: Optional[str] = Field(None, max_length=50)
     bank_name: Optional[str] = Field(None, max_length=100)
     bank_account_number: Optional[str] = Field(None, max_length=100)
     bank_account_name: Optional[str] = Field(None, max_length=100)

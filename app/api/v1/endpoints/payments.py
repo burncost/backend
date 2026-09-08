@@ -12,6 +12,7 @@ from app.models.order import Order, OrderItem, PaymentStatus
 from app.models.product import Product
 from app.models.vendor import Vendor
 from app.models.notification import Notification
+from app.config import settings
 from app.api.deps import get_current_user, get_current_admin, get_current_vendor
 from app.services.payment_service import PaymentService
 from app.services.notification_service import NotificationService
@@ -29,6 +30,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 payment_service = PaymentService()
+
+# Phase 5 settlement capture hook (flag-gated; no-op unless SETTLEMENT_ENABLED).
+from app.services.settlement_service import is_enabled as _settlement_enabled
+from app.services.settlement_ops import record_capture as _settlement_record_capture
+
+_SETTLEMENT_GATEWAYS = {"flutterwave", "paystack", "monnify"}
+
+
+async def _maybe_record_capture(db, *, order_id, gateway, amount, provider_reference=None, gateway_fee=0.0):
+    """Persist a gateway capture record when settlement is enabled. No-op otherwise."""
+    if not _settlement_enabled() or gateway not in _SETTLEMENT_GATEWAYS:
+        return
+    try:
+        await _settlement_record_capture(
+            db, order_id=order_id, gateway=gateway, amount=amount,
+            provider_reference=provider_reference, gateway_fee=gateway_fee,
+        )
+    except Exception as exc:  # never break the payment flow for a ledger write
+        logger.warning("settlement capture skipped for order %s: %s", order_id, exc)
 
 
 ### List payments for the current user
@@ -200,6 +220,10 @@ async def process_payment(
     """
     order_id = payment_data.get("order_id")
     payment_method = payment_data.get("payment_method", "card")
+    # Optional client-chosen gateway (server remains the amount authority).
+    provider = str(payment_data.get("provider", "") or "").strip().lower()
+    if provider and provider not in {"flutterwave", "paystack", "monnify"}:
+        raise HTTPException(status_code=400, detail="Unsupported payment provider")
 
     if not order_id:
         raise HTTPException(
@@ -286,11 +310,13 @@ async def process_payment(
         email=user_email,
         reference=reference,
         payment_type=payment_method,
+        provider=provider or None,
         metadata={
             "order_id": str(order.id),
             "order_number": order.order_number,
             "user_id": str(current_user.id),
             "payment_method": payment_method,
+            "provider": provider,
         }
     )
 
@@ -455,6 +481,12 @@ async def verify_payment(
                     )
                     db.add(notification)
                     await db.commit()
+                    await _maybe_record_capture(
+                        db, order_id=order.id,
+                        gateway=str(result.get("provider") or ""),
+                        amount=float(order.total_amount),
+                        provider_reference=str(result.get("id") or reference),
+                    )
 
     return result
 
@@ -476,7 +508,7 @@ async def flutterwave_webhook(
     # unset or the signature is absent/invalid (never process an unverified webhook).
     payload_bytes = await request.body()
     signature = request.headers.get("verif-hash", "")
-    secret_hash = os.getenv("FLUTTERWAVE_SECRET_HASH", "")
+    secret_hash = settings.FLUTTERWAVE_SECRET_HASH
     if not verify_webhook_signature("flutterwave", payload_bytes, signature, secret_hash):
         logger.warning("Invalid/missing Flutterwave webhook signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
@@ -532,6 +564,92 @@ async def flutterwave_webhook(
                     await audit_payment_event(db, user_id=str(order.user_id), action="webhook_verify",
                                               reference=tx_ref, amount=order_amount)
                     logger.info(f"Webhook: Payment confirmed for order {order_number}")
+                    await _maybe_record_capture(
+                        db, order_id=order.id, gateway="flutterwave", amount=gateway_amount,
+                        provider_reference=str(data.get("id") or tx_ref),
+                        gateway_fee=float(data.get("app_fee") or 0),
+                    )
+
+    return {"status": "ok"}
+
+
+def _verify_monnify_signature(payload_bytes: bytes, header_sig: str) -> bool:
+    """Monnify signs webhooks with SHA-512(secret_key + rawBody) hex in the header."""
+    import hashlib
+    import hmac
+    secret = settings.MONNIFY_SECRET_KEY
+    if not secret:
+        return False  # fail closed when not configured
+    raw = (secret + payload_bytes.decode("utf-8")).encode("utf-8")
+    expected = hashlib.sha512(raw).hexdigest()
+    # Some setups prefix the signature; strip a possible 'sha512=' / 'Bearer '.
+    cleaned = header_sig.strip().replace("Bearer ", "").replace("sha512=", "")
+    return hmac.compare_digest(expected, cleaned)
+
+
+### Monnify webhook (Phase 5) — plug-and-play; verify with test keys on staging.
+@router.post("/webhook/monnify")
+async def monnify_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Handle Monnify webhook events (payment/debit success).
+
+    Signature is verified fail-closed against MONNIFY_SECRET_KEY. On a successful
+    payment for a BURNCOST-<order_number> reference we mark the order completed and
+    record the gateway capture (flag-gated). Exact event/field names must be
+    confirmed against Monnify's test webhook payloads on staging.
+    """
+    import hashlib
+    import json
+    import hmac
+
+    payload_bytes = await request.body()
+    signature = request.headers.get("monnify-signature", "") or request.headers.get("authorization", "")
+    if not settings.MONNIFY_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Monnify webhook secret is not configured")
+    if not _verify_monnify_signature(payload_bytes, signature):
+        logger.warning("Invalid/missing Monnify webhook signature")
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    payload = json.loads(payload_bytes)
+    event = (payload.get("eventType") or payload.get("event") or "").upper()
+    data = payload.get("data") or payload
+
+    is_success = ("SUCCESS" in event) or (str(data.get("paymentStatus", "")).lower() == "paid") \
+        or (str(data.get("transactionStatus", "")).lower() in ("successful", "paid"))
+
+    if is_success:
+        tx_ref = (data.get("paymentReference") or data.get("transactionReference")
+                  or data.get("tx_ref") or data.get("paymentReference") or "")
+        if str(tx_ref).startswith("BURNCOST-"):
+            parts = str(tx_ref).split("-")
+            if len(parts) >= 2:
+                order = (await db.execute(
+                    select(Order).where(Order.order_number == parts[1])
+                )).scalar_one_or_none()
+                if order:
+                    gateway_amount = float(data.get("amount") or data.get("amountPaid") or 0)
+                    order_amount = float(order.total_amount)
+                    if gateway_amount and abs(gateway_amount - order_amount) > 0.01:
+                        logger.warning("Monnify amount mismatch for %s", order.order_number)
+                        return {"status": "ok", "flagged": True}
+                    if order.payment_status != PaymentStatus.COMPLETED:
+                        order.payment_status = PaymentStatus.COMPLETED
+                        order.status = "confirmed"
+                        db.add(Notification(
+                            user_id=order.user_id, type="payment",
+                            title="Payment Received",
+                            message=f"Payment of ₦{order_amount:,.2f} for order {order.order_number} was successful.",
+                        ))
+                        await db.commit()
+                        await _maybe_record_capture(
+                            db, order_id=order.id, gateway="monnify", amount=order_amount,
+                            provider_reference=str(data.get("transactionReference") or tx_ref),
+                            gateway_fee=float(data.get("fee") or data.get("totalFees") or 0),
+                        )
+                        logger.info("Monnify: Payment confirmed for order %s", order.order_number)
 
     return {"status": "ok"}
 
@@ -551,7 +669,7 @@ async def paystack_webhook(
     # Phase 11: fail-closed signature verification — never process an unverified webhook.
     payload_bytes = await request.body()
     signature = request.headers.get("x-paystack-signature", "")
-    secret = os.getenv("PAYSTACK_SECRET_KEY", "")
+    secret = settings.PAYSTACK_SECRET_KEY
     if not verify_webhook_signature("paystack", payload_bytes, signature, secret):
         logger.warning("Invalid/missing Paystack webhook signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
