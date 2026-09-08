@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.email_preference import EmailPreference
 from app.models.material_rate import MaterialRate
 
-PRICE_OF_DAY_SUBJECT = "Burncost Market Update — today's construction prices"
+PRICE_OF_DAY_SUBJECT = "Burncost Market Update - today's construction prices"
 
 
 class NewsletterService:

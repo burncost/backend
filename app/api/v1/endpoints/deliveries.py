@@ -355,7 +355,7 @@ async def vendor_invite_driver(
         data={"sub": str(user.id), "type": "driver_invite", "phone": _norm_phone(payload.phone)},
         expires_delta=timedelta(days=7),
     )
-    front = (app_settings.FRONTEND_URL or "").rstrip("/")
+    front = app_settings.FRONTEND_URL
     activation_link = f"{front}/driver/activate?token={token}"
 
     _notify(db, UUID(current_vendor["user_id"]), "Driver invite created",

@@ -16,11 +16,10 @@ class PaymentService:
         self.paystack_public_key = settings.PAYSTACK_PUBLIC_KEY
         self.flutterwave_secret_key = settings.FLUTTERWAVE_SECRET_KEY
         self.flutterwave_public_key = settings.FLUTTERWAVE_PUBLIC_KEY
-        # Monnify (Phase 5 / collection) — read at runtime so tests stay inert.
         self.monnify_api_key = settings.MONNIFY_PUBLIC_KEY
         self.monnify_secret_key = settings.MONNIFY_SECRET_KEY
         self.monnify_contract_code = settings.MONNIFY_CONTRACT_CODE
-        self.monnify_base_url = settings.MONNIFY_BASE_URL.rstrip("/")
+        self.monnify_base_url = settings.MONNIFY_BASE_URL
         # Dev: always mock; Prod: use real gateway if enabled
         self.mock_mode = settings.DEBUG or settings.MOCK_PAYMENT_GATEWAY
 
