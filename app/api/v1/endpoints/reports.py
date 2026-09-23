@@ -11,17 +11,18 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.api.deps import require_roles
+from app.api.deps import require_roles, get_current_verified_vendor
 from app.models.user import User, UserProfile
 from app.models.vendor import Vendor
 from app.models.order import Order, OrderItem
+from app.models.product import Product
 
 import logging
 
@@ -224,3 +225,175 @@ async def export_order_invoice(
     except ImportError:
         logger.warning("reportlab not installed, falling back to CSV for invoice")
         return _csv_response(f"invoice-{order.order_number}.csv", [["INVOICE", order.order_number], ["Buyer", buyer], [], header, *rows])
+
+
+# ── Vendor's own performance report (watermarked PDF) ─────────────────────────
+# Vendor-facing, deliberately NOT the admin `report_guard`: a vendor can only ever
+# export their own figures. Numbers come from the same handlers the dashboard
+# renders, so the document can never disagree with the UI.
+_VENDOR_REPORT_LINES = 25
+
+
+@router.get("/vendor/summary")
+async def export_vendor_report(
+    current_vendor: dict = Depends(get_current_verified_vendor),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download a watermarked PDF of this vendor's performance."""
+    from datetime import datetime as _dt
+
+    from app.api.v1.endpoints import analytics, payments, reviews as reviews_api
+    from app.api.v1.endpoints import orders as orders_api
+    from app.services.vendor_report_service import build_vendor_report_pdf, money
+
+    vendor_id = UUID(current_vendor["id"])
+    vendor = (await db.execute(select(Vendor).where(Vendor.id == vendor_id))).scalars().first()
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor profile not found")
+
+    sales = await analytics.get_sales_analytics("30d", None, None, current_vendor, db)
+    compare = await analytics.get_sales_comparison("30d", None, None, current_vendor, db)
+    on_time = await analytics.get_on_time_delivery_rate(current_vendor, db)
+    pay = await payments.list_vendor_payments(1, _VENDOR_REPORT_LINES, current_vendor, db)
+    order_rows = await orders_api.get_orders_ui(current_vendor, db)
+    try:
+        review_stats = await reviews_api.list_vendor_product_reviews(current_vendor, db)
+    except Exception:
+        # The report must still render even if the reviews query fails.
+        review_stats = {"reviews": [], "average_rating": 0, "total_reviews": 0,
+                        "rating_distribution": {}}
+
+    products = (await db.execute(
+        select(Product).where(Product.vendor_id == vendor_id).order_by(Product.name).limit(200)
+    )).scalars().all()
+
+    ps = pay.get("summary") or {}
+    period_label = "Last 30 days"
+
+    summary_meta = [
+        ("Delivered revenue", money(sales.get("total_revenue"))),
+        ("Delivered orders", str(sales.get("total_orders", 0))),
+        ("Average order value", money(sales.get("average_order_value"))),
+        ("Revenue vs previous period", str(compare.get("revenue_change", "0%"))),
+        ("In-flight orders", str(sales.get("pending_orders", 0))),
+        ("Cancelled / refunded", str(sales.get("cancelled_orders", 0))),
+        ("Payments captured", money(ps.get("total_earned"))),
+        ("Awaiting payment", money(ps.get("pending_balance"))),
+        ("Awaiting payout", money(ps.get("awaiting_payout"))),
+        ("Next payout due", str(ps.get("next_payout_date") or "Nothing due")),
+        ("Payout window", f"{ps.get('payout_window_hours', 48)}h after delivery confirmation"),
+        ("On-time delivery", f"{on_time.get('on_time_rate', 0)}%"),
+        ("Average rating", str(review_stats.get("average_rating", 0))),
+        ("Verification", str(getattr(vendor.verification_status, "value", vendor.verification_status))),
+    ]
+
+    sales_rows = [
+        ["Delivered revenue", money(sales.get("total_revenue"))],
+        ["Delivered orders", str(sales.get("total_orders", 0))],
+        ["Average order value (delivered only)", money(sales.get("average_order_value"))],
+        ["In-flight orders (unpaid/processing)", str(sales.get("pending_orders", 0))],
+        ["Cancelled / refunded orders", str(sales.get("cancelled_orders", 0))],
+        ["On-time delivery rate",
+         f"{on_time.get('on_time_rate', 0)}% ({on_time.get('on_time_delivered', 0)}/{on_time.get('total_delivered', 0)})"],
+        ["Revenue change vs previous 30 days", str(compare.get("revenue_change", "0%"))],
+        ["Order count change vs previous 30 days", str(compare.get("orders_change", "0%"))],
+    ]
+
+    payment_rows = [
+        [
+            row.get("reference", ""),
+            row.get("payment_status", ""),
+            money(row.get("amount")),
+            money(row.get("order_total")),
+            (row.get("payout_due_at") or "")[:10] or "-",
+        ]
+        for row in (pay.get("payments") or [])
+    ]
+
+
+
+    order_table = [
+        [
+            r.get("id", ""),
+            r.get("date", ""),
+            r.get("status", ""),
+            r.get("payment_status", ""),
+            str(r.get("item_count", 0)),
+            money(r.get("vendor_total")),
+            money(r.get("total")),
+            r.get("driverName") or "-",
+        ]
+        for r in (order_rows or [])
+    ]
+
+    product_table = [
+        [
+            p.name,
+            money(p.discount_price or p.base_price),
+            str(p.quantity if p.quantity is not None else 0),
+            str(p.sales_count or 0),
+        ]
+        for p in products
+    ]
+
+    review_table = [
+        [
+            (r.get("created_at") or "")[:10],
+            r.get("product_name", ""),
+            str(r.get("rating", "")),
+            r.get("reviewer_name", "") or "Anonymous",
+        ]
+        for r in (review_stats.get("reviews") or [])[:_VENDOR_REPORT_LINES]
+    ]
+
+    sections = [
+        {"heading": "Sales performance", "columns": ["Metric", "Value"], "rows": sales_rows},
+        {
+            "heading": "Payments and payouts",
+            "columns": ["Order", "Payment status", "Your share", "Order total", "Payout due"],
+            "rows": payment_rows,
+            "empty": "No payments recorded yet.",
+            "note": "Your share is the value of your own items on each order; an order can span several suppliers.",
+        },
+        {
+            "heading": "Orders",
+            "columns": ["Order", "Date", "Status", "Payment", "Items", "Your share", "Order total", "Driver"],
+            "rows": order_table,
+            "empty": "No orders yet.",
+        },
+        {
+            "heading": "Product catalogue",
+            "columns": ["Product", "Price", "Stock", "Lifetime units"],
+            "rows": product_table,
+            "empty": "No products listed yet.",
+        },
+        {
+            "heading": "Customer reviews",
+            "columns": ["Date", "Product", "Rating", "Reviewer"],
+            "rows": review_table,
+            "empty": "No reviews yet.",
+            "note": (
+                f"Average rating {review_stats.get('average_rating', 0)} from "
+                f"{review_stats.get('total_reviews', 0)} review(s). Distribution: "
+                + ", ".join(f"{k}*={v}" for k, v in (review_stats.get("rating_distribution") or {}).items())
+            ),
+        },
+    ]
+
+    pdf = build_vendor_report_pdf(
+        vendor_name=vendor.business_name or "Vendor",
+        period_label=f"{period_label} | report date {_dt.utcnow().strftime('%Y-%m-%d')}",
+        summary_meta=summary_meta,
+        sections=sections,
+    )
+
+    slug = "-".join(filter(None, "".join(
+        ch if ch.isalnum() else "-" for ch in (vendor.business_name or "vendor").lower()
+    ).split("-")))[:40] or "vendor"
+    filename = f"burncost-{slug}-report-{_dt.utcnow().strftime('%Y-%m-%d')}.pdf"
+
+    return StreamingResponse(
+        io.BytesIO(pdf),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

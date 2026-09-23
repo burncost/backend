@@ -9,17 +9,31 @@ Single source of truth for how a vendor's risk score is computed. Used by:
 Scoring model (points add/subtract from a neutral baseline):
   base          = 50 (neutral)
   verification: verified -30 | pending +10 | suspended/rejected/deactivated +30
-  tier:         trusted -15 | documented -5 | cac_only 0
+  tier:         enterprise -20 | verified_vendor -10 | starter 0
   trust:        rating >= 4.5 -15 | rating 3.5-4.4 -5 | rating < 3.0 +20
   reviews:      no reviews +10
   activity:     high total_sales (>= threshold) -10
+
+Tier codes are the current 3-tier scheme; legacy codes (trusted/documented/cac_only) are
+normalised by vendor_tier_service.normalize_tier() so old rows keep their credit.
 
 Clamped to [0, 100]. Buckets: <= 35 Low | 36-60 Medium | > 60 High.
 """
 from typing import Optional
 
+from app.services.vendor_tier_service import normalize_tier
+
 # Neutral baseline
 BASE_RISK = 50.0
+
+# Risk credit granted by each tier milestone: NIN-verified identity (tier 2) then
+# CAC-verified business (tier 3). A tier-2 upgrade must visibly move the score — it
+# previously changed nothing because this table still used the pre-rework tier codes.
+TIER_RISK_CREDIT = {
+    "starter": 0,
+    "verified_vendor": 10,
+    "enterprise": 20,
+}
 
 # High-sales volume threshold below which we consider a vendor "low activity"
 # and the risk-reduction threshold at/above which a vendor is "established".
@@ -53,13 +67,10 @@ def compute_risk_score(
     else:  # pending / unknown
         score += 10
 
-    # Tier milestone
-    tier = (verification_tier or "").lower()
-    if tier == "trusted":
-        score -= 15
-    elif tier == "documented":
-        score -= 5
-    # cac_only / unknown -> no change
+    # Tier milestone — identity (NIN) then registration (CAC) verification.
+    # normalize_tier() maps legacy codes onto the current scheme, so this only needs the
+    # three live codes; unknown/legacy values fall back to "starter" (no credit).
+    score -= TIER_RISK_CREDIT.get(normalize_tier(verification_tier), 0)
 
     # Rating / review trust signals
     r = float(rating or 0)

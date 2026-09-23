@@ -17,6 +17,7 @@ from app.schemas.material_rate import (
 from app.api.deps import get_current_admin, get_current_user
 
 import logging
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,7 @@ async def get_material_rate(
 @router.post("/", response_model=MaterialRateResponse, status_code=status.HTTP_201_CREATED)
 async def create_material_rate(
     rate_in: MaterialRateCreate,
-    current_admin: dict = Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
     mongodb=Depends(get_mongodb),
 ):
@@ -152,7 +153,7 @@ async def create_material_rate(
 async def update_material_rate(
     rate_id: UUID,
     rate_in: MaterialRateUpdate,
-    current_admin: dict = Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
     mongodb=Depends(get_mongodb),
 ):
@@ -196,7 +197,7 @@ async def update_material_rate(
 @router.delete("/{rate_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_material_rate(
     rate_id: UUID,
-    current_admin: dict = Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
     mongodb=Depends(get_mongodb),
 ):

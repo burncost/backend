@@ -77,3 +77,6 @@ class OrderListUI(BaseModel):
     driverName: str = ""
     driverPhone: str = ""
     items: str
+    payment_status: str = ""
+    vendor_total: float = 0
+    item_count: int = 0

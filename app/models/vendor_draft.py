@@ -20,6 +20,8 @@ class VendorDraft(Base):
     current_step = Column(String(50), default="business-info")
     business_info = Column(JSONB, default=dict)
     banking_info = Column(JSONB, default=dict)
+    # Tier-upgrade draft (NIN/CAC/DOB etc.) persisted for cross-device resume
+    upgrade_data = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

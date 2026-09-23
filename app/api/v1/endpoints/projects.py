@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_mongodb, get_db
 from app.api.deps import get_current_user
 from app.services.project_memory_service import ProjectMemoryService
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ router = APIRouter()
 @router.get("/{project_id}/materials")
 async def get_project_materials(
     project_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     mongo_db = Depends(get_mongodb),
     pg_db: AsyncSession = Depends(get_db),
 ):

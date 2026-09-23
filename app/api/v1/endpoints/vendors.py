@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, text
+from sqlalchemy.orm import joinedload
 from uuid import UUID
 from typing import Optional
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ import asyncio
 from app.core.database import get_db
 from app.models.vendor import Vendor
 from app.models.user import User, UserProfile
+from app.models.demand_alert import demand_alert_cutoff
 from app.models.notification import Notification
 from app.models.vendor_draft import VendorDraft
 from app.schemas.vendor import VendorCreate, VendorUpdate, VendorResponse
@@ -22,6 +24,14 @@ import json
 router = APIRouter()
 logger = logging.getLogger(__name__)
 auth_service = AuthService()
+
+
+def _newest_primary_bank(vendor):
+    """Return the most recent primary bank account (legacy rows may have several)."""
+    accounts = [a for a in (vendor.bank_accounts or []) if a.is_primary]
+    if not accounts:
+        return None
+    return max(accounts, key=lambda a: a.created_at or datetime.min)
 
 # In-memory cache for CAC verification results (keyed by user_id string)
 _cac_cache: dict[str, dict] = {}
@@ -141,7 +151,7 @@ async def _auto_verify_vendor_background(
 async def onboard_vendor(
     vendor_in: VendorCreate,
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     
@@ -326,7 +336,7 @@ async def onboard_vendor(
 ### Get my vendor profile (includes bank account info)
 @router.get("/me", response_model=VendorResponse)
 async def get_my_vendor_profile(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     from sqlalchemy.orm import selectinload
@@ -343,8 +353,9 @@ async def get_my_vendor_profile(
             detail="Vendor profile not found. Please register as a vendor first."
         )
     
-    # Inject primary bank account fields into response for backward compatibility
-    primary_account = next((a for a in vendor.bank_accounts if a.is_primary), None)
+    # Inject primary bank account fields into response for backward compatibility.
+    # Legacy rows can have several is_primary=True entries, so pick the newest.
+    primary_account = _newest_primary_bank(vendor)
     if primary_account:
         vendor.bank_name = primary_account.bank_name
         vendor.bank_account_number = primary_account.account_number
@@ -356,11 +367,15 @@ async def get_my_vendor_profile(
 @router.put("/me", response_model=VendorResponse)
 async def update_my_vendor_profile(
     vendor_in: VendorUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    # Eager-load bank accounts: lazy loads are not possible in an async session.
+    from sqlalchemy.orm import selectinload
     result = await db.execute(
-        select(Vendor).where(Vendor.user_id == current_user.id)
+        select(Vendor)
+        .options(selectinload(Vendor.bank_accounts))
+        .where(Vendor.user_id == current_user.id)
     )
     vendor = result.scalar_one_or_none()
     
@@ -372,21 +387,65 @@ async def update_my_vendor_profile(
     
     # Update only provided fields
     update_data = vendor_in.model_dump(exclude_unset=True)
+    # Bank fields live on the primary VendorBankAccount row, not the vendor table.
+    bank_fields = {k: update_data.pop(k) for k in ("bank_name", "bank_account_number", "bank_account_name") if k in update_data}
     for field, value in update_data.items():
         setattr(vendor, field, value)
+
+    # Upsert the primary bank account when banking details were provided.
+    if bank_fields:
+        from app.models.vendor_bank_account import VendorBankAccount
+        account = next((a for a in vendor.bank_accounts if a.is_primary), None)
+        if not account:
+            # All three fields are NOT NULL — only create when complete.
+            if not all(bank_fields.get(k) for k in ("bank_name", "bank_account_number", "bank_account_name")):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="bank_name, bank_account_number and bank_account_name are required to add a bank account",
+                )
+            account = VendorBankAccount(
+                vendor_id=vendor.id,
+                is_primary=True,
+                bank_name=bank_fields["bank_name"],
+                account_number=bank_fields["bank_account_number"],
+                account_name=bank_fields["bank_account_name"],
+            )
+            db.add(account)
+            vendor.bank_accounts.append(account)
+        else:
+            if bank_fields.get("bank_name") is not None:
+                account.bank_name = bank_fields["bank_name"]
+            if bank_fields.get("bank_account_number") is not None:
+                account.account_number = bank_fields["bank_account_number"]
+            if bank_fields.get("bank_account_name") is not None:
+                account.account_name = bank_fields["bank_account_name"]
     
     from app.services.vendor_tier_service import resolve_and_apply
     profile = current_user.profile if hasattr(current_user, "profile") else None
     resolve_and_apply(vendor, profile)
     await db.commit()
-    await db.refresh(vendor)
-    
+
+    # Re-query with bank accounts eager-loaded (a refresh would expire the
+    # collection and trigger an async lazy load) and expose the primary bank
+    # fields on the response, mirroring GET /vendors/me.
+    result = await db.execute(
+        select(Vendor)
+        .options(selectinload(Vendor.bank_accounts))
+        .where(Vendor.id == vendor.id)
+    )
+    vendor = result.scalar_one()
+    primary_account = _newest_primary_bank(vendor)
+    if primary_account:
+        vendor.bank_name = primary_account.bank_name
+        vendor.bank_account_number = primary_account.account_number
+        vendor.bank_account_name = primary_account.account_name
+
     return vendor
 
 ### Get vendor verification status (for dashboard banner)
 @router.get("/me/status")
 async def get_vendor_status(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
@@ -400,20 +459,19 @@ async def get_vendor_status(
             detail="Vendor profile not found. Please register as a vendor first."
         )
 
-    # Tier 0-3 metadata + self-heal resolver (raises only)
+    # Tier metadata + self-heal resolver (raises only, normalizes legacy codes)
     from app.services.vendor_tier_service import (
         resolve_and_apply, TIER_CAPS, TIER_NEXT_STEP,
     )
     profile = current_user.profile if hasattr(current_user, "profile") else None
     resolve_and_apply(vendor, profile)
     await db.commit()
-    code = vendor.verification_tier or "tier_0"
-    cap = TIER_CAPS.get(code)
+    code = vendor.verification_tier or "starter"
+    cap = TIER_CAPS.get(code)  # None only for enterprise (no cap)
     tier_labels = {
-        "tier_0": "Tier 0",
-        "tier_1": "Tier 1",
-        "tier_2": "Tier 2",
-        "tier_3": "Tier 3 - Burncost Verified",
+        "starter": "Starter",
+        "verified_vendor": "Verified Vendor",
+        "enterprise": "Enterprise — BurnCost Verified",
     }
     volume = float(vendor.transaction_volume or 0)
     volume_pct = round((volume / cap) * 100, 1) if cap else None
@@ -439,7 +497,7 @@ async def get_vendor_status(
 async def get_demand_alerts(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     # Get vendor first
@@ -454,12 +512,18 @@ async def get_demand_alerts(
             detail="Vendor profile not found"
         )
 
-    # Fetch demand alerts matching vendor's city
+    # Fetch demand alerts matching vendor's city. Alerts expire 48h after being
+    # raised, so anything older is excluded here AND from the count (kept in sync so
+    # the "Pending" badge matches the list). City matching is case/whitespace
+    # insensitive because alerts are seeded with e.g. "Abuja" while a vendor may have
+    # stored "abuja " — an exact match silently hid every alert from those vendors.
+    cutoff = demand_alert_cutoff()
     count_stmt = text("""
         SELECT COUNT(*) FROM demand_alerts
-        WHERE city = :city AND status = 'pending'
+        WHERE LOWER(TRIM(city)) = LOWER(TRIM(:city))
+          AND status = 'pending' AND created_at >= :cutoff
     """)
-    count_result = await db.execute(count_stmt, {"city": vendor.city})
+    count_result = await db.execute(count_stmt, {"city": vendor.city, "cutoff": cutoff})
     total = count_result.scalar() or 0
 
     data_stmt = text("""
@@ -467,28 +531,40 @@ async def get_demand_alerts(
             id, item_description, city, quantity_needed, unit,
             project_title, requested_by, status, created_at
         FROM demand_alerts
-        WHERE city = :city AND status = 'pending'
+        WHERE LOWER(TRIM(city)) = LOWER(TRIM(:city))
+          AND status = 'pending' AND created_at >= :cutoff
         ORDER BY created_at DESC
         OFFSET :offset LIMIT :limit
     """)
     data_result = await db.execute(data_stmt, {
         "city": vendor.city,
+        "cutoff": cutoff,
         "offset": (page - 1) * page_size,
         "limit": page_size,
     })
     rows = data_result.fetchall()
 
+    # Resolve requester names in ONE query. The previous per-row lookup was an N+1 and,
+    # worse, raised MissingGreenlet on `requester.profile` (a lazy relationship in an
+    # async endpoint), so every alert that had a requester returned HTTP 500.
+    requester_ids = {row.requested_by for row in rows if row.requested_by}
+    requester_names: dict = {}
+    if requester_ids:
+        requesters = (await db.execute(
+            select(User)
+            .options(joinedload(User.profile))
+            .where(User.id.in_(requester_ids))
+        )).scalars().all()
+        for requester in requesters:
+            profile = requester.profile
+            requester_names[requester.id] = (
+                (profile.first_name if profile and profile.first_name else None)
+                or (requester.email or "").split("@")[0]
+                or "Anonymous"
+            )
+
     alerts = []
     for row in rows:
-        requester_name = "Anonymous"
-        if row.requested_by:
-            user_result = await db.execute(
-                select(User).where(User.id == row.requested_by)
-            )
-            requester = user_result.scalar_one_or_none()
-            if requester and requester.profile:
-                requester_name = requester.profile.first_name or requester.email.split("@")[0]
-
         alerts.append({
             "id": str(row.id),
             "item_description": row.item_description,
@@ -496,7 +572,7 @@ async def get_demand_alerts(
             "quantity_needed": float(row.quantity_needed) if row.quantity_needed else None,
             "unit": row.unit,
             "project_title": row.project_title,
-            "requested_by_name": requester_name,
+            "requested_by_name": requester_names.get(row.requested_by, "Anonymous"),
             "status": row.status,
             "created_at": row.created_at.isoformat() if row.created_at else None,
         })
@@ -514,7 +590,7 @@ async def get_demand_alerts(
 @router.put("/draft", response_model=VendorDraftResponse)
 async def save_vendor_draft(
     draft_in: VendorDraftSave,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
@@ -529,12 +605,15 @@ async def save_vendor_draft(
             draft.business_info = draft_in.business_info
         if draft_in.banking_info is not None:
             draft.banking_info = draft_in.banking_info
+        if draft_in.upgrade_data is not None:
+            draft.upgrade_data = draft_in.upgrade_data
     else:
         draft = VendorDraft(
             user_id=current_user.id,
             current_step=draft_in.current_step or "business-info",
             business_info=draft_in.business_info or {},
             banking_info=draft_in.banking_info or {},
+            upgrade_data=draft_in.upgrade_data,
         )
         db.add(draft)
 
@@ -546,7 +625,7 @@ async def save_vendor_draft(
 ### Get vendor draft
 @router.get("/draft", response_model=VendorDraftResponse)
 async def get_vendor_draft(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
@@ -566,7 +645,7 @@ async def get_vendor_draft(
 ### Delete vendor draft
 @router.delete("/draft", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_vendor_draft(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
@@ -581,7 +660,7 @@ async def delete_vendor_draft(
 ### Deactivate vendor account
 @router.put("/me/deactivate")
 async def deactivate_vendor(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
@@ -602,7 +681,7 @@ async def deactivate_vendor(
 ### Reactivate vendor account
 @router.put("/me/reactivate")
 async def reactivate_vendor(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
@@ -624,7 +703,7 @@ async def reactivate_vendor(
 @router.post("/me/image")
 async def upload_vendor_image(
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
@@ -662,7 +741,7 @@ async def upload_vendor_image(
 @router.post("/verify-business")
 async def verify_business_cac(
     rc_number: str = Query(..., min_length=1, max_length=20, description="CAC RC number (digits only)"),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     from app.tasks.cac_tasks import get_cac_business_info
 

@@ -40,13 +40,15 @@ async def get_live_prices(
         current_price = float(p.discount_price or p.base_price)
         base_price = float(p.base_price)
 
-        # Determine trend based on discount
+        # Determine trend based on discount. The percentage is always derived from
+        # the actual prices: the stored discount_percentage column can be stale and
+        # then disagrees with the price fields rendered next to it in the UI.
         if p.discount_price and p.discount_price < p.base_price:
             trend = "down"
-            change = f"-{p.discount_percentage}%" if p.discount_percentage else f"-{round((1 - current_price / base_price) * 100)}%"
+            change = f"-{round((1 - current_price / base_price) * 100, 2):g}%"
         elif p.discount_price and p.discount_price > p.base_price:
             trend = "up"
-            change = f"+{round((current_price / base_price - 1) * 100)}%"
+            change = f"+{round((current_price / base_price - 1) * 100, 2):g}%"
         else:
             trend = "stable"
             change = None

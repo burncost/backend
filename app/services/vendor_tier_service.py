@@ -1,13 +1,13 @@
-"""Vendor verification tier service (Tier 0-3, data-driven).
+"""Vendor verification tier service (3 tiers, data-driven).
 
 Rules:
-- tier_0: signed up (vendor created) - cap 0 (can list, cannot transact)
-- tier_1: bio filled - cap 3,000,000
-- tier_2: business + NIN provided - cap 20,000,000
-- tier_3: CAC provided - no cap + auto "verified"
+- starter: signed up alone - cap 3,000,000
+- verified_vendor: NIN provided - cap 10,000,000
+- enterprise: CAC provided - no cap + auto "verified" + BurnCost badge
 
-Only ever upgrades (monotonic / highest tier achieved). Documents/upload
-pipeline is disconnected from progression.
+Only ever upgrades (monotonic / highest tier achieved). The old document/upload
+pipeline is bypassed (not deleted): NIN/CAC numbers are persisted on the vendor
+and logged to vendor_documents for manual admin review.
 """
 from typing import Optional
 
@@ -16,34 +16,49 @@ from app.models.user import UserProfile
 
 
 # Ordered lowest -> highest so we can compare levels.
-TIER_ORDER = ["tier_0", "tier_1", "tier_2", "tier_3"]
+TIER_ORDER = ["starter", "verified_vendor", "enterprise"]
 
-# Cap in NGN; tier_3 is effectively unlimited.
+# Legacy codes mapped onto the new tiers (bypass, not delete).
+TIER_ALIASES: dict = {
+    "tier_0": "starter", "tier_1": "starter",
+    "tier_2": "verified_vendor", "tier_3": "enterprise",
+    "cac_only": "starter", "documented": "verified_vendor", "trusted": "enterprise",
+}
+
+# Cap in NGN; enterprise is effectively unlimited.
 TIER_CAPS: dict = {
-    "tier_0": 0,
-    "tier_1": 3_000_000,
-    "tier_2": 20_000_000,
-    "tier_3": None,
+    "starter": 3_000_000,
+    "verified_vendor": 10_000_000,
+    "enterprise": None,
 }
 
-# Next data requirement a vendor needs to move up (for UI prompts).
+TIER_LABELS: dict = {
+    "starter": "Starter",
+    "verified_vendor": "Verified Vendor",
+    "enterprise": "Enterprise",
+}
+
+# Suggestive upsell copy a vendor sees at each tier (for UI prompts).
 TIER_NEXT_STEP = {
-    "tier_0": "Complete your bio to reach Tier 1.",
-    "tier_1": "Add your business details and National ID (NIN) to reach Tier 2.",
-    "tier_2": "Add your CAC registration to reach Tier 3 (Burncost Verified).",
-    "tier_3": "You are fully verified.",
+    "starter": "Add your NIN to become a Verified Vendor with a ₦10,000,000 limit.",
+    "verified_vendor": "Become a BurnCost Verified Enterprise — register your CAC for no transaction cap and the Verified badge.",
+    "enterprise": "You're fully verified — no transaction cap, BurnCost Verified badge active.",
 }
 
 
-def tier_index(tier: str) -> int:
-    if tier in TIER_ORDER:
-        return TIER_ORDER.index(tier)
-    # Legacy codes.
-    return {"cac_only": 1, "documented": 2, "trusted": 3}.get(tier, 0)
+def normalize_tier(tier: Optional[str]) -> str:
+    """Map any legacy/unknown tier code onto the current 3-tier scheme."""
+    t = (tier or "").strip()
+    return TIER_ALIASES.get(t, t if t in TIER_ORDER else "starter")
 
 
-def tier_cap(tier: str) -> Optional[float]:
-    return TIER_CAPS.get(tier if tier in TIER_ORDER else TIER_ORDER[tier_index(tier)], None)
+def tier_index(tier: Optional[str]) -> int:
+    code = normalize_tier(tier)
+    return TIER_ORDER.index(code)
+
+
+def tier_cap(tier: Optional[str]) -> Optional[float]:
+    return TIER_CAPS[normalize_tier(tier)]
 
 
 def _has_bio(profile: Optional[UserProfile]) -> bool:
@@ -55,29 +70,32 @@ def _has_bio(profile: Optional[UserProfile]) -> bool:
 
 
 def compute_tier(vendor: Vendor, profile: Optional[UserProfile]) -> str:
-    """Lowest tier the vendor currently qualifies for from present data."""
+    """Lowest tier the vendor currently qualifies for from present data.
+
+    Signup alone → starter; NIN → verified_vendor; CAC → enterprise.
+    """
     if not vendor:
-        return "tier_0"
+        return "starter"
     has_cac = bool((vendor.cac_business_registration_number or "").strip())
     has_nin = bool((vendor.nin or "").strip())
-    if _has_bio(profile) and has_nin and has_cac:
-        return "tier_3"
-    if _has_bio(profile) and has_nin:
-        return "tier_2"
-    if _has_bio(profile):
-        return "tier_1"
-    return "tier_0"
+    if has_nin and has_cac:
+        return "enterprise"
+    if has_nin:
+        return "verified_vendor"
+    return "starter"
 
 
 def resolve_and_apply(vendor: Vendor, profile: Optional[UserProfile]) -> str:
-    """Raise-only tier progression. Returns the stored tier code."""
+    """Raise-only tier progression. Returns the stored tier code (normalized)."""
     computed = compute_tier(vendor, profile)
-    current = vendor.verification_tier or "tier_0"
+    current = normalize_tier(vendor.verification_tier or "starter")
+    vendor.verification_tier = current
     # Keep the highest tier ever achieved.
     if tier_index(computed) > tier_index(current):
         vendor.verification_tier = computed
-    final = vendor.verification_tier or "tier_0"
-    # Auto "verified" only once the vendor reaches Tier 3 (monotonic keeps it).
-    if tier_index(final) >= 3:
+    final = normalize_tier(vendor.verification_tier or "starter")
+    vendor.verification_tier = final
+    # Auto "verified" once the vendor reaches Enterprise (monotonic keeps it).
+    if tier_index(final) >= tier_index("enterprise"):
         vendor.verification_status = "verified"
     return final

@@ -263,8 +263,8 @@ async def oauth_complete(
                 city="",
                 state="",
                 business_address="",
-                verification_status="pending",
-                verification_tier="cac_only",
+                verification_status="verified",
+                verification_tier="starter",
             ))
 
     if payload.role == "driver":

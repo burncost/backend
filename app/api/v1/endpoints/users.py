@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 from sqlalchemy import select
+from typing import Optional
 
 from app.core.database import get_db
 from app.schemas.user import UserResponse, UserUpdate
@@ -210,3 +212,57 @@ async def update_user_address(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update address: {str(e)}"
         )
+
+
+### Notification preferences (settings screen toggles: in-app / email / SMS)
+class NotificationPreferences(BaseModel):
+    new_orders: bool = True
+    order_updates: bool = True
+    low_stock: bool = True
+    reviews: bool = True
+    messages: bool = True
+    promotions: bool = False
+    email_notifications: bool = True
+    sms_notifications: bool = False
+
+
+async def _get_profile_for(db: AsyncSession, user_id) -> Optional[UserProfile]:
+    result = await db.execute(
+        select(UserProfile).where(UserProfile.user_id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+### Get current user's notification toggles
+@router.get("/me/notification-preferences")
+async def get_notification_preferences(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return notification toggles, merged over the defaults so keys always exist."""
+    defaults = NotificationPreferences().model_dump()
+    profile = await _get_profile_for(db, current_user.id)
+    stored = (profile.notification_preferences or {}) if profile else {}
+    return {**defaults, **{k: bool(v) for k, v in stored.items() if k in defaults}}
+
+
+### Update current user's notification toggles
+@router.put("/me/notification-preferences")
+async def update_notification_preferences(
+    payload: NotificationPreferences,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist notification toggles as JSONB on the profile (partial updates merge)."""
+    profile = await _get_profile_for(db, current_user.id)
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User profile not found"
+        )
+    defaults = NotificationPreferences().model_dump()
+    merged = {**defaults, **{k: bool(v) for k, v in (profile.notification_preferences or {}).items() if k in defaults}}
+    merged.update(payload.model_dump(exclude_unset=True))
+    profile.notification_preferences = merged
+    await db.commit()
+    return merged

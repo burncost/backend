@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, case
 from sqlalchemy.orm import selectinload
 from typing import Optional
 from uuid import UUID
@@ -13,6 +13,7 @@ from app.models.vendor import Vendor
 from app.api.deps import get_current_user, get_current_vendor
 
 import logging
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ router = APIRouter()
 ### Dashboard stats for the current user
 @router.get("/stats")
 async def get_dashboard_stats(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     user_id = current_user.id
@@ -150,127 +151,246 @@ async def get_dashboard_stats(
     }
 
 
-### Helper: parse period into timedelta
+### Reporting windows: a preset period OR an explicit [start_date, end_date] range
+_PRESET_DAYS = {"7d": 7, "30d": 30, "90d": 90, "1y": 365}
+_MAX_RANGE_DAYS = 366
+# Money still in flight (accepted but not delivered) and money lost.
+_IN_FLIGHT_STATUSES = ("pending_payment", "confirmed", "processing", "ready_for_pickup")
+_LOST_STATUSES = ("cancelled", "refunded")
+
+
 def _period_days(period: str) -> int:
-    return {"7d": 7, "30d": 30, "90d": 90, "1y": 365}.get(period, 30)
+    return _PRESET_DAYS.get(period, 30)
+
+
+def _resolve_window(period: str, start_date: Optional[str], end_date: Optional[str]):
+    """Resolve a reporting window to (start, end) UTC datetimes.
+
+    Accepts either a preset `period` or an explicit ISO date range; the two range
+    endpoints must be supplied together. The end date is inclusive. Rejects
+    inverted or oversized ranges and clamps the window to now.
+    """
+    now = datetime.utcnow()
+    if start_date or end_date:
+        if not (start_date and end_date):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="start_date and end_date must be provided together",
+            )
+        try:
+            start = datetime.strptime((start_date or "").strip(), "%Y-%m-%d")
+            # Inclusive end date -> run to the start of the following day.
+            end = datetime.strptime((end_date or "").strip(), "%Y-%m-%d") + timedelta(days=1)
+        except ValueError:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="start_date and end_date must be YYYY-MM-DD",
+            )
+        if end <= start:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="end_date must be on or after start_date",
+            )
+        if (end - start).days > _MAX_RANGE_DAYS:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=f"Range cannot exceed {_MAX_RANGE_DAYS} days",
+            )
+        return start, min(end, now)
+
+    days = _period_days((period or "30d").strip().lower())
+    return now - timedelta(days=days), now
+
+
+def _range_filters(vendor_id, start: datetime, end: datetime):
+    """Shared vendor + window predicates (half-open [start, end))."""
+    return (
+        OrderItem.vendor_id == vendor_id,
+        Order.created_at >= start,
+        Order.created_at < end,
+    )
+
+
+async def _window_metrics(db: AsyncSession, vendor_id, start: datetime, end: datetime) -> dict:
+    """Delivered revenue/orders (+ in-flight and lost counts) for one window.
+
+    Revenue, order count and AOV are all derived from the SAME population
+    (delivered orders), so they can never disagree. The previous implementation
+    divided delivered revenue by a count that included every status, which
+    under-reported AOV and inflated the order count.
+    """
+    common = _range_filters(vendor_id, start, end)
+
+    delivered_row = (await db.execute(
+        select(
+            func.coalesce(func.sum(OrderItem.total_price), 0),
+            func.count(Order.id.distinct()),
+        )
+        .select_from(OrderItem)
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(*common, Order.status == "delivered")
+    )).one()
+    revenue = float(delivered_row[0] or 0)
+    orders = int(delivered_row[1] or 0)
+
+    others_row = (await db.execute(
+        select(
+            func.count(func.distinct(case((Order.status.in_(_IN_FLIGHT_STATUSES), Order.id)))),
+            func.count(func.distinct(case((Order.status.in_(_LOST_STATUSES), Order.id)))),
+        )
+        .select_from(OrderItem)
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(*common)
+    )).one()
+
+    return {
+        "revenue": revenue,
+        "orders": orders,
+        "pending": int(others_row[0] or 0),
+        "cancelled": int(others_row[1] or 0),
+        "average_order_value": _aov(revenue, orders),
+    }
+
+
+def _change(curr: float, prev: float) -> dict:
+    """Period-over-period change as a numeric value plus a display string.
+
+    A window with no baseline reports "New" instead of a misleading "+100%".
+    """
+    if prev == 0:
+        if curr == 0:
+            return {"value": 0.0, "display": "0%"}
+        return {"value": None, "display": "New"}
+    pct = ((curr - prev) / prev) * 100
+    return {"value": round(pct, 1), "display": f"{'+' if pct >= 0 else ''}{pct:.1f}%"}
+
+
+def _aov(revenue: float, orders: int) -> float:
+    """Average order value — revenue and orders must share one population."""
+    return round(revenue / orders, 2) if orders else 0
+
+
+def _bucket_start(ts: datetime, granularity: str) -> datetime:
+    """Start of the day (or ISO week — Monday) containing `ts`."""
+    if granularity == "week":
+        return (ts - timedelta(days=ts.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return ts.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+async def _revenue_series(db: AsyncSession, vendor_id, start: datetime, end: datetime, granularity: str) -> list:
+    """Delivered revenue per bucket, gap-filled so the chart has no holes."""
+    bucket = func.date_trunc(granularity, Order.created_at)
+    rows = (await db.execute(
+        select(
+            bucket.label("bucket"),
+            func.coalesce(func.sum(OrderItem.total_price), 0).label("revenue"),
+            func.count(Order.id.distinct()).label("orders"),
+        )
+        .select_from(OrderItem)
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(*_range_filters(vendor_id, start, end), Order.status == "delivered")
+        .group_by(bucket)
+        .order_by(bucket)
+    )).all()
+
+    found = {
+        _bucket_start(r.bucket, granularity): (float(r.revenue or 0), int(r.orders or 0))
+        for r in rows if r.bucket
+    }
+
+    step = timedelta(days=7 if granularity == "week" else 1)
+    cursor = _bucket_start(start, granularity)
+    last = _bucket_start(end, granularity)
+    series = []
+    while cursor <= last:
+        revenue, orders = found.get(cursor, (0.0, 0))
+        series.append({"date": cursor.date().isoformat(), "revenue": revenue, "orders": orders})
+        cursor += step
+    return series
 
 
 ### Sales analytics (vendor-facing)
 @router.get("/sales")
 async def get_sales_analytics(
-    period: str = Query("30d", regex="^(7d|30d|90d|1y)$"),
+    period: str = Query("30d"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     current_vendor: dict = Depends(get_current_vendor),
     db: AsyncSession = Depends(get_db)
 ):
+    """Sales analytics for a preset period or a custom [start_date, end_date] range.
+
+    Revenue, delivered-order count and AOV all come from the delivered population;
+    in-flight and cancelled orders are reported as separate counts. `series` is
+    bucketed daily (<=92 day windows) or weekly so long ranges stay responsive.
+    """
     vendor_id = UUID(current_vendor["id"])
-    since = datetime.utcnow() - timedelta(days=_period_days(period))
+    start, end = _resolve_window(period, start_date, end_date)
 
-    # Revenue from delivered orders for this vendor
-    revenue_result = await db.execute(
-        select(func.sum(OrderItem.total_price))
-        .select_from(OrderItem)
-        .join(Order, OrderItem.order_id == Order.id)
-        .where(
-            OrderItem.vendor_id == vendor_id,
-            Order.status == "delivered",
-            Order.created_at >= since,
-        )
-    )
-    total_revenue = float(revenue_result.scalar() or 0)
-
-    # Total orders (all statuses) for this vendor in period
-    orders_result = await db.execute(
-        select(func.count(Order.id.distinct()))
-        .select_from(Order)
-        .join(OrderItem, OrderItem.order_id == Order.id)
-        .where(
-            OrderItem.vendor_id == vendor_id,
-            Order.created_at >= since,
-        )
-    )
-    total_orders = orders_result.scalar() or 0
+    metrics = await _window_metrics(db, vendor_id, start, end)
+    span_days = max(1, (end - start).days)
+    granularity = "day" if span_days <= 92 else "week"
+    series = await _revenue_series(db, vendor_id, start, end, granularity)
 
     return {
         "period": period,
-        "total_revenue": total_revenue,
-        "total_orders": total_orders,
-        "average_order_value": round(total_revenue / total_orders, 2) if total_orders > 0 else 0,
+        "start_date": start.date().isoformat(),
+        "end_date": end.date().isoformat(),
+        "granularity": granularity,
+        "total_revenue": metrics["revenue"],
+        "total_orders": metrics["orders"],
+        "average_order_value": metrics["average_order_value"],
+        "pending_orders": metrics["pending"],
+        "cancelled_orders": metrics["cancelled"],
+        "series": series,
     }
 
 
-### Sales comparison (current period vs previous period)
+### Sales comparison (current window vs the preceding window of equal length)
 @router.get("/sales/compare")
 async def get_sales_comparison(
-    period: str = Query("30d", regex="^(7d|30d|90d|1y)$"),
+    period: str = Query("30d"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     current_vendor: dict = Depends(get_current_vendor),
     db: AsyncSession = Depends(get_db)
 ):
+    """Compare the selected window against the immediately preceding one.
+
+    Both windows use the same delivered-based definitions as /sales. Percentage
+    changes are returned as display strings (backwards compatible) plus numeric
+    values; a window with no baseline reports "New" rather than a misleading
+    "+100%".
+    """
     vendor_id = UUID(current_vendor["id"])
-    days = _period_days(period)
-    now = datetime.utcnow()
+    start, end = _resolve_window(period, start_date, end_date)
+    length = end - start
+    prev_start, prev_end = start - length, start
 
-    # Current period
-    current_start = now - timedelta(days=days)
-    # Previous period (same length, before current)
-    prev_start = current_start - timedelta(days=days)
+    current = await _window_metrics(db, vendor_id, start, end)
+    previous = await _window_metrics(db, vendor_id, prev_start, prev_end)
 
-    async def _period_stats(since: datetime, until: datetime) -> dict:
-        rev_result = await db.execute(
-            select(func.sum(OrderItem.total_price))
-            .select_from(OrderItem)
-            .join(Order, OrderItem.order_id == Order.id)
-            .where(
-                OrderItem.vendor_id == vendor_id,
-                Order.status == "delivered",
-                Order.created_at >= since,
-                Order.created_at < until,
-            )
-        )
-        revenue = float(rev_result.scalar() or 0)
-
-        ord_result = await db.execute(
-            select(func.count(Order.id.distinct()))
-            .select_from(Order)
-            .join(OrderItem, OrderItem.order_id == Order.id)
-            .where(
-                OrderItem.vendor_id == vendor_id,
-                Order.created_at >= since,
-                Order.created_at < until,
-            )
-        )
-        total_orders = ord_result.scalar() or 0
-
-        pend_result = await db.execute(
-            select(func.count(Order.id.distinct()))
-            .select_from(Order)
-            .join(OrderItem, OrderItem.order_id == Order.id)
-            .where(
-                OrderItem.vendor_id == vendor_id,
-                Order.status.in_(["pending_payment", "pending", "confirmed"]),
-                Order.created_at >= since,
-                Order.created_at < until,
-            )
-        )
-        pending = pend_result.scalar() or 0
-
-        return {"revenue": revenue, "orders": total_orders, "pending": pending}
-
-    current = await _period_stats(current_start, now)
-    previous = await _period_stats(prev_start, current_start)
-
-    def pct_change(curr: float, prev: float) -> str:
-        if prev == 0:
-            return "+100%" if curr > 0 else "0%"
-        change = ((curr - prev) / prev) * 100
-        return f"{'+' if change >= 0 else ''}{change:.1f}%"
+    revenue_change = _change(current["revenue"], previous["revenue"])
+    orders_change = _change(current["orders"], previous["orders"])
+    pending_change = _change(current["pending"], previous["pending"])
+    aov_change = _change(current["average_order_value"], previous["average_order_value"])
 
     return {
         "period": period,
+        "start_date": start.date().isoformat(),
+        "end_date": end.date().isoformat(),
+        "previous_start_date": prev_start.date().isoformat(),
+        "previous_end_date": prev_end.date().isoformat(),
         "current": current,
         "previous": previous,
-        "revenue_change": pct_change(current["revenue"], previous["revenue"]),
-        "orders_change": pct_change(current["orders"], previous["orders"]),
-        "pending_change": pct_change(current["pending"], previous["pending"]),
+        "revenue_change": revenue_change["display"],
+        "orders_change": orders_change["display"],
+        "pending_change": pending_change["display"],
+        "average_order_value_change": aov_change["display"],
+        "revenue_change_pct": revenue_change["value"],
+        "orders_change_pct": orders_change["value"],
+        "pending_change_pct": pending_change["value"],
+        "average_order_value_change_pct": aov_change["value"],
     }
 
 
@@ -318,38 +438,71 @@ async def get_on_time_delivery_rate(
     }
 
 
-### Top selling products
+### Top selling products (vendor-scoped)
 @router.get("/top-products")
 async def get_top_products(
     limit: int = Query(10, ge=1, le=50),
-    current_user = Depends(get_current_user),
+    period: str = Query("30d"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    current_vendor: dict = Depends(get_current_vendor),
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(
-        select(Product)
-        .options(selectinload(Product.brand))
-        .order_by(desc(Product.sales_count))
-        .limit(limit)
+    """The vendor's OWN products, ranked by delivered revenue in the window.
+
+    This used to be a global `select(Product).order_by(sales_count)`, so every
+    vendor was shown the whole marketplace's best sellers. It now joins delivered
+    order items for this vendor only, falling back to lifetime `sales_count` so a
+    vendor with no sales yet still sees their catalogue.
+    """
+    vendor_id = UUID(current_vendor["id"])
+    start, end = _resolve_window(period, start_date, end_date)
+
+    sold = (
+        select(
+            OrderItem.product_id.label("product_id"),
+            func.coalesce(func.sum(OrderItem.total_price), 0).label("revenue"),
+            func.coalesce(func.sum(OrderItem.quantity), 0).label("units"),
+        )
+        .select_from(OrderItem)
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(*_range_filters(vendor_id, start, end), Order.status == "delivered")
+        .group_by(OrderItem.product_id)
+        .subquery()
     )
-    products = result.scalars().all()
+
+    rows = (await db.execute(
+        select(
+            Product,
+            func.coalesce(sold.c.revenue, 0).label("revenue"),
+            func.coalesce(sold.c.units, 0).label("units"),
+        )
+        .options(selectinload(Product.brand))
+        .outerjoin(sold, sold.c.product_id == Product.id)
+        .where(Product.vendor_id == vendor_id)
+        .order_by(desc(func.coalesce(sold.c.revenue, 0)), desc(Product.sales_count))
+        .limit(limit)
+    )).all()
 
     return [
         {
             "id": str(p.id),
             "name": p.name,
             "category": p.brand.name if p.brand else None,
-            "sales": p.sales_count or 0,
-            "revenue": float((p.sales_count or 0) * (p.discount_price or p.base_price)),
-            "price": float(p.discount_price or p.base_price),
+            # `sales` = units sold in the selected window; `lifetime_sales` = all-time.
+            "sales": int(units or 0),
+            "lifetime_sales": int(p.sales_count or 0),
+            "revenue": float(revenue or 0),
+            "price": round(float(revenue) / int(units), 2) if units else float(p.discount_price or p.base_price or 0),
         }
-        for p in products
+        for p, revenue, units in rows
     ]
 
 
 ### Savings trend (monthly savings for the current user)
 @router.get("/savings-trend")
 async def get_savings_trend(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     user_id = current_user.id

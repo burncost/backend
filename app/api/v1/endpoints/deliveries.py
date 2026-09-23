@@ -25,7 +25,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile, status as http_status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -245,12 +245,24 @@ async def vendor_assignable_drivers(
     current_vendor: dict = Depends(get_current_verified_vendor),
     db: AsyncSession = Depends(get_db),
 ):
-    """List active drivers the vendor can direct-assign (fleet + independent)."""
+    """List active drivers the vendor can direct-assign.
+
+    Restricted to drivers the vendor may legitimately use: independent drivers
+    (no fleet) plus the vendor's own fleet. Another vendor's fleet driver is
+    excluded. Offline drivers stay visible (so the vendor can see who exists)
+    with `availability` surfaced for the UI to label.
+    """
     vendor_id = UUID(current_vendor["id"])
     result = await db.execute(
         select(DriverProfile)
-        .where(DriverProfile.status == "active")
-        .order_by(DriverProfile.created_at.desc())
+        .where(
+            DriverProfile.status == "active",
+            or_(
+                DriverProfile.vendor_id.is_(None),
+                DriverProfile.vendor_id == vendor_id,
+            ),
+        )
+        .order_by(DriverProfile.availability.desc(), DriverProfile.created_at.desc())
     )
     drivers = result.scalars().all()
     return [
@@ -288,6 +300,12 @@ async def vendor_link_driver(
         raise HTTPException(
             http_status.HTTP_404_NOT_FOUND,
             detail="No active driver found with that phone number. Ask them to create a driver account first.",
+        )
+    # Don't silently poach a driver who already belongs to another vendor's fleet.
+    if match.vendor_id and str(match.vendor_id) != str(vendor_id):
+        raise HTTPException(
+            http_status.HTTP_409_CONFLICT,
+            detail="This driver is already attached to another supplier's fleet. Ask that supplier to release them first.",
         )
     match.vendor_id = vendor_id
     match.source = "vendor"
@@ -365,6 +383,7 @@ async def vendor_invite_driver(
         "message": "Driver account created. They must activate via the invite link.",
         "driver_id": str(driver.id),
         "full_name": payload.full_name.strip(),
+        "email": email,
         "activation_link": activation_link,
     }
 
@@ -380,6 +399,15 @@ async def vendor_create_dispatch(
 
     if not await _vendor_owns_order(db, order, vendor_id):
         raise HTTPException(http_status.HTTP_403_FORBIDDEN, detail="This order is not from your catalog.")
+
+    # Only dispatch orders that have actually been paid — dispatching an unpaid
+    # order would put a driver on the road for money that never arrived.
+    paid = order.payment_status.value if hasattr(order.payment_status, "value") else str(order.payment_status or "")
+    if paid != "completed":
+        raise HTTPException(
+            http_status.HTTP_400_BAD_REQUEST,
+            detail="This order isn't paid yet — dispatch becomes available once payment is confirmed.",
+        )
 
     # No duplicate active dispatch for the same (order, vendor).
     dup = await db.execute(
@@ -462,17 +490,46 @@ async def vendor_create_dispatch(
 
 
 @router.get("/jobs/mine")
-async def vendor_list_dispatches(
-    current_vendor: dict = Depends(get_current_verified_vendor),
+async def list_my_jobs(
+    current_user = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    vendor_id = UUID(current_vendor["id"])
-    result = await db.execute(
-        select(DeliveryJob)
-        .options(selectinload(DeliveryJob.order))
-        .where(DeliveryJob.vendor_id == vendor_id)
-        .order_by(DeliveryJob.created_at.desc())
-    )
+    """Dispatches for the caller, dispatched by role.
+
+    Vendors see the jobs they created; drivers see the jobs assigned to them.
+    This used to be two handlers on the same path, so the vendor handler shadowed
+    the driver one and any driver hitting it received 403 — breaking the driver
+    dashboard. Role-based dispatch here serves both clients from one route.
+    """
+    role = current_user.role.value if getattr(current_user, "role", None) is not None and hasattr(current_user.role, "value") else str(getattr(current_user, "role", "") or "")
+
+    if role == "driver":
+        drow = await db.execute(select(DriverProfile).where(DriverProfile.user_id == current_user.id))
+        profile = drow.scalar_one_or_none()
+        if not profile:
+            raise HTTPException(http_status.HTTP_404_NOT_FOUND, detail="Driver profile not found")
+        query = (
+            select(DeliveryJob)
+            .options(selectinload(DeliveryJob.order))
+            .where(DeliveryJob.driver_profile_id == profile.id)
+        )
+    elif role in ("vendor", "admin", "super_admin"):
+        vrow = await db.execute(select(Vendor).where(Vendor.user_id == current_user.id))
+        vendor = vrow.scalar_one_or_none()
+        if not vendor:
+            raise HTTPException(http_status.HTTP_404_NOT_FOUND, detail="Vendor profile not found")
+        status_value = vendor.verification_status.value if hasattr(vendor.verification_status, "value") else str(vendor.verification_status or "")
+        if status_value in ("suspended", "deactivated", "rejected"):
+            raise HTTPException(http_status.HTTP_403_FORBIDDEN, detail="Your account is not active for selling. Please contact support.")
+        query = (
+            select(DeliveryJob)
+            .options(selectinload(DeliveryJob.order))
+            .where(DeliveryJob.vendor_id == vendor.id)
+        )
+    else:
+        raise HTTPException(http_status.HTTP_403_FORBIDDEN, detail="Logistics are not available for this account type.")
+
+    result = await db.execute(query.order_by(DeliveryJob.created_at.desc()))
     jobs = result.scalars().all()
     return [_job_dict(j, order_number=(j.order.order_number if j.order else None)) for j in jobs]
 
@@ -598,19 +655,9 @@ async def driver_accept_offer(
     return _job_dict(job, order_number=(order.order_number if order else None))
 
 
-@router.get("/jobs/mine")
-async def driver_list_my_jobs(
-    profile: DriverProfile = Depends(get_current_driver_profile),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
-        select(DeliveryJob)
-        .options(selectinload(DeliveryJob.order))
-        .where(DeliveryJob.driver_profile_id == profile.id)
-        .order_by(DeliveryJob.created_at.desc())
-    )
-    jobs = result.scalars().all()
-    return [_job_dict(j, order_number=(j.order.order_number if j.order else None)) for j in jobs]
+# NOTE: the driver-scoped GET /jobs/mine handler was removed — it duplicated the
+# role-aware handler above and, being registered second, was unreachable (FastAPI
+# serves the first match). Drivers are now served by GET /jobs/mine directly.
 
 
 async def _driver_transition(db: AsyncSession, profile: DriverProfile, job_id: UUID, target: str):

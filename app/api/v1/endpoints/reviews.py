@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from typing import List, Optional
 from uuid import UUID
+from datetime import datetime, timedelta
 
 from app.core.database import get_db
 from app.models.product import Review, Product
@@ -25,7 +26,7 @@ async def create_vendor_review(
     vendor_id: UUID,
     rating: int = Query(..., ge=1, le=5),
     comment: str = Query(""),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     if current_user.role == "anonymous" or str(current_user.id) == "anonymous":
@@ -111,7 +112,7 @@ async def update_vendor_review(
     review_id: UUID,
     rating: Optional[int] = Query(None, ge=1, le=5),
     comment: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     review = (await db.execute(select(VendorReview).where(VendorReview.id == review_id))).scalar_one_or_none()
@@ -146,7 +147,7 @@ async def update_vendor_review(
 @router.delete("/vendor/{review_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_vendor_review(
     review_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     review = (await db.execute(select(VendorReview).where(VendorReview.id == review_id))).scalar_one_or_none()
@@ -179,7 +180,7 @@ async def create_review(
     product_id: UUID,
     rating: int = Query(..., ge=1, le=5),
     comment: str = Query(""),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     # Reject anonymous users
@@ -313,6 +314,12 @@ async def list_vendor_product_reviews(
         total_reviews = len(reviews)
         average_rating = round(sum(r.rating for r in reviews) / total_reviews, 2) if total_reviews > 0 else 0
 
+        # Baseline for the rating trend: the same population EXCLUDING the last 30 days,
+        # so it moves as new reviews land. None when there is no older baseline.
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        older = [r.rating for r in reviews if r.created_at and r.created_at < cutoff]
+        previous_average_rating = round(sum(older) / len(older), 2) if older else None
+
         # Rating distribution
         rating_distribution = {str(i): 0 for i in range(1, 6)}
         for r in reviews:
@@ -336,6 +343,7 @@ async def list_vendor_product_reviews(
             "reviews": review_list,
             "total_reviews": total_reviews,
             "average_rating": average_rating,
+            "previous_average_rating": previous_average_rating,
             "rating_distribution": rating_distribution,
         }
 
@@ -350,7 +358,7 @@ async def list_vendor_product_reviews(
 ### List all reviews by the current user
 @router.get("/my", response_model=List[ReviewOut])
 async def list_my_reviews(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
@@ -367,7 +375,7 @@ async def update_review(
     review_id: UUID,
     rating: Optional[int] = Query(None, ge=1, le=5),
     comment: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(Review).where(Review.id == review_id))
@@ -402,7 +410,7 @@ async def update_review(
 @router.delete("/{review_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_review(
     review_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(Review).where(Review.id == review_id))

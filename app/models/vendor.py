@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Enum as SQLEnum, DateTime, Numeric, Integer, Boolean, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID, ARRAY
+from sqlalchemy.dialects.postgresql import UUID, ARRAY, JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -38,8 +38,10 @@ class Vendor(Base):
                 values_callable=lambda e: [m.value for m in e]),
         default=VendorVerificationStatus.PENDING
     )
-    # Verification tier: cac_only (1), documented (2), trusted (3)
-    verification_tier = Column(String(20), default="cac_only", nullable=False)
+    # Verification tier: starter (1), verified_vendor (2), enterprise (3)
+    verification_tier = Column(String(20), default="starter", nullable=False)
+    # Cached Mono CAC lookup response (avoids repeat API calls)
+    cac_verification_data = Column(JSONB, nullable=True)
     # Soft-limit transaction volume (NGN), checked against tier cap
     transaction_volume = Column(Numeric(15, 2), default=0.00)
     verification_date = Column(DateTime, nullable=True)

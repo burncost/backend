@@ -23,7 +23,7 @@ async def create_notification(
     title: str,
     message: Optional[str] = None,
     type: Optional[str] = "system",
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     notification = Notification(

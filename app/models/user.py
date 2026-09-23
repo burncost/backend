@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Boolean, DateTime, Enum as SQLEnum, ForeignKey, Date, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -128,6 +128,10 @@ class UserProfile(Base):
     location = Column(String(100), nullable=True)
     avatar_url = Column(Text)
     date_of_birth = Column(Date)
+    # Cached Mono NIN lookup response (avoids repeat API calls)
+    nin_verification_data = Column(JSONB, nullable=True)
+    # Notification toggles for the settings screen (in-app / email / SMS)
+    notification_preferences = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

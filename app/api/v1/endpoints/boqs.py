@@ -33,6 +33,7 @@ from app.schemas.boq import (
 )
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +200,7 @@ async def analyze_drawing(
 @router.post("/generate-from-drawing", status_code=status.HTTP_201_CREATED)
 async def generate_boq_from_drawing(
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb),
     pg_db: AsyncSession = Depends(get_db),
 ):
@@ -318,7 +319,7 @@ async def generate_boq_from_drawing(
     # ── 3. Deduct tokens (drawing cost) then generate ──
     token_service = TokenService(pg_db)
     has_tokens = await token_service.deduct_tokens(
-        user_id=current_user["id"],
+        user_id=str(current_user.id),
         action_type="boq_generate_drawing",
         description=f"BOQ generation from drawing: {file.filename}",
     )
@@ -331,7 +332,7 @@ async def generate_boq_from_drawing(
     boq_generator = BOQGenerator(db, pg_db=pg_db)
     boq = await boq_generator.generate_from_parameters(
         request=mapped["request"],
-        user_id=current_user["id"],
+        user_id=str(current_user.id),
     )
     boq["drawing_analysis"] = {
         "drawing_type": drawing_type,
@@ -350,7 +351,7 @@ async def generate_boq_from_drawing(
             "status": "generated",
             "version": 1,
             "generationMethod": "drawing",
-            "createdBy": current_user["id"],
+            "createdBy": str(current_user.id),
             "boqData": boq,
             "createdAt": now,
             "updatedAt": now,
@@ -372,7 +373,7 @@ def request_title(boq: Dict[str, Any], fallback: str) -> str:
 @router.post("/generate-from-params", status_code=status.HTTP_201_CREATED)
 async def generate_boq_from_params(
     request: BOQGenerationRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb),
     pg_db: AsyncSession = Depends(get_db),
 ):
@@ -385,7 +386,7 @@ async def generate_boq_from_params(
     token_service = TokenService(pg_db)
     action_type = "boq_generate_drawing" if request.drawing_extracted_data else "boq_generate_manual"
     has_tokens = await token_service.deduct_tokens(
-        user_id=current_user["id"],
+        user_id=str(current_user.id),
         action_type=action_type,
         description=f"BOQ generation: {request.project_info.project_title}"
     )
@@ -398,7 +399,7 @@ async def generate_boq_from_params(
     boq_generator = BOQGenerator(db)
     boq = await boq_generator.generate_from_parameters(
         request=request,
-        user_id=current_user["id"]
+        user_id=str(current_user.id)
     )
     
     # Save to MongoDB if available
@@ -411,7 +412,7 @@ async def generate_boq_from_params(
             "status": "generated",
             "version": 1,
             "generationMethod": "parameters",
-            "createdBy": current_user["id"],
+            "createdBy": str(current_user.id),
             "boqData": boq,
             "createdAt": now,
             "updatedAt": now,
@@ -497,7 +498,7 @@ async def mitm_preview(
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload_boq(
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     """Upload an existing BOQ file (Excel/CSV) for verification and analysis."""
@@ -521,7 +522,7 @@ async def upload_boq(
     boq_generator = BOQGenerator(db)
     result = await boq_generator.upload_and_verify(
         file=file,
-        uploaded_by=current_user["id"]
+        uploaded_by=str(current_user.id)
     )
     
     return result
@@ -531,7 +532,7 @@ async def upload_boq(
 @router.get("/{boq_id}", response_model=BOQResponse)
 async def get_boq(
     boq_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     boq_repo = BOQRepository(db)
@@ -552,13 +553,13 @@ async def list_boqs(
     status: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     """List all BOQs for the current user, with optional status filter."""
     boq_repo = BOQRepository(db)
     boqs = await boq_repo.list_by_user(
-        user_id=current_user["id"],
+        user_id=str(current_user.id),
         status=status,
         skip=(page - 1) * page_size,
         limit=page_size
@@ -572,7 +573,7 @@ async def list_project_boqs(
     project_id: str,
     page: int = 1,
     page_size: int = 20,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     boq_repo = BOQRepository(db)
@@ -598,7 +599,7 @@ async def list_project_boqs(
 async def update_boq(
     boq_id: str,
     boq_update: BOQUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     boq_repo = BOQRepository(db)
@@ -623,7 +624,7 @@ async def update_boq(
 async def submit_decision(
     boq_id: str,
     decision: dict,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     """Submit a user decision on a BOQ: 'regenerate' or 'save_original'."""
@@ -638,7 +639,7 @@ async def submit_decision(
     result = await boq_generator.handle_decision(
         boq_id=boq_id,
         decision=decision_value,
-        user_id=current_user["id"]
+        user_id=str(current_user.id)
     )
     
     if not result:
@@ -654,13 +655,13 @@ async def submit_decision(
 @router.post("/{boq_id}/approve")
 async def approve_boq(
     boq_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     boq_generator = BOQGenerator(db)
     approved_boq = await boq_generator.approve_boq(
         boq_id=boq_id,
-        approved_by=current_user["id"]
+        approved_by=str(current_user.id)
     )
     
     if not approved_boq:
@@ -676,7 +677,7 @@ async def approve_boq(
 @router.post("/verify-quote")
 async def verify_quote(
     quote_data: dict,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     """Verify a quote text against market prices."""
@@ -690,7 +691,7 @@ async def verify_quote(
     boq_generator = BOQGenerator(db)
     result = await boq_generator.verify_quote_text(
         quote_text=quote_text,
-        user_id=current_user["id"]
+        user_id=str(current_user.id)
     )
     
     return result
@@ -701,7 +702,7 @@ async def verify_quote(
 async def export_boq(
     boq_id: str,
     format: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb),
     pg_db: AsyncSession = Depends(get_db),
 ):
@@ -714,7 +715,7 @@ async def export_boq(
     # Deduct token for export
     token_service = TokenService(pg_db)
     has_tokens = await token_service.deduct_tokens(
-        user_id=current_user["id"],
+        user_id=str(current_user.id),
         action_type=f"export_{format}",
         description=f"Export BOQ {boq_id} to {format}"
     )
@@ -738,7 +739,7 @@ async def export_boq(
 async def place_boq_order(
     boq_id: str,
     order_request: BOQOrderRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb),
     pg_db: AsyncSession = Depends(get_db),
 ):
@@ -765,7 +766,7 @@ async def place_boq_order(
 
     # Phase 10: idempotency — order_number is derived from the BOQ + user so a
     # retry returns the existing order instead of duplicating it.
-    order_number = f"ORD-{boq_id[:8].upper()}-{current_user['id'][:8]}"
+    order_number = f"ORD-{boq_id[:8].upper()}-{str(current_user.id)[:8]}"
     existing = await pg_db.execute(
         text("SELECT id, order_number FROM orders WHERE order_number = :on"),
         {"on": order_number},
@@ -807,7 +808,7 @@ async def place_boq_order(
             """),
             {
                 "order_number": order_number,
-                "user_id": current_user["id"],
+                "user_id": str(current_user.id),
                 "subtotal": total_amount,
                 "total_amount": total_amount,
                 "shipping_address": order_request.shipping_address or "",
@@ -861,7 +862,7 @@ async def place_boq_order(
 @router.get("/{boq_id}/order-status")
 async def get_boq_order_status(
     boq_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb),
     pg_db: AsyncSession = Depends(get_db),
 ):
@@ -892,7 +893,7 @@ async def get_boq_order_status(
                 LIMIT 10
             """),
             {
-                "user_id": current_user["id"],
+                "user_id": str(current_user.id),
                 "boq_ref": f"%{boq_id}%",
             }
         )
@@ -923,7 +924,7 @@ async def get_boq_order_status(
 @router.delete("/{boq_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_boq(
     boq_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     boq_repo = BOQRepository(db)

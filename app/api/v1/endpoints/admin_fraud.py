@@ -59,6 +59,8 @@ async def admin_list_fraud_alerts(
         query = query.where(FraudAlert.is_negotiation == is_negotiation)
     if status:
         query = query.where(FraudAlert.status == status)
+    else:
+        query = query.where(FraudAlert.status != "cleared")
     rows = (await db.execute(query.order_by(FraudAlert.detected_at.desc()).limit(limit))).scalars().all()
 
     alerts = [_alert_dict(a) for a in rows]
@@ -110,6 +112,6 @@ async def admin_fraud_alert_review(
     else:
         raise HTTPException(400, "action must be 'clear' or 'block'")
     a.resolved_at = datetime.utcnow()
-    a.resolved_by = str(current_user.get("id", "admin"))
+    a.resolved_by = str(current_user.id)
     await db.commit()
     return {"alert_id": str(a.id), "status": a.status}

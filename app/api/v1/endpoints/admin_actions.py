@@ -13,7 +13,7 @@ from app.api.deps import require_roles
 from app.models.vendor import Vendor, VendorVerificationStatus
 from app.models.vendor_document import VendorDocument
 from app.models.vendor_bank_account import VendorBankAccount
-from app.models.order import Order
+from app.models.order import Order, OrderItem
 from app.models.notification import Notification
 from app.models.user import User, UserProfile
 from app.services.risk_service import risk_from_vendor
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 admin_guard = require_roles("manager", "support", "marketing")
 
-_TIER_RANK = {"cac_only": 0, "documented": 1, "trusted": 2}
+_TIER_RANK = {"starter": 0, "verified_vendor": 1, "enterprise": 2}
 
 
 def _status(v):
@@ -32,14 +32,17 @@ def _status(v):
 def _kind(v, doc_map, held_count=0):
     has = bool(doc_map)
     status = _status(v)
+    tier = v.verification_tier if v.verification_tier in _TIER_RANK else (
+        "starter" if v.verification_tier in ("cac_only", "tier_0", "tier_1") else
+        "verified_vendor" if v.verification_tier in ("documented", "tier_2") else "enterprise"
+    )
     if held_count > 0:
         return "cap_hold"
-    if status == "pending" and v.verification_tier == "cac_only" and "cac_certificate" in doc_map:
-        return "tier1_manual"
-    if status == "pending" and v.verification_tier == "trusted" and has:
-        return "tier3_upgrade"
-    if status == "pending" and v.verification_tier == "documented" and has:
+    # NIN/CAC submissions are auto-approved; they surface here for manual audit only.
+    if tier == "starter" and "nin" in doc_map:
         return "tier2_upgrade"
+    if tier in ("verified_vendor", "starter") and "cac" in doc_map:
+        return "tier3_upgrade"
     if status == "pending":
         return "vendor_basic"
     return None
@@ -53,14 +56,14 @@ async def admin_action_queue(
     current_user: dict = Depends(admin_guard),
     db: AsyncSession = Depends(get_db),
 ):
-    _KIND_ORDER = {"cap_hold": 0, "tier1_manual": 1, "tier2_upgrade": 2, "tier3_upgrade": 3, "vendor_basic": 4}
+    _KIND_ORDER = {"cap_hold": 0, "tier2_upgrade": 1, "tier3_upgrade": 2, "vendor_basic": 3}
 
     vendors = (await db.execute(select(Vendor))).scalars().all()
     actions = []
     for v in vendors:
         docs = (await db.execute(select(VendorDocument).where(VendorDocument.vendor_id == v.id))).scalars().all()
         doc_map_pending = {d.document_type: d.document_url for d in docs if d.review_status == "pending"}
-        held_count = (await db.execute(select(func.count(Order.id)).where(Order.vendor_id == v.id, Order.status == "on_hold"))).scalar() or 0
+        held_count = (await db.execute(select(func.count(Order.id)).join(OrderItem, OrderItem.order_id == Order.id).where(OrderItem.vendor_id == v.id, Order.status == "on_hold"))).scalar() or 0
         k = _kind(v, doc_map_pending, held_count=held_count)
         if not k or (kind and k != kind):
             continue
@@ -197,7 +200,7 @@ async def admin_review_vendor_action(
         if target not in _TIER_RANK:
             docs = (await db.execute(select(VendorDocument).where(
                 VendorDocument.vendor_id == v.id, VendorDocument.review_status == "pending"))).scalars().all()
-            target = max([d.tier for d in docs], key=lambda t: _TIER_RANK.get(t, 0), default="cac_only")
+            target = max([d.tier for d in docs], key=lambda t: _TIER_RANK.get(t, 0), default="starter")
         v.verification_tier = target
         v.verification_status = VendorVerificationStatus.VERIFIED
         v.verification_date = now
@@ -216,7 +219,7 @@ async def admin_review_vendor_action(
         for d in pending:
             d.review_status = "rejected"; d.reviewed_at = now
     else:  # resolve_cap
-        held = (await db.execute(select(Order).where(Order.vendor_id == v.id, Order.status == "on_hold"))).scalars().all()
+        held = (await db.execute(select(Order).join(OrderItem, OrderItem.order_id == Order.id).where(OrderItem.vendor_id == v.id, Order.status == "on_hold").distinct())).scalars().all()
         for o in held:
             o.status = "confirmed"
         return {"message": "Held orders released", "released": len(held)}

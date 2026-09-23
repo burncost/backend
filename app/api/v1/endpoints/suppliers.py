@@ -14,6 +14,7 @@ from app.api.deps import get_current_admin, get_current_vendor
 from pydantic import BaseModel
 
 import logging
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +164,7 @@ async def update_supplier(
 @router.delete("/{supplier_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_supplier(
     supplier_id: UUID,
-    current_admin: dict = Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(Vendor).where(Vendor.id == supplier_id))
@@ -178,5 +179,5 @@ async def delete_supplier(
     await db.delete(supplier)
     await db.commit()
 
-    logger.info(f"Supplier {supplier_id} deleted by admin {current_admin['id']}")
+    logger.info(f"Supplier {supplier_id} deleted by admin {str(current_admin.id)}")
     return None

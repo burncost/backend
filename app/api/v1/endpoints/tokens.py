@@ -9,13 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.services.token_service import TokenService, TOKEN_COSTS, TOKEN_PACKS
+from app.models.user import User
 
 router = APIRouter()
 
 
 @router.get("/balance")
 async def get_token_balance(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get current user's token balance and info."""
@@ -37,7 +38,7 @@ async def get_token_pricing():
 @router.post("/purchase")
 async def initiate_token_purchase(
     pack_tokens: int,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Initiate a token pack purchase."""
@@ -55,7 +56,7 @@ async def initiate_token_purchase(
 async def confirm_token_purchase(
     reference: str,
     tokens: int,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Confirm a token purchase after payment verification."""

@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     MONNIFY_PUBLIC_KEY: Optional[str] = None
     MONNIFY_CONTRACT_CODE: Optional[str] = None
     MONNIFY_BASE_URL: Optional[str] = None
+
+    # Identity verification (Mono) — NIN is bypassed until the flag is on;
+    # CAC verification is enforced whenever a Mono key is configured.
+    MONO_SECRET_KEY: Optional[str] = None
+    IDENTITY_VERIFY_ENABLED: bool = False
     
     # Email Configuration
     SMTP_HOST: Optional[str] = None

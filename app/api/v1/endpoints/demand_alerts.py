@@ -7,7 +7,7 @@ from datetime import datetime
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.models.demand_alert import DemandAlert
+from app.models.demand_alert import DemandAlert, demand_alert_cutoff
 
 router = APIRouter()
 
@@ -43,10 +43,18 @@ async def list_demand_alerts(
     city: str = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """List demand alerts (optionally filtered by city)."""
-    query = select(DemandAlert).order_by(DemandAlert.created_at.desc())
+    """List demand alerts (optionally filtered by city).
+
+    Alerts expire 48h after being raised, so older ones are never returned.
+    """
+    query = (
+        select(DemandAlert)
+        .where(DemandAlert.created_at >= demand_alert_cutoff())
+        .order_by(DemandAlert.created_at.desc())
+    )
     if city:
-        query = query.where(DemandAlert.city == city)
+        # Case/whitespace-insensitive so "Abuja" matches a vendor's stored "abuja ".
+        query = query.where(func.lower(func.trim(DemandAlert.city)) == func.lower(city.strip()))
     rows = (await db.execute(query)).scalars().all()
     return {"alerts": [
         {

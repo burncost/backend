@@ -16,7 +16,7 @@ class VendorDocument(Base):
     document_url = Column(Text, nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     verified = Column(Boolean, default=False)
-    # Tier this document supports: cac_only / documented / trusted
+    # Tier this document supports: starter / verified_vendor / enterprise
     tier = Column(String(20), default="cac_only")
     # Review state for the optional upgrade flow: pending / approved / rejected
     review_status = Column(String(20), default="pending")

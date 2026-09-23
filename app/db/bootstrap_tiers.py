@@ -7,26 +7,36 @@ logger = logging.getLogger(__name__)
 
 TIERS = [
     {
-        "tier_code": "cac_only", "display_name": "CAC Verified", "sort_order": 1,
+        "tier_code": "starter", "display_name": "Starter", "sort_order": 1,
         "transaction_cap": 3_000_000,  # "commission_rate": 10.00,  # Phase 13: commission removed
         "required_document_types": [], "requires_manual_review": False,
-        "perks": ["Start selling immediately", "No documents required", "₦3,000,000 transaction limit"],
+        "perks": ["Start selling immediately after signup", "₦3,000,000 transaction limit"],
     },
     {
-        "tier_code": "documented", "display_name": "Documented Business", "sort_order": 2,
+        "tier_code": "verified_vendor", "display_name": "Verified Vendor", "sort_order": 2,
         "transaction_cap": 10_000_000,  # "commission_rate": 7.50,  # Phase 13: commission removed
-        "required_document_types": ["cac_certificate", "tax_clearance", "business_license", "utility_bill"],
-        "requires_manual_review": False,
-        "perks": ["₦10,000,000 transaction limit", "24–48h escrow release", "Verified badge"],
+        "required_document_types": ["nin"], "requires_manual_review": False,
+        "perks": ["₦10,000,000 transaction limit", "24–48h escrow release", "NIN verification only"],
     },
     {
-        "tier_code": "trusted", "display_name": "Trusted Supplier", "sort_order": 3,
-        "transaction_cap": 100_000_000,  # "commission_rate": 5.00,  # Phase 13: commission removed
-        "required_document_types": ["vat_certificate", "director_id", "trade_reference_1", "trade_reference_2", "address_proof"],
-        "requires_manual_review": True,
-        "perks": ["₦100,000,000 transaction limit", "T+1 payouts", "Trusted badge", "Priority support"],
+        "tier_code": "enterprise", "display_name": "Enterprise", "sort_order": 3,
+        # Effectively uncapped — UI shows "no cap" for enterprise.
+        "transaction_cap": 999_999_999_999,  # "commission_rate": 5.00,  # Phase 13: commission removed
+        "required_document_types": ["cac"], "requires_manual_review": False,
+        "perks": ["No transaction cap", "T+1 payouts", "BurnCost Verified badge", "Priority support"],
     },
 ]
+
+# Legacy tier codes -> new codes (bypass, not delete).
+_TIER_BACKFILL = """
+    UPDATE vendors SET verification_tier = CASE
+        WHEN verification_tier IN ('tier_0', 'tier_1', 'cac_only') THEN 'starter'
+        WHEN verification_tier IN ('tier_2', 'documented') THEN 'verified_vendor'
+        WHEN verification_tier IN ('tier_3', 'trusted') THEN 'enterprise'
+        ELSE 'starter'
+    END
+    WHERE verification_tier NOT IN ('starter', 'verified_vendor', 'enterprise');
+"""
 
 
 async def bootstrap_tiers(conn) -> None:
@@ -46,12 +56,32 @@ async def bootstrap_tiers(conn) -> None:
             created_at TIMESTAMP DEFAULT NOW()
         )
     """))
-    await conn.execute(text("ALTER TABLE vendors ADD COLUMN IF NOT EXISTS verification_tier VARCHAR(20) NOT NULL DEFAULT 'cac_only'"))
+    await conn.execute(text("ALTER TABLE vendors ADD COLUMN IF NOT EXISTS verification_tier VARCHAR(20) NOT NULL DEFAULT 'starter'"))
     await conn.execute(text("ALTER TABLE vendors ADD COLUMN IF NOT EXISTS transaction_volume NUMERIC(15,2) DEFAULT 0.00"))
-    await conn.execute(text("ALTER TABLE vendor_documents ADD COLUMN IF NOT EXISTS tier VARCHAR(20) DEFAULT 'cac_only'"))
+    await conn.execute(text("ALTER TABLE vendor_documents ADD COLUMN IF NOT EXISTS tier VARCHAR(20) DEFAULT 'starter'"))
     await conn.execute(text("ALTER TABLE vendor_documents ADD COLUMN IF NOT EXISTS review_status VARCHAR(20) DEFAULT 'pending'"))
     await conn.execute(text("ALTER TABLE vendor_documents ADD COLUMN IF NOT EXISTS reviewed_by UUID REFERENCES users(id)"))
     await conn.execute(text("ALTER TABLE vendor_documents ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP"))
+
+    # Backfill legacy tier codes onto the new 3-tier scheme (bypass, not delete).
+    await conn.execute(text(_TIER_BACKFILL))
+
+    # Identity verification cache + cross-device upgrade drafts.
+    await conn.execute(text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS nin_verification_data JSONB"))
+    await conn.execute(text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS notification_preferences JSONB"))
+    await conn.execute(text("ALTER TABLE vendors ADD COLUMN IF NOT EXISTS cac_verification_data JSONB"))
+    await conn.execute(text("ALTER TABLE vendor_drafts ADD COLUMN IF NOT EXISTS upgrade_data JSONB"))
+
+    # Enforce NIN/CAC uniqueness at the DB level (partial: non-empty values only).
+    await conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_vendors_nin
+        ON vendors (nin) WHERE nin IS NOT NULL AND TRIM(nin) <> ''
+    """))
+    await conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_vendors_cac_number
+        ON vendors (cac_business_registration_number)
+        WHERE cac_business_registration_number IS NOT NULL AND TRIM(cac_business_registration_number) <> ''
+    """))
 
     for t in TIERS:
         row = {**t,

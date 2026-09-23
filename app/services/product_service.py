@@ -81,13 +81,19 @@ class ProductService:
             query = query.where(Product.brand_id == filters.brand_id)
         if filters.search:
             search_term = f"%{filters.search}%"
+            # Searching a supplier name as a subquery (instead of joining Vendor)
+            # keeps this valid whether or not the verified-vendor join is present.
+            vendor_match = select(Vendor.id).where(Vendor.business_name.ilike(search_term))
             query = query.where(
                 or_(
                     Product.name.ilike(search_term),
                     Product.description.ilike(search_term),
                     Product.sku.ilike(search_term),
+                    Product.vendor_id.in_(vendor_match),
                 )
             )
+        if filters.in_stock:
+            query = query.where(Product.quantity > 0)
         if filters.min_price is not None:
             query = query.where(Product.base_price >= filters.min_price)
         if filters.max_price is not None:

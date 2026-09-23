@@ -7,12 +7,14 @@ class VendorDraftSave(BaseModel):
     current_step: Optional[str] = None
     business_info: Optional[dict] = None
     banking_info: Optional[dict] = None
+    upgrade_data: Optional[dict] = None
 
 
 class VendorDraftResponse(BaseModel):
     current_step: str
     business_info: dict
     banking_info: dict
+    upgrade_data: Optional[dict] = None
     updated_at: datetime
 
     class Config:

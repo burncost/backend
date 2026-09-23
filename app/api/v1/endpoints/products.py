@@ -48,7 +48,8 @@ async def list_products(
     is_featured: Optional[bool] = None,
     division: Optional[str] = Query(None),
     material_type: Optional[str] = Query(None),
-    sort_by: str = Query("created_at", regex="^(created_at|price|rating|sales_count)$"),
+    in_stock: Optional[bool] = Query(None, description="Only products with stock left"),
+    sort_by: str = Query("created_at", regex="^(created_at|price|rating|sales_count|name)$"),
     sort_order: str = Query("desc", regex="^(asc|desc)$"),
     db: AsyncSession = Depends(get_db)
 ):
@@ -63,6 +64,7 @@ async def list_products(
         is_featured=is_featured,
         division=division,
         material_type=material_type,
+        in_stock=in_stock,
         sort_by=sort_by,
         sort_order=sort_order
     )

@@ -12,6 +12,7 @@ from app.api.deps import get_current_user
 from app.schemas.cart import CartItemCreate, CartItemUpdate, CartResponse, CartItemResponse
 
 import logging
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ router = APIRouter()
 ### Get current user's cart
 @router.get("/", response_model=CartResponse)
 async def get_cart(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     user_id = current_user.id
@@ -84,7 +85,7 @@ async def get_cart(
 @router.post("/add", status_code=status.HTTP_201_CREATED)
 async def add_to_cart(
     cart_in: CartItemCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     user_id = current_user.id
@@ -145,7 +146,7 @@ async def add_to_cart(
 async def update_cart_item(
     item_id: UUID,
     cart_in: CartItemUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     user_id = current_user.id
@@ -176,7 +177,7 @@ async def update_cart_item(
 @router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_cart_item(
     item_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     user_id = current_user.id

@@ -124,7 +124,7 @@ async def admin_order_detail(order_id: UUID, current_user: dict = Depends(admin_
     """Full order detail (buyer, supplier, items) for Escrow view."""
     order = (await db.execute(select(Order)
               .options(selectinload(Order.user).selectinload(User.profile),
-                       selectinload(Order.items).selectinload(OrderItem.vendor),
+                       selectinload(Order.items).selectinload(OrderItem.vendor).selectinload(Vendor.user).selectinload(User.profile),
                        selectinload(Order.shipping_address))
               .where(Order.id == order_id))).scalar_one_or_none()
     if not order:

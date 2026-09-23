@@ -9,6 +9,7 @@ from app.models.brand import Brand
 from app.api.deps import get_current_admin
 
 import logging
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ async def create_brand(
     slug: str,
     description: Optional[str] = None,
     logo_url: Optional[str] = None,
-    current_admin: dict = Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
     # Check for duplicate slug
@@ -118,7 +119,7 @@ async def update_brand(
     description: Optional[str] = None,
     logo_url: Optional[str] = None,
     is_active: Optional[bool] = None,
-    current_admin: dict = Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(Brand).where(Brand.id == brand_id))
@@ -153,7 +154,7 @@ async def update_brand(
     await db.commit()
     await db.refresh(brand)
 
-    logger.info(f"Brand {brand_id} updated by admin {current_admin['id']}")
+    logger.info(f"Brand {brand_id} updated by admin {str(current_admin.id)}")
 
     return {
         "id": str(brand.id),
@@ -169,7 +170,7 @@ async def update_brand(
 @router.delete("/{brand_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_brand(
     brand_id: UUID,
-    current_admin: dict = Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(Brand).where(Brand.id == brand_id))
@@ -184,5 +185,5 @@ async def delete_brand(
     await db.delete(brand)
     await db.commit()
 
-    logger.info(f"Brand {brand_id} deleted by admin {current_admin['id']}")
+    logger.info(f"Brand {brand_id} deleted by admin {str(current_admin.id)}")
     return None

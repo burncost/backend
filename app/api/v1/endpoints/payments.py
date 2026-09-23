@@ -4,7 +4,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 from app.core.database import get_db
@@ -34,6 +34,7 @@ payment_service = PaymentService()
 # Phase 5 settlement capture hook (flag-gated; no-op unless SETTLEMENT_ENABLED).
 from app.services.settlement_service import is_enabled as _settlement_enabled
 from app.services.settlement_ops import record_capture as _settlement_record_capture
+from app.models.user import User
 
 _SETTLEMENT_GATEWAYS = {"flutterwave", "paystack", "monnify"}
 
@@ -56,7 +57,7 @@ async def _maybe_record_capture(db, *, order_id, gateway, amount, provider_refer
 async def list_payments(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     user_id = current_user.id
@@ -96,6 +97,22 @@ async def list_payments(
     }
 
 
+# Payout window: a vendor's money becomes due at most this long after delivery is
+# confirmed (`Order.delivered_at` is set by BOTH the buyer confirm-delivery flow and
+# the driver mark-delivered flow).
+#
+# DISPLAY / DERIVED ONLY — this does not schedule, delay or release any transfer.
+# Escrow release still runs in the existing capture/release flow.
+PAYOUT_WINDOW_HOURS = 48
+
+
+def payout_due_at(order: Order) -> Optional[datetime]:
+    """When this order's payout becomes due, or None until delivery is confirmed."""
+    if not order.delivered_at:
+        return None
+    return order.delivered_at + timedelta(hours=PAYOUT_WINDOW_HOURS)
+
+
 ### List payments for vendor's orders
 @router.get("/vendor")
 async def list_vendor_payments(
@@ -106,68 +123,104 @@ async def list_vendor_payments(
 ):
     vendor_id = UUID(current_vendor["id"])
 
-    # Get orders that contain this vendor's products
-    order_id_subq = (
+    # Orders that contain this vendor's products.
+    order_ids_subq = (
         select(OrderItem.order_id)
         .where(OrderItem.vendor_id == vendor_id)
         .distinct()
         .subquery()
     )
-
-    count_query = select(func.count(Order.id)).where(
-        Order.id.in_(select(order_id_subq.c.order_id)),
-        Order.payment_status.isnot(None)
+    base_filter = (
+        Order.id.in_(select(order_ids_subq.c.order_id)),
+        Order.payment_status.isnot(None),
     )
-    count_result = await db.execute(count_query)
-    total = count_result.scalar() or 0
 
-    query = (
+    total = (await db.execute(select(func.count(Order.id)).where(*base_filter))).scalar() or 0
+
+    orders = (await db.execute(
         select(Order)
-        .where(
-            Order.id.in_(select(order_id_subq.c.order_id)),
-            Order.payment_status.isnot(None)
-        )
+        .where(*base_filter)
         .order_by(Order.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
-    )
-    result = await db.execute(query)
-    orders = result.scalars().all()
+    )).scalars().all()
 
-    # Compute summary for vendor
-    # ── Phase 13: commission removed from internal calc (kept commented for future) ──
-    # vendor_result = await db.execute(select(Vendor).where(Vendor.id == vendor_id))
-    # vendor = vendor_result.scalar_one_or_none()
-    # commission_rate = float(vendor.commission_rate) / 100.0 if vendor else 0.10
-    # ── /Phase 13 ─────────────────────────────────────────────────────────────────
+    # Per-order vendor share. An order can contain items from several vendors, so a
+    # row's amount must be THIS vendor's slice — not the whole order total (using the
+    # order total made rows contradict the summary and showed other vendors' money).
+    share_by_order: dict = {}
+    if orders:
+        share_rows = (await db.execute(
+            select(OrderItem.order_id, func.sum(OrderItem.total_price))
+            .where(OrderItem.vendor_id == vendor_id, OrderItem.order_id.in_([o.id for o in orders]))
+            .group_by(OrderItem.order_id)
+        )).all()
+        share_by_order = {row[0]: float(row[1] or 0) for row in share_rows}
 
-    # Fetch all order items for this vendor to compute actual vendor share
-    all_order_ids = select(OrderItem.order_id).where(OrderItem.vendor_id == vendor_id).distinct().subquery()
-    items_query = (
-        select(OrderItem, Order.payment_status)
+    # Summary across ALL of this vendor's orders — one aggregate query.
+    summary_rows = (await db.execute(
+        select(Order.payment_status, func.sum(OrderItem.total_price))
+        .select_from(OrderItem)
         .join(Order, Order.id == OrderItem.order_id)
         .where(OrderItem.vendor_id == vendor_id, Order.payment_status.isnot(None))
-    )
-    items_result = await db.execute(items_query)
-    rows = items_result.all()
+        .group_by(Order.payment_status)
+    )).all()
 
-    total_earned = 0.0
-    pending_balance = 0.0
-    next_payout_date = None
+    total_earned = 0.0        # captured
+    pending_balance = 0.0     # not captured yet (undelivered / unpaid)
+    failed_amount = 0.0
+    refunded_amount = 0.0
+    for pay_status, amount in summary_rows:
+        value = float(amount or 0)
+        key = pay_status.value if hasattr(pay_status, "value") else str(pay_status or "")
+        if key == "completed":
+            total_earned += value
+        elif key == "pending":
+            pending_balance += value
+        elif key == "failed":
+            failed_amount += value
+        else:  # refunded / partially_refunded
+            refunded_amount += value
 
-    for item, payment_status in rows:
-        # vendor_share = float(item.total_price) * (1 - commission_rate)  # Phase 13: commission disabled
-        vendor_share = float(item.total_price)  # full amount, no commission
-        if payment_status == PaymentStatus.COMPLETED:
-            total_earned += vendor_share
-        else:
-            pending_balance += vendor_share
+    # Awaiting payout: delivered + captured orders with no recorded payout yet, plus the
+    # earliest due date among them. The settlement ledger is inert today (nothing writes
+    # 'paid' rows), so this honestly reports "no payout recorded yet".
+    from app.models.settlement_ledger import VendorSettlementLedger
+    paid_order_ids = set((await db.execute(
+        select(VendorSettlementLedger.order_id).where(
+            VendorSettlementLedger.vendor_id == vendor_id,
+            VendorSettlementLedger.status == "paid",
+        )
+    )).scalars().all())
 
-    # Determine next payout date (first day of next month from now)
-    from datetime import timedelta
-    today = datetime.utcnow()
-    next_payout = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
-    next_payout_date = next_payout.strftime("%Y-%m-%d")
+    delivered_orders = (await db.execute(
+        select(Order)
+        .where(
+            Order.id.in_(select(order_ids_subq.c.order_id)),
+            Order.delivered_at.isnot(None),
+            Order.payment_status == PaymentStatus.COMPLETED,
+        )
+        .order_by(Order.delivered_at)
+    )).scalars().all()
+
+    delivered_shares: dict = {}
+    if delivered_orders:
+        rows = (await db.execute(
+            select(OrderItem.order_id, func.sum(OrderItem.total_price))
+            .where(OrderItem.vendor_id == vendor_id, OrderItem.order_id.in_([o.id for o in delivered_orders]))
+            .group_by(OrderItem.order_id)
+        )).all()
+        delivered_shares = {row[0]: float(row[1] or 0) for row in rows}
+
+    awaiting_payout = 0.0
+    due_dates = []
+    for order in delivered_orders:
+        if order.id in paid_order_ids:
+            continue
+        awaiting_payout += delivered_shares.get(order.id, 0.0)
+        due = payout_due_at(order)
+        if due:
+            due_dates.append(due)
 
     return {
         "payments": [
@@ -175,18 +228,28 @@ async def list_vendor_payments(
                 "id": str(o.id),
                 "reference": o.order_number,
                 "description": f"Order {o.order_number}",
-                "amount": float(o.total_amount),
+                # This vendor's share of the order (not the whole order total).
+                "amount": round(share_by_order.get(o.id, 0.0), 2),
+                "order_total": float(o.total_amount or 0),
                 "payment_status": o.payment_status.value if o.payment_status else "pending",
                 "payment_method": o.payment_method.value if o.payment_method else None,
                 "created_at": o.created_at.isoformat() if o.created_at else None,
-                "next_payout_date": (o.created_at.replace(day=1) if o.created_at else None),
+                "delivered_at": o.delivered_at.isoformat() if o.delivered_at else None,
+                "payout_due_at": due.isoformat() if (due := payout_due_at(o)) else None,
             }
             for o in orders
         ],
         "summary": {
             "total_earned": round(total_earned, 2),
+            # Delivered + captured, with no payout recorded yet.
+            "awaiting_payout": round(awaiting_payout, 2),
+            # Not yet delivered/captured (this is NOT escrow).
             "pending_balance": round(pending_balance, 2),
-            "next_payout_date": next_payout_date,
+            "failed_amount": round(failed_amount, 2),
+            "refunded_amount": round(refunded_amount, 2),
+            # Earliest payout due date (delivered_at + 48h); None when nothing is due.
+            "next_payout_date": min(due_dates).strftime("%Y-%m-%d") if due_dates else None,
+            "payout_window_hours": PAYOUT_WINDOW_HOURS,
         },
         "total": total,
         "page": page,
@@ -202,7 +265,7 @@ async def process_payment(
     payment_data: dict,
     request: Request,
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -412,7 +475,7 @@ async def process_payment(
 @router.get("/status/{order_id}")
 async def get_payment_status(
     order_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(Order).where(Order.id == order_id))
@@ -444,7 +507,7 @@ async def get_payment_status(
 @router.get("/verify/{reference}")
 async def verify_payment(
     reference: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -730,7 +793,7 @@ async def paystack_webhook(
 async def initiate_refund(
     order_id: UUID,
     reason: Optional[str] = Query(None),
-    current_admin: dict = Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(Order).where(Order.id == order_id))

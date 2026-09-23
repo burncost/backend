@@ -62,7 +62,7 @@ def _generate_order_number() -> str:
 @router.post("/create", status_code=status.HTTP_201_CREATED)
 async def create_order(
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     promo_code: Optional[str] = Query(None, max_length=50),
     details: Optional[OrderCreateRequest] = Body(None),
@@ -256,7 +256,7 @@ async def create_order(
                 title="Account not active",
                 message="Your account is not active for selling. Please contact support.", read=False))
             continue
-        tier = vr.verification_tier or "tier_0"
+        tier = vr.verification_tier or "starter"
         cap = v_tier_cap(tier)
         order_share = sum(i["total_price"] for i in order_items if str(i["vendor_id"]) == str(vid))
         if cap is not None and (float(vr.transaction_volume or 0) + order_share) > cap:
@@ -310,7 +310,7 @@ async def create_order(
 async def complete_order_details(
     order_id: str,
     payload: OrderCompleteRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -361,7 +361,7 @@ async def list_orders(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     order_status: Optional[str] = Query(None, alias="status"),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     user_id = current_user.id
@@ -456,6 +456,12 @@ async def get_orders_ui(
                 "driverName": driver_name,
                 "driverPhone": driver_phone,
                 "items": items_str,
+                # Lets the logistics tab only offer paid orders for dispatch.
+                "payment_status": order.payment_status.value if order.payment_status else "",
+                # This vendor's own slice of the order (an order can span vendors), so the
+                # Orders tab doesn't show other suppliers' money as if it were theirs.
+                "vendor_total": float(sum(item.total_price or 0 for item in vendor_items)),
+                "item_count": len(vendor_items),
             })
 
         return response
@@ -472,7 +478,7 @@ async def get_orders_ui(
 @router.get("/{order_id}", response_model=OrderResponse)
 async def get_order(
     order_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     try:
@@ -495,7 +501,7 @@ async def get_order(
 @router.get("/{order_id}/detail")
 async def get_order_detail(
     order_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     try:
@@ -556,7 +562,7 @@ async def get_order_detail(
 @router.get("/{order_id}/tracking")
 async def get_order_tracking(
     order_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     try:
@@ -609,7 +615,7 @@ async def get_order_tracking(
 async def confirm_delivery(
     order_id: str,
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     try:
@@ -832,16 +838,29 @@ async def vendor_update_order(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    # Authorization: a vendor may only act on orders that contain their own items.
+    # This check was missing entirely, so any vendor could transition — or mark
+    # delivered/cancelled — another vendor's order.
+    vendor_id = current_vendor["id"]
+    if not any(str(item.vendor_id) == str(vendor_id) for item in order.items):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This order is not from your catalog.",
+        )
+
     # Validate status transitions
     valid_transitions = {
-        "pending": ["confirmed", "cancelled"],
+        "pending": ["confirmed", "cancelled"],          # legacy status
         "pending_payment": ["confirmed", "cancelled"],
+        "payment_failed": ["confirmed", "cancelled"],   # allow retry or cancel
         "confirmed": ["processing", "cancelled"],
         "processing": ["shipped", "cancelled"],
+        "ready_for_pickup": ["shipped", "delivered", "cancelled"],
         "shipped": ["in_transit", "delivered", "cancelled"],
         "in_transit": ["delivered", "cancelled"],
         "delivered": [],
         "cancelled": [],
+        "refunded": [],
     }
 
     current_status = order.status.value.lower() if order.status else "pending"
@@ -912,7 +931,7 @@ async def _create_shipment_record(
 async def cancel_order(
     order_id: str,
     reason: Optional[str] = None,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     try:

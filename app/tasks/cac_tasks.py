@@ -1,153 +1,188 @@
-from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
-import random
-import re
+"""CAC RC-number lookup via the CAC public-search JSON API + TIN service.
+
+This module talks to CAC's JSON endpoints directly (no headless browser) and
+returns the exact same dict shape it has always returned, so
+`app/api/v1/endpoints/vendors.py` keeps working unchanged:
+
+    business_name, rc_number, date_of_registration,
+    nature_of_business, status, tax_id
+
+`_is_cac_result_complete()` in vendors.py requires business_name + tax_id +
+status, and auto-verification compares tax_id against the submitted TIN, so
+both the search and the TIN call are attempted on every lookup.
+
+Failures are non-fatal: the function always returns a dict (never raises, it is
+invoked through `asyncio.to_thread`) and records anything it could not fetch in
+`warnings` for logging/debugging.
+"""
+
 import logging
+import random
+import time
+from datetime import datetime, timezone
+
+import requests
 
 logger = logging.getLogger(__name__)
 
+CAC_SEARCH_URL = (
+    "https://authapp.cac.gov.ng/name_similarity_app/api/public_search/search"
+)
+CAC_TIN_URL = (
+    "https://icrp.cac.gov.ng/tin_service/api/v1/public/tin/generate-tax-id/{company_id}"
+)
 
-def get_cac_business_info(rc_number: str) -> dict:
-    URL = "https://icrp.cac.gov.ng/public-search"
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+]
 
+
+def _clean(value) -> str:
+    """Normalise CAC values (None-safe, strips padding/spaces)."""
+    return "" if value is None else str(value).strip()
+
+
+def get_cac_business_info(rc_number: str, max_retries: int = 3) -> dict:
+    """Look up a CAC registration by RC number and return the legacy dict shape."""
     result = {
+        # Legacy contract — read by vendors.py
         "business_name": "",
-        "rc_number": "",
+        "rc_number": _clean(rc_number),
         "date_of_registration": "",
         "nature_of_business": "",
         "status": "",
         "tax_id": "",
+        # Additive extras (callers use .get() on known keys, so these are safe)
+        "classificationName": "",
+        "active_days": None,
+        "warnings": [],
     }
 
-    browser = None
-    context = None
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": random.choice(_USER_AGENTS),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://icrp.cac.gov.ng/public-search/",
+            "Origin": "https://icrp.cac.gov.ng",
+            "Content-Type": "application/json",
+        }
+    )
+
+    def make_request(method, url, **kwargs):
+        """Request with retries + jittered backoff. Returns None on final failure."""
+        for attempt in range(max_retries):
+            try:
+                response = session.request(method.upper(), url, **kwargs)
+                response.raise_for_status()
+                return response
+            except requests.exceptions.RequestException:
+                if attempt < max_retries - 1:
+                    time.sleep(random.uniform(2.0, 4.5))
+                else:
+                    logger.warning(
+                        "CAC request failed (%s) after %s attempts",
+                        url,
+                        max_retries,
+                    )
+                    return None
+        return None
+
+    # ── Step 1: search for the company ────────────────────────────────────────
+    company_info = {}
+    try:
+        search_response = make_request(
+            "POST",
+            CAC_SEARCH_URL,
+            json={"searchTerm": str(rc_number)},
+            timeout=15,
+        )
+        if search_response is None:
+            result["warnings"].append("search_request_failed")
+            return result
+
+        search_data = search_response.json()
+        rows = search_data.get("data") or []
+        if not search_data.get("success") or not rows:
+            result["warnings"].append("company_not_found")
+            return result
+
+        # This endpoint is a fuzzy *search* (a partial term returns unrelated
+        # companies), so prefer the row whose RC matches exactly.
+        wanted = str(rc_number).strip()
+        company_info = next(
+            (c for c in rows if _clean(c.get("rcNumber")) == wanted),
+            rows[0],
+        )
+
+        result["business_name"] = _clean(company_info.get("approvedName"))
+        result["rc_number"] = _clean(company_info.get("rcNumber")) or wanted
+        result["nature_of_business"] = _clean(company_info.get("natureOfBusiness"))
+        result["status"] = _clean(company_info.get("status"))
+        result["classificationName"] = _clean(company_info.get("classificationName"))
+
+        reg_date_str = company_info.get("companyRegistrationDate")
+        if reg_date_str:
+            result["date_of_registration"] = str(reg_date_str)
+            try:
+                # CAC returns e.g. "2024-02-08T08:50:59.204Z"; normalise the "Z"
+                # so datetime.fromisoformat parses it.
+                reg_date = datetime.fromisoformat(
+                    str(reg_date_str).replace("Z", "+00:00")
+                )
+                result["active_days"] = max(
+                    0, (datetime.now(timezone.utc) - reg_date).days
+                )
+            except Exception:
+                logger.warning(
+                    "Could not parse CAC registration date for RC=%s",
+                    rc_number,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.error("CAC lookup failed for RC=%s", rc_number, exc_info=True)
+        result["warnings"].append("search_parse_failed")
+        return result
+
+    # ── Step 2: fetch the TIN (required for auto-verification) ────────────────
+    company_id = company_info.get("companyId")
+    if not company_id:
+        result["warnings"].append("company_id_missing")
+        return result
+
+    tin_response = make_request(
+        "GET",
+        CAC_TIN_URL.format(company_id=company_id),
+        params={
+            "rc": rc_number,
+            "type": company_info.get("classificationId") or 2,
+        },
+        timeout=15,
+    )
+    if tin_response is None:
+        result["warnings"].append("tin_request_failed")
+        return result
 
     try:
-        ua = UserAgent()
-        random_user_agent = ua.random
-
-        viewport = random.choice(
-            [
-                {"width": 1366, "height": 768},
-                {"width": 1440, "height": 900},
-                {"width": 1536, "height": 864},
-                {"width": 1920, "height": 1080},
-            ]
-        )
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                ],
-            )
-
-            context = browser.new_context(
-                user_agent=random_user_agent,
-                viewport=viewport,
-                locale="en-US",
-                timezone_id="Africa/Lagos",
-                extra_http_headers={
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "DNT": "1",
-                },
-            )
-
-            page = context.new_page()
-
-            page.goto(URL, wait_until="domcontentloaded", timeout=30000)
-
-            page.fill(
-                'input[placeholder="Entity name, RC number, or AV code..."]',
-                rc_number,
-            )
-
-            page.click("button.search-btn")
-            page.wait_for_selector("h3.fs-18.text-primary", timeout=15000)
-
-            # Click "Get Tax ID" button if visible
-            try:
-                tax_btn = page.locator(
-                    "button.btn.btn-primary", has_text="Get Tax ID"
-                )
-
-                if tax_btn.is_visible():
-                    try:
-                        tax_btn.click(timeout=3000)
-                    except Exception:
-                        tax_btn.click(force=True)
-
-                    # Wait for the tax ID element to appear
-                    try:
-                        page.wait_for_selector(
-                            'ul.list-unstyled li:has-text("Tax ID")',
-                            timeout=5000,
-                        )
-                    except Exception:
-                        page.wait_for_timeout(2000)
-
-            except Exception:
-                pass
-
-            soup = BeautifulSoup(page.content(), "html.parser")
-
-            name_el = soup.select_one("h3.fs-18.text-primary")
-            if name_el:
-                result["business_name"] = name_el.get_text(strip=True)
-
-            rc_el = soup.select_one("p.text-secondary.pt-1.pb-2")
-            if rc_el:
-                rc_text = rc_el.get_text(strip=True)
-                parts = rc_text.split("-")
-                if len(parts) > 1:
-                    extracted_rc = parts[1].strip()
-                    if extracted_rc == str(rc_number):
-                        result["rc_number"] = extracted_rc
-
-            for li in soup.select("ul.list-unstyled li"):
-                text = li.get_text(" ", strip=True)
-
-                if "Date of Registration -" in text:
-                    result["date_of_registration"] = text.split(
-                        "Date of Registration -"
-                    )[-1].strip()
-
-                elif "Nature of Business -" in text:
-                    result["nature_of_business"] = text.split(
-                        "Nature of Business -"
-                    )[-1].strip()
-
-                elif text.startswith("Status"):
-                    # Only match lines that start with "Status" to avoid
-                    # picking up "Registration Status", "Filing Status", etc.
-                    badge = li.select_one("span.badge")
-                    if badge:
-                        result["status"] = badge.get_text(strip=True)
-
-                elif "Tax ID -" in text:
-                    match = re.search(r"Tax ID -\s*(\d+)", text)
-                    if match:
-                        result["tax_id"] = match.group(1)
-
+        tin_data = tin_response.json()
+        # CAC reports status="OK" with success=false when a TIN already exists,
+        # so key off the payload rather than the success flag.
+        tax_id = _clean((tin_data.get("data") or {}).get("tax_id"))
+        if tin_data.get("status") == "OK" and tax_id:
+            result["tax_id"] = tax_id
+        else:
+            result["warnings"].append("tin_not_available")
     except Exception:
-        logger.error(
-            f"CAC lookup failed for RC={rc_number}",
+        logger.warning(
+            "Could not parse CAC TIN response for RC=%s",
+            rc_number,
             exc_info=True,
         )
-
-    finally:
-        if context:
-            try:
-                context.close()
-            except Exception:
-                pass
-        if browser:
-            try:
-                browser.close()
-            except Exception:
-                pass
+        result["warnings"].append("tin_parse_failed")
 
     return result

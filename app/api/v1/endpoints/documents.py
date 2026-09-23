@@ -51,7 +51,7 @@ DOCUMENT_FIELD_MAP = {
 async def upload_document(
     file: UploadFile = File(...),
     document_type: str = Form(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)):
 
     allowed_types = ["image/jpeg", "image/png", "application/pdf"]
@@ -115,7 +115,7 @@ async def upload_cad_document(
     project_id: str = None,
     document_category: str = "other",
     background_tasks: BackgroundTasks = None,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     # Validate file type
@@ -160,7 +160,7 @@ async def upload_cad_document(
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document(
     document_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     document_repo = DocumentRepository(db)
@@ -180,7 +180,7 @@ async def list_project_documents(
     project_id: str,
     page: int = 1,
     page_size: int = 20,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     document_repo = DocumentRepository(db)
@@ -205,7 +205,7 @@ async def list_project_documents(
 async def process_document(
     document_id: str,
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     document_repo = DocumentRepository(db)
@@ -230,7 +230,7 @@ async def process_document(
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(
     document_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
     document_service = DocumentService(db)

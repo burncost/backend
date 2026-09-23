@@ -93,5 +93,7 @@ class ProductFilter(BaseModel):
     is_featured: Optional[bool] = None
     division: Optional[str] = None
     material_type: Optional[str] = None
+    # Marketplace "In Stock Only" toggle (was client-side over a single page).
+    in_stock: Optional[bool] = None
     sort_by: str = "created_at"
     sort_order: str = "desc"

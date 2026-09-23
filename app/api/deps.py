@@ -1,4 +1,4 @@
-from typing import Generator, Optional
+from typing import Annotated, Generator, Optional
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -9,6 +9,7 @@ from app.core.security import get_current_user_id, get_current_user_id_optional
 from app.crud import user as user_crud
 from app.crud import vendor as vendor_crud
 from app.models.vendor import Vendor
+from app.models.user import User
 from app.models.driver import DriverProfile
 
 ### Get current authenticated user (raises 401 if not authenticated)
@@ -157,3 +158,22 @@ async def get_current_driver_profile(
             detail="Driver profile not found. Please register as a driver or complete onboarding."
         )
     return profile
+
+
+# ── Dependency shapes (read this before adding a `current_user` parameter) ────
+# Two different shapes circulate under the same name, which caused real 500s
+# (`current_user["id"]` on an ORM object -> TypeError: not subscriptable):
+#
+#   get_current_user / get_current_active_user / get_current_admin / require_roles(...)
+#       -> SQLAlchemy `User` ORM instance. Annotate `current_user: User = Depends(...)`
+#          and use attributes:   current_user.id, current_user.role
+#   get_current_vendor / get_current_verified_vendor
+#       -> plain dict {"id", "user_id", "business_name"}. Annotate `: dict = Depends(...)`
+#          and use `current_vendor["id"]` / `.get(...)`. Note it has NO "role" key.
+#
+# Annotated[...] aliases are deliberately NOT used here: every parameter in this codebase
+# carries a default (Query(...)/Depends(...)), and an Annotated dependency has none, so
+# mixing them raises "non-default argument follows default argument".
+#
+# Also note: `app/deps.py` is a DIFFERENT module whose own `get_current_user` returns a
+# dict — always import the dependency you actually mean.

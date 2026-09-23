@@ -15,6 +15,7 @@ from app.core.database import get_db
 from app.core.ratelimit import rate_limit
 from app.api.deps import get_current_user
 from app.services.procurement_intelligence_service import ProcurementIntelligenceService
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ AI_RATE_WINDOW = 60
 
 async def _enforce_ai_rate_limit(request: Request, current_user: dict) -> None:
     """Per-user (and per-IP fallback) rate limit for AI procurement endpoints."""
-    key = current_user["id"] if current_user else (request.client.host if request.client else "unknown")
+    key = str(current_user.id) if current_user else (request.client.host if request.client else "unknown")
     if not await rate_limit(AI_RATE_LIMIT, AI_RATE_WINDOW, "ai", key):
         raise HTTPException(status_code=429, detail="Too many requests. Please slow down and try again shortly.")
 
@@ -68,7 +69,7 @@ async def compare_prices(
     description: str,
     quantity: float = Query(1.0, ge=0.01),
     city: str = Query("Abuja"),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     pg_db: AsyncSession = Depends(get_db),
 ):
     """Compare verified DB offers for a material (incl. total procurement cost)."""
@@ -82,7 +83,7 @@ async def price_range(
     request: Request,
     description: str,
     city: str = Query("Abuja"),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     pg_db: AsyncSession = Depends(get_db),
 ):
     """Verified price range (min/max) from DB offers."""
@@ -97,7 +98,7 @@ async def price_history(
     description: str,
     city: str = Query("Abuja"),
     limit: int = Query(12, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     pg_db: AsyncSession = Depends(get_db),
 ):
     """Price history/trend from material_rate_history."""
@@ -110,7 +111,7 @@ async def price_history(
 async def analyse_quotation(
     request: Request,
     req: QuotationAnalysisRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     pg_db: AsyncSession = Depends(get_db),
 ):
     """DB-verified quotation analysis with inflation flags (never fraud accusations)."""
@@ -123,7 +124,7 @@ async def analyse_quotation(
         # Parse quote text via the BOQ generator (DB-verified parsing).
         from app.services.boq_generator import BOQGenerator
         boq_gen = BOQGenerator(pg_db=pg_db)
-        parsed = await boq_gen.verify_quote_text(req.quote_text, current_user["id"])
+        parsed = await boq_gen.verify_quote_text(req.quote_text, str(current_user.id))
         items = [
             QuotationLine(
                 description=i.get("description", ""),
@@ -140,7 +141,7 @@ async def analyse_quotation(
     return await service.analyse_quotation(
         quoted_items=[i.model_dump() for i in items],
         supplier_name=req.supplier_name,
-        user_id=current_user["id"],
+        user_id=str(current_user.id),
         city=req.city,
     )
 
@@ -148,7 +149,7 @@ async def analyse_quotation(
 @router.post("/procurement-score")
 async def procurement_score(
     req: ProcurementScoreRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     pg_db: AsyncSession = Depends(get_db),
 ):
     """Explainable, DB-based procurement score (0-100)."""
@@ -157,14 +158,14 @@ async def procurement_score(
         items=[i.model_dump() for i in req.items],
         city=req.city,
         boq_id=req.boq_id,
-        created_by=current_user["id"],
+        created_by=str(current_user.id),
     )
 
 
 @router.post("/savings")
 async def savings(
     req: SavingsRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     pg_db: AsyncSession = Depends(get_db),
 ):
     """DB-based savings comparison between two suppliers."""
