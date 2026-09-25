@@ -189,8 +189,12 @@ class ChatAIService:
         Returns an object duck-typed like an OpenAI ChatCompletion response
         so the existing ChatService loop works without changes.
         """
-        # Convert OpenAI-style messages to Gemini contents
+        # Convert OpenAI-style messages to Gemini contents. System messages are
+        # NOT flattened into the contents — they are delivered separately as the
+        # model's native system_instruction, so the model can tell instructions
+        # apart from user input.
         contents = self._messages_to_contents(messages)
+        system_instruction = self._system_instruction(messages)
 
         # Convert OpenAI-style tool definitions to Gemini FunctionDeclarations
         gemini_tools = None
@@ -208,6 +212,7 @@ class ChatAIService:
                     temperature=0.2,
                     max_output_tokens=600,
                     tools=gemini_tools,
+                    system_instruction=system_instruction,
                 ),
             )
 
@@ -238,17 +243,19 @@ class ChatAIService:
     def _messages_to_contents(self, messages: List[dict]) -> List[dict]:
         """Convert OpenAI-format messages to Gemini contents list."""
         contents: List[dict] = []
-        system_parts: List[str] = []
+        pending_calls = set()
 
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "") or ""
 
             if role == "system":
-                system_parts.append(content)
+                # Delivered separately as Gemini's system_instruction.
                 continue
 
             if role == "user":
+                if not content:
+                    continue
                 contents.append({"role": "user", "parts": [{"text": content}]})
             elif role == "assistant":
                 # Check for tool_calls in assistant message
@@ -264,27 +271,45 @@ class ChatAIService:
                                 "args": json.loads(call["function"]["arguments"]),
                             }
                         })
+                    if not parts:
+                        continue
                     contents.append({"role": "model", "parts": parts})
+                    pending_calls = {call["function"]["name"] for call in tc}
                 else:
+                    # Skip blank assistant turns (Gemini rejects empty text parts).
+                    if not content:
+                        continue
                     contents.append({"role": "model", "parts": [{"text": content}]})
+                    pending_calls = set()
             elif role == "tool":
-                # Tool response → Gemini function_response
+                # Tool response → Gemini function_response. A function_response must
+                # follow a function_call with the same name; Gemini silently returns
+                # empty text otherwise. Drop orphans left behind by older history.
+                name = msg.get("tool_name") or msg.get("tool_call_id") or "unknown_tool"
+                if name not in pending_calls:
+                    logger.warning("Dropping orphan tool response from history: %s", name)
+                    continue
                 contents.append({
                     "role": "user",
                     "parts": [{
                         "function_response": {
-                            "name": (msg.get("tool_name") or msg.get("tool_call_id") or "unknown_tool"),
+                            "name": name,
                             "response": _decode_tool_content(content),
                         }
                     }],
                 })
 
-        # Prepend system prompt as first user message if present
-        if system_parts:
-            system_text = "\n\n".join(system_parts)
-            contents.insert(0, {"role": "user", "parts": [{"text": system_text}]})
-
         return contents
+
+    @staticmethod
+    def _system_instruction(messages: List[dict]) -> Optional[str]:
+        """Join OpenAI-style system messages into one Gemini system_instruction."""
+        parts = [
+            m.get("content", "")
+            for m in messages
+            if m.get("role") == "system" and m.get("content")
+        ]
+        return "\n\n".join(parts) if parts else None
 
     def _tools_to_functions(self, tools: List[dict]) -> List[dict]:
         """Convert OpenAI tool definitions to Gemini FunctionDeclaration dicts."""

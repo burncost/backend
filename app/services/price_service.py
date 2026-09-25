@@ -42,12 +42,69 @@ CITY_TO_STATE = {
     "ph": "Rivers",
     "rivers": "Rivers",
     "benin city": "Edo",
+    "benin": "Edo",
     "edo": "Edo",
     "ibadan": "Oyo",
     "oyo": "Oyo",
     "kano": "Kano",
     "kaduna": "Kaduna",
+    "zaria": "Kaduna",
     "enugu": "Enugu",
+    "jos": "Plateau",
+    "plateau": "Plateau",
+    "ilorin": "Kwara",
+    "kwara": "Kwara",
+    "owerri": "Imo",
+    "imo": "Imo",
+    "uyo": "Akwa Ibom",
+    "akwa ibom": "Akwa Ibom",
+    "warri": "Delta",
+    "asaba": "Delta",
+    "delta": "Delta",
+    "abeokuta": "Ogun",
+    "ogun": "Ogun",
+    "akure": "Ondo",
+    "ondo": "Ondo",
+    "calabar": "Cross River",
+    "cross river": "Cross River",
+    "maiduguri": "Borno",
+    "borno": "Borno",
+    "makurdi": "Benue",
+    "benue": "Benue",
+    "onitsha": "Anambra",
+    "awka": "Anambra",
+    "anambra": "Anambra",
+    "aba": "Abia",
+    "umuahia": "Abia",
+    "abia": "Abia",
+    "minna": "Niger",
+    "niger": "Niger",
+    "lafia": "Nasarawa",
+    "nasarawa": "Nasarawa",
+    "osogbo": "Osun",
+    "osun": "Osun",
+    "ado ekiti": "Ekiti",
+    "ekiti": "Ekiti",
+    "yenagoa": "Bayelsa",
+    "bayelsa": "Bayelsa",
+    "sokoto": "Sokoto",
+    "katsina": "Katsina",
+    "bauchi": "Bauchi",
+    "gombe": "Gombe",
+    "yola": "Adamawa",
+    "adamawa": "Adamawa",
+    "damaturu": "Yobe",
+    "yobe": "Yobe",
+    "jalingo": "Taraba",
+    "taraba": "Taraba",
+    "lokoja": "Kogi",
+    "kogi": "Kogi",
+    "birnin kebbi": "Kebbi",
+    "kebbi": "Kebbi",
+    "dutse": "Jigawa",
+    "jigawa": "Jigawa",
+    "gusau": "Zamfara",
+    "zamfara": "Zamfara",
 }
 
 
@@ -125,6 +182,14 @@ DESCRIPTION_KEYWORDS: Dict[str, List[str]] = {
 }
 
 # City pricing multipliers (relative to Abuja baseline)
+# Summary cost chain applied to every newly generated BOQ. This runs at
+# generation time only, so stored BOQs keep the totals they were issued with.
+# Nigerian practice: contingency first, then contractor's overheads & profit,
+# then VAT on the lot.
+CONTINGENCY_PCT = 10.0
+OVERHEADS_PROFIT_PCT = 10.0
+VAT_PCT = 7.5
+
 CITY_FACTORS: Dict[str, float] = {
     "Abuja": 1.0,
     "Lagos": 1.05,
@@ -419,7 +484,10 @@ class PriceService:
             result = await session.execute(select(MaterialRate))
             rates = result.scalars().all()
             for r in rates:
-                code = f"MAT-{str(r.id)[:8].upper()}"
+                # Key on the FULL id: seeded UUIDs share their first 8 characters
+                # (e.g. all 25000000-…), so a truncated key collapsed the whole
+                # rate table into a single entry and hid 47 of 48 rates.
+                code = f"MAT-{str(r.id).upper()}"
                 p = DBProduct(
                     product_code=code,
                     name=r.material_name,
@@ -471,19 +539,32 @@ class PriceService:
         """
         Load prices from available DB only.
         No mock data fallback.
+
+        Both stores are merged rather than first-wins: MongoDB is consulted
+        first, but a thin Mongo collection (even a single stray document) used to
+        short-circuit and hide the entire PostgreSQL `material_rates` table,
+        leaving every rate lookup unmatched and pushing callers onto AI
+        estimates. Existing Mongo entries win on a duplicate code.
         """
         if self._price_cache is not None:
             return self._price_cache
 
+        merged: Dict[str, DBProduct] = {}
         if self.mongo_db is not None:
-            db_products = await self._load_prices_from_mongo()
-            if db_products:
-                self._price_cache = db_products
-                return self._price_cache
+            merged.update(await self._load_prices_from_mongo())
 
-        db_products = await self._load_prices_from_postgres()
-        if db_products:
-            self._price_cache = db_products
+        postgres_products = await self._load_prices_from_postgres()
+        for code, product in postgres_products.items():
+            merged.setdefault(code, product)
+
+        if merged:
+            self._price_cache = merged
+            logger.info(
+                "Loaded %d prices (%d from MongoDB, %d from PostgreSQL)",
+                len(merged),
+                len(merged) - len(postgres_products),
+                len(postgres_products),
+            )
             return self._price_cache
 
         self._price_cache = {}
@@ -688,8 +769,15 @@ class PriceService:
         # No price or estimate found — mark as out of stock
         item["db_price_matched"] = False
         item["rate_source"] = "unavailable"
+        item["price_status"] = "unavailable"
         item["out_of_stock"] = True
         item["vendor_notified"] = False
+        # Never let an absent price masquerade as ₦0: null a zero/absent rate so
+        # consumers render "price on request" instead of a false figure.
+        if not item.get("adjusted_rate"):
+            item["adjusted_rate"] = None
+        if not item.get("rate"):
+            item["rate"] = None
 
         oos_info = {
             "item_code": item_code,
@@ -751,15 +839,18 @@ class PriceService:
                     element["element_total"] / grand_total * 100, 2
                 )
 
-        contingency = round(grand_total * 0.05, 2)
-        vat = round((grand_total + contingency) * 0.075, 2)
-        total = round(grand_total + contingency + vat, 2)
+        contingency = round(grand_total * CONTINGENCY_PCT / 100.0, 2)
+        overheads_profit = round(grand_total * OVERHEADS_PROFIT_PCT / 100.0, 2)
+        vat = round((grand_total + contingency + overheads_profit) * VAT_PCT / 100.0, 2)
+        total = round(grand_total + contingency + overheads_profit + vat, 2)
 
         return {
             "sub_total": round(grand_total, 2),
-            "contingency_pct": 5,
+            "contingency_pct": CONTINGENCY_PCT,
             "contingency_amount": contingency,
-            "vat_pct": 7.5,
+            "overheads_profit_pct": OVERHEADS_PROFIT_PCT,
+            "overheads_profit_amount": overheads_profit,
+            "vat_pct": VAT_PCT,
             "vat_amount": vat,
             "total_contract_sum": total,
         }

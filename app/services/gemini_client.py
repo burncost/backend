@@ -23,19 +23,17 @@ def get_gemini_client() -> genai.Client:
     project = settings.GOOGLE_PROJECT_ID
     location = settings.GOOGLE_LOCATION
 
+    # Resolve the credentials path relative to the Backend project root (not the
+    # process CWD) so local dev works regardless of where the server is launched.
+    creds_path = settings.GOOGLE_CREDS_PATH or "google_creds.json"
+    if not os.path.isabs(creds_path):
+        creds_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), creds_path
+        )
+
     try:
-        if settings.DEBUG:
-            # Local development
-            creds_path = (
-                settings.GOOGLE_CREDS_PATH
-                or "google_creds.json"
-            )
-
-            if not os.path.exists(creds_path):
-                raise FileNotFoundError(
-                    f"Google credentials not found: {creds_path}"
-                )
-
+        if os.path.exists(creds_path):
+            # Local development: explicit service-account key
             credentials = (
                 service_account.Credentials.from_service_account_file(
                     creds_path
@@ -51,7 +49,10 @@ def get_gemini_client() -> genai.Client:
                 credentials=credentials,
             )
 
-            logger.info("Gemini client initialized using local service account.")
+            logger.info(
+                "Gemini client initialized using local service account (%s).",
+                creds_path,
+            )
 
         else:
             # Cloud Run / GCP - Uses ADC automatically

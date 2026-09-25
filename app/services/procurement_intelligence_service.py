@@ -7,6 +7,7 @@ No Gemini-invented prices. When DB data is insufficient, quality-based flags
 """
 import logging
 import asyncio
+import re
 import time
 from typing import Dict, List, Optional, Any
 from decimal import Decimal
@@ -24,6 +25,56 @@ logger = logging.getLogger(__name__)
 _VERIFIED_OFFERS_CACHE: Dict[tuple, tuple] = {}
 _VERIFIED_OFFERS_TTL = 60
 _VERIFIED_OFFERS_LOCK = asyncio.Lock()
+
+# Generic words that carry no material identity: they must not be the only reason
+# a rate matches (otherwise "sheet" would match a PVC Ceiling Sheet for a
+# stone-coated roofing query, and the price range would be misleading).
+_RATE_STOPWORDS = {
+    "sheet", "sheets", "bag", "bags", "roll", "rolls", "piece", "pieces",
+    "per", "the", "and", "for", "of", "with", "type", "grade", "size",
+}
+
+# Dimension/measurement tokens express size, not material identity. They must
+# never be the only reason a rate matches — otherwise "12mm plywood" answers a
+# "12mm iron rods" query — but they still pin down the size.
+_DIMENSION_TOKEN = re.compile(r"^\d+(\.\d+)?(mm|cm|m|kg|g|l|ml|ft|inch|in)?$|^\d+x\d+$")
+
+
+def _rate_matches(rates, description: str):
+    """Match material_rates rows against a description.
+
+    Strict pass: every token must appear (highest precision). Loose fallback:
+    every dimension token plus at least one material token must appear, so
+    colloquial queries ("12mm iron rods" -> "12mm Reinforcement Rod") resolve
+    without dragging in unrelated materials that merely share a size.
+    """
+    tokens = [t for t in re.split(r"[\s,/\-]+", (description or "").lower()) if len(t) > 3]
+    if not tokens:
+        return []
+    dimensions = [t for t in tokens if _DIMENSION_TOKEN.match(t)]
+    distinctive = [t for t in tokens if t not in dimensions and t not in _RATE_STOPWORDS]
+
+    def _has(name: str, token: str) -> bool:
+        # Whole-word match: a raw substring test matches "cement" inside
+        # "reinfor-cement" (reinforcement rod), so boundaries are required.
+        return re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", name) is not None
+
+    def _hit(name: str, token: str) -> bool:
+        """Token match tolerating a trailing plural ("rods" -> "rod")."""
+        return _has(name, token) or (token.endswith("s") and _has(name, token[:-1]))
+
+    strict = [r for r in rates if all(_hit(r.material_name.lower(), t) for t in tokens)]
+    if strict:
+        return strict
+
+    def _loose_ok(name: str) -> bool:
+        if not all(_hit(name, t) for t in dimensions):
+            return False
+        if distinctive:
+            return any(_hit(name, t) for t in distinctive)
+        return True
+
+    return [r for r in rates if _loose_ok(r.material_name.lower())]
 
 
 class ProcurementIntelligenceService:
@@ -48,23 +99,7 @@ class ProcurementIntelligenceService:
         # Verified DB offers from material_rates.
         verified = await self._verified_offers(description, city)
         if verified:
-            offers = []
-            for offer in verified:
-                shipping = float(offer.get("shipping_fee") or 0)
-                unit = float(offer["rate"])
-                # Respect the supplier's minimum order quantity: bill the MOQ
-                # when the requested quantity is below it.
-                moq = float(offer.get("minimum_order_quantity") or 1)
-                billable_qty = max(quantity, moq)
-                total = round(billable_qty * unit + shipping, 2)
-                offers.append({
-                    **offer,
-                    "quantity": quantity,
-                    "billable_quantity": billable_qty,
-                    "subtotal": round(billable_qty * unit, 2),
-                    "shipping_fee": shipping,
-                    "total_procurement_cost": total,
-                })
+            offers = self._enrich_offers(verified, quantity)
             return {
                 "source": "database",
                 "verified": True,
@@ -76,6 +111,30 @@ class ProcurementIntelligenceService:
                 "explanation": (
                     f"{len(offers)} verified DB offer(s) for '{description}' in {city}. "
                     "Total procurement cost includes shipping."
+                ),
+            }
+
+        # No rate for the requested location: fall back to the same material's
+        # verified rates in other states. They are clearly labelled so the model
+        # can never present another location's price as the user's local price.
+        elsewhere = await self._verified_offers_other_states(description, city)
+        if elsewhere:
+            offers = self._enrich_offers(elsewhere, quantity)
+            states = sorted({str(o.get("city")) for o in offers if o.get("city")})
+            return {
+                "source": "database_other_location",
+                "verified": True,
+                "other_location": True,
+                "requested_city": city,
+                "description": description,
+                "city": city,
+                "quantity": quantity,
+                "offers": offers,
+                "best_price": min(o["total_procurement_cost"] for o in offers),
+                "explanation": (
+                    f"No verified price for '{description}' in {city}. Verified rate(s) "
+                    f"available in {', '.join(states)} — always name that location when "
+                    "quoting the price."
                 ),
             }
 
@@ -149,23 +208,59 @@ class ProcurementIntelligenceService:
             _VERIFIED_OFFERS_CACHE[key] = (time.monotonic(), offers)
             return offers
 
+    @staticmethod
+    def _enrich_offers(offers: List[Dict[str, Any]], quantity: float) -> List[Dict[str, Any]]:
+        """Add subtotal, shipping and total procurement cost to each verified offer.
+
+        Respects the supplier's minimum order quantity: bill the MOQ when the
+        requested quantity is below it.
+        """
+        enriched = []
+        for offer in offers:
+            shipping = float(offer.get("shipping_fee") or 0)
+            unit = float(offer["rate"])
+            moq = float(offer.get("minimum_order_quantity") or 1)
+            billable_qty = max(quantity, moq)
+            enriched.append({
+                **offer,
+                "quantity": quantity,
+                "billable_quantity": billable_qty,
+                "subtotal": round(billable_qty * unit, 2),
+                "shipping_fee": shipping,
+                "total_procurement_cost": round(billable_qty * unit + shipping, 2),
+            })
+        return enriched
+
     async def _fetch_verified_offers(self, description: str, city: str) -> List[Dict[str, Any]]:
-        """Query DB and build verified offers (uncached)."""
+        """Query DB and build verified offers for the city's state (uncached)."""
+        if self.pg_db is None:
+            return []
+        return await self._fetch_offers_for_state(description, normalize_state(city))
+
+    async def _verified_offers_other_states(self, description: str, city: str) -> List[Dict[str, Any]]:
+        """Verified offers for the same material in states other than the requested one.
+
+        Used when the user's location has no rate of its own: a verified rate
+        elsewhere is far more useful than "no verified price", provided it stays
+        clearly labelled with its own location.
+        """
+        if self.pg_db is None:
+            return []
+        requested = (normalize_state(city) or "").lower()
+        offers = await self._fetch_offers_for_state(description, None)
+        return [o for o in offers if (o.get("city") or "").lower() != requested]
+
+    async def _fetch_offers_for_state(self, description: str, state: Optional[str]) -> List[Dict[str, Any]]:
+        """Build verified offers, optionally scoped to a single material_rates.state."""
         from app.models.material_rate import MaterialRate
         from app.models.product import Product
         try:
-            result = await self.pg_db.execute(
-                select(MaterialRate)
-                .where(MaterialRate.state == normalize_state(city))
-                .order_by(MaterialRate.material_name)
-            )
+            stmt = select(MaterialRate).order_by(MaterialRate.material_name)
+            if state:
+                stmt = stmt.where(MaterialRate.state == state)
+            result = await self.pg_db.execute(stmt)
             rates = result.scalars().all()
-            desc_lower = description.lower()
-            matches = [
-                r for r in rates
-                if desc_lower in r.material_name.lower()
-                or any(word in r.material_name.lower() for word in desc_lower.split() if len(word) > 3)
-            ]
+            matches = _rate_matches(rates, description)
             offers = []
             for r in matches:
                 # Enrich with product logistics fields (shipping, MOQ, lead time).
@@ -178,7 +273,7 @@ class ProcurementIntelligenceService:
                     "unit": r.unit,
                     "product_name": r.material_name,
                     "supplier_id": str(r.supplier_id) if r.supplier_id else None,
-                    "city": r.state or city,
+                    "city": r.state or state,
                     "last_verified_at": str(r.updated_at or r.verified_at or ""),
                     "price_source": "database",
                     "verified": True,
@@ -206,6 +301,12 @@ class ProcurementIntelligenceService:
 
     async def get_price_range(self, description: str, city: str = "Abuja") -> Dict[str, Any]:
         offers = await self._verified_offers(description, city)
+        other_location = False
+        if not offers:
+            # Fall back to the same material's verified rates in other states —
+            # labelled so it is never presented as a local price.
+            offers = await self._verified_offers_other_states(description, city)
+            other_location = bool(offers)
         if not offers:
             return {
                 "description": description,
@@ -215,16 +316,27 @@ class ProcurementIntelligenceService:
                 "explanation": "No verified DB price found for this item in this location.",
             }
         prices = [o["rate"] for o in offers]
-        return {
+        explanation = (
+            f"Verified range based on {len(prices)} DB offer(s). "
+            + ("" if len(prices) >= 3 else "Consider more data for higher confidence.")
+        )
+        result = {
             "description": description,
             "city": city,
             "range": {"min": min(prices), "max": max(prices), "count": len(prices)},
             "sufficient_data": len(prices) >= 3,
-            "explanation": (
-                f"Verified range based on {len(prices)} DB offer(s). "
-                + ("Consider more data for higher confidence." if len(prices) < 3 else "")
-            ),
+            "explanation": explanation,
         }
+        if other_location:
+            states = sorted({str(o.get("city")) for o in offers if o.get("city")})
+            result["other_location"] = True
+            result["requested_city"] = city
+            result["explanation"] = (
+                f"No verified price for '{description}' in {city}. Range based on "
+                f"{len(prices)} verified offer(s) in {', '.join(states)} — always name "
+                "that location when quoting the price."
+            )
+        return result
 
     # ── Price history (from material_rate_history) ─────────────────────────
 

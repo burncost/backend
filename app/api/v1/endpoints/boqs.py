@@ -7,12 +7,15 @@ from fastapi import (
     UploadFile,
     File,
     Query,
+    Request,
 )
 from typing import List, Optional, Dict, Any
 import logging
+import re
 from datetime import datetime
 
 from app.core.database import get_mongodb, get_db
+from app.core.ratelimit import rate_limit
 from app.repositories.boq_repository import BOQRepository
 from app.services.boq_generator import BOQGenerator
 from app.services.mitm_engine import MITMEngine
@@ -54,6 +57,25 @@ DRAWING_UPLOAD_GUIDANCE = (
     "CAD files (.dwg/.dxf) are NOT accepted — export to PDF first. "
     "Images (JPG/PNG) are accepted but produce lower accuracy for structural items."
 )
+
+# Anonymous BOQ uploads cost Gemini Vision / analysis time, so throttle them per
+# client IP. Signed-in callers are unaffected (their plans govern usage).
+_GUEST_BOQ_RATE_LIMIT = 5
+_GUEST_BOQ_RATE_WINDOW = 60
+
+
+async def _enforce_guest_rate_limit(http_request: Request, bucket: str) -> None:
+    """Throttle anonymous BOQ uploads by client IP.
+
+    Fails open when Redis is unavailable (matches the shared rate-limit helper),
+    so a Redis outage never blocks legitimate guest uploads.
+    """
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    if not await rate_limit(_GUEST_BOQ_RATE_LIMIT, _GUEST_BOQ_RATE_WINDOW, bucket, client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many BOQ requests. Please wait a minute and try again.",
+        )
 
 
 ### Analyze uploaded drawing (no token cost, anonymous allowed)
@@ -199,8 +221,9 @@ async def analyze_drawing(
 ### Generate BOQ from drawing (automatic pipeline: analyze → map → generate)
 @router.post("/generate-from-drawing", status_code=status.HTTP_201_CREATED)
 async def generate_boq_from_drawing(
+    http_request: Request,
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
     db = Depends(get_mongodb),
     pg_db: AsyncSession = Depends(get_db),
 ):
@@ -209,8 +232,13 @@ async def generate_boq_from_drawing(
     full BOQ generation in one call.
     When drawing confidence is low, returns a targeted-manual-input fallback
     with the extracted geometry pre-filled so the user only confirms dimensions.
-    Token cost: boq_generate_drawing (2).
+
+    Signed-in users: full BOQ, token cost boq_generate_drawing (2), saved to DB.
+    Anonymous users: free truncated preview (no persistence) that requires signup.
     """
+    if current_user is None:
+        await _enforce_guest_rate_limit(http_request, "boq-drawing")
+
     # Validate MIME type + size (mirror analyze_drawing)
     if file.content_type not in _ACCEPTED_MIMES:
         raise HTTPException(
@@ -308,37 +336,49 @@ async def generate_boq_from_drawing(
             "success": True,
             "path": "targeted_manual",
             "drawing_type": drawing_type,
-            "confidence": round(avg_confidence, 2),
+            "confidence": round(min(avg_confidence, mapped.get("confidence", avg_confidence)), 2),
             "extracted_geometry": extracted_geometry,
+            "geometry_warnings": mapped.get("geometry_warnings") or [],
             "fallback_reason": mapped.get("fallback_reason") or (
                 "Drawing confidence is low. Review extracted dimensions, "
                 "then call /generate-from-params with pre-filled data."
             ),
         }
 
-    # ── 3. Deduct tokens (drawing cost) then generate ──
-    token_service = TokenService(pg_db)
-    has_tokens = await token_service.deduct_tokens(
-        user_id=str(current_user.id),
-        action_type="boq_generate_drawing",
-        description=f"BOQ generation from drawing: {file.filename}",
-    )
-    if not has_tokens:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="Insufficient tokens. Purchase more tokens or use your free tier.",
+    # ── 3. Generate (registered: token cost + persistence; guest: free teaser) ──
+    if current_user is not None:
+        token_service = TokenService(pg_db)
+        has_tokens = await token_service.deduct_tokens(
+            user_id=str(current_user.id),
+            action_type="boq_generate_drawing",
+            description=f"BOQ generation from drawing: {file.filename}",
         )
+        if not has_tokens:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail="Insufficient tokens. Purchase more tokens or use your free tier.",
+            )
 
     boq_generator = BOQGenerator(db, pg_db=pg_db)
     boq = await boq_generator.generate_from_parameters(
         request=mapped["request"],
-        user_id=str(current_user.id),
+        user_id=str(current_user.id) if current_user else "anonymous",
     )
     boq["drawing_analysis"] = {
         "drawing_type": drawing_type,
-        "confidence": round(avg_confidence, 2),
+        # The vision model's self-reported confidence is capped by the geometry
+        # check: an implausible area can no longer be reported as "90% sure".
+        "confidence": round(min(avg_confidence, mapped.get("confidence", avg_confidence)), 2),
         "extracted_geometry": extracted_geometry,
+        "geometry_warnings": mapped.get("geometry_warnings") or [],
+        "raw_area_m2": mapped.get("raw_area_m2"),
+        "gross_area_m2": mapped.get("gross_area_m2"),
+        "area_uplift_pct": mapped.get("area_uplift_pct"),
     }
+
+    # Anonymous callers stop here — truncated preview, nothing persisted.
+    if current_user is None:
+        return _truncate_boq_for_guest(boq)
 
     # Save to MongoDB (mirror generate-from-params)
     if db:
@@ -439,32 +479,7 @@ async def public_preview(
         request=request,
         user_id="anonymous"
     )
-
-    # Truncate elements to first 3 items each
-    if "elements" in full:
-        for el in full["elements"]:
-            if "items" in el and len(el["items"]) > 3:
-                el["items"] = el["items"][:3]
-                el["items"].append({
-                    "item_code": "...",
-                    "description": "Sign up to see all items",
-                    "unit": "",
-                    "quantity": 0,
-                    "rate": 0,
-                    "amount": 0,
-                    "confidence": 0,
-                    "estimated": True,
-                })
-
-    # Mask summary totals
-    if "summary" in full:
-        for key in ("sub_total", "total_contract_sum", "total_low", "total_expected", "total_high"):
-            if key in full["summary"]:
-                full["summary"][key] = _mask_amount(full["summary"][key])
-
-    full["requires_signup"] = True
-    full["_id"] = None
-    return full
+    return _truncate_boq_for_guest(full)
 
 
 def _mask_amount(amount: float) -> float:
@@ -475,6 +490,295 @@ def _mask_amount(amount: float) -> float:
     # Keep first digit, replace rest with zeros
     masked = s[0] + "0" * (len(s) - 1)
     return float(masked)
+
+
+# Money mentioned inside a message (e.g. a warning that two summaries disagree).
+_AMOUNT_IN_TEXT_RE = re.compile(r"\d[\d,]{4,}(?:\.\d+)?")
+
+
+def _redact_amounts(text: str) -> str:
+    """Replace money figures inside prose so a warning cannot leak a total."""
+    return _AMOUNT_IN_TEXT_RE.sub("•••", text or "")
+
+
+def _mask_stated(stated: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Mask the document's stated money figures while keeping its structure."""
+    masked = dict(stated or {})
+    for key in ("sub_total", "vat", "total_contract_sum", "contingency"):
+        if masked.get(key) is not None:
+            masked[key] = _mask_amount(float(masked[key] or 0))
+    if masked.get("element_totals"):
+        masked["element_totals"] = {
+            name: _mask_amount(float(value or 0))
+            for name, value in masked["element_totals"].items()
+        }
+    if masked.get("bills"):
+        masked["bills"] = {
+            name: _mask_amount(float(value or 0)) for name, value in masked["bills"].items()
+        }
+    if masked.get("summaries"):
+        # Each entry nests its own bill totals, so rebuild it rather than only
+        # nulling the headline figures.
+        masked["summaries"] = [
+            {
+                "sheet": summary.get("sheet"),
+                "vat_rate": summary.get("vat_rate"),
+                "sub_total": None,
+                "vat": None,
+                "contingency": None,
+                "total_contract_sum": None,
+                "bills": {
+                    name: _mask_amount(float(value or 0))
+                    for name, value in (summary.get("bills") or {}).items()
+                },
+            }
+            for summary in masked["summaries"]
+        ]
+    return masked
+
+
+# ── Guest (anonymous) preview limits ─────────────────────────────────────────
+# Anonymous callers get a genuine teaser only: a few rows plus masked money
+# totals. The full BOQ/analysis is never serialised to an unauthenticated
+# request, so the sign-up wall cannot be bypassed by reading the response (or
+# anything the client mirrors into localStorage).
+_GUEST_ITEM_LIMIT = 3
+_GUEST_DISCREPANCY_LIMIT = 2
+
+
+def _locked_item_stub(hidden_count: int) -> Dict[str, Any]:
+    """Placeholder row telling a guest how many items are hidden."""
+    suffix = f" ({hidden_count} more)" if hidden_count else ""
+    return {
+        "item_code": "...",
+        "description": f"Sign up to see all items{suffix}",
+        "unit": "",
+        "quantity": 0,
+        "rate": 0,
+        "amount": 0,
+        "confidence": 0,
+        "estimated": True,
+    }
+
+
+def _truncate_boq_for_guest(full: Dict[str, Any]) -> Dict[str, Any]:
+    """Truncate a generated BOQ for anonymous callers (see _GUEST_ITEM_LIMIT)."""
+    guest_elements = full.get("elements") or []
+    elements_total = len(guest_elements)
+    items_total = sum(len(el.get("items") or []) for el in guest_elements)
+    items_shown = 0
+    unpriced_items = 0
+    teaser_item = None
+    visible_priced = False
+
+    if "elements" in full:
+        for el in guest_elements:
+            items = el.get("items") or []
+            unpriced_items += sum(
+                1
+                for i in items
+                if i.get("price_status") == "unavailable"
+                or (not i.get("adjusted_rate") and not i.get("rate"))
+            )
+            # Note the first priced line (and whether any visible line is
+            # priced) before truncation drops the rest of the element.
+            for idx, candidate in enumerate(items):
+                if not (candidate.get("adjusted_rate") or candidate.get("rate")):
+                    continue
+                if teaser_item is None:
+                    teaser_item = candidate
+                if idx < _GUEST_ITEM_LIMIT:
+                    visible_priced = True
+            if len(items) > _GUEST_ITEM_LIMIT:
+                hidden = len(items) - _GUEST_ITEM_LIMIT
+                el["items"] = items[:_GUEST_ITEM_LIMIT] + [_locked_item_stub(hidden)]
+            items_shown += min(len(items), _GUEST_ITEM_LIMIT)
+            # An element total is a real money figure too — mask it, otherwise
+            # the exact bill is readable straight from the response body.
+            if el.get("element_total") is not None:
+                el["element_total"] = _mask_amount(float(el["element_total"] or 0))
+            el.pop("cost_percentage_of_total", None)
+
+    # Mask summary totals. Everything derived from the bill is masked, not just
+    # the headline figures: contingency, VAT and cost/m² recover the same sum.
+    if "summary" in full:
+        summary = full["summary"]
+        for key in (
+            "sub_total",
+            "contingency",
+            "vat",
+            "total_contract_sum",
+            "total_low",
+            "total_expected",
+            "total_high",
+            "cost_per_m2",
+        ):
+            if summary.get(key) is not None:
+                summary[key] = _mask_amount(float(summary[key] or 0))
+        scenarios = summary.get("cost_scenarios")
+        if isinstance(scenarios, dict):
+            summary["cost_scenarios"] = {
+                key: _mask_amount(float(value or 0)) for key, value in scenarios.items()
+            }
+
+    # Teaser: when every visible line is unpriced, the guest sees only "price on
+    # request" rows, which reads as a broken bill. Surface the first priced line.
+    visible_items = [
+        it for el in guest_elements for it in (el.get("items") or [])[:_GUEST_ITEM_LIMIT]
+    ]
+    if visible_items and not visible_priced and teaser_item is not None:
+        head = guest_elements[0].get("items") or []
+        stubs = [it for it in head if it.get("item_code") == "..."]
+        body = [it for it in head if it.get("item_code") != "..."]
+        guest_elements[0]["items"] = ([teaser_item] + body[:-1] if body else [teaser_item]) + stubs
+        items_shown = min(items_total, _GUEST_ITEM_LIMIT * elements_total)
+
+    full["guest_preview"] = {
+        "masked": True,
+        "elements_total": elements_total,
+        "items_total": items_total,
+        "items_shown": items_shown,
+        "unpriced_items": unpriced_items,
+    }
+    full["requires_signup"] = True
+    full["_id"] = None
+    return full
+
+
+async def _resolve_rate_city(pg_db, current_user) -> str:
+    """City whose market rates a BOQ should be checked against.
+
+    Nigerian material prices vary by state, so a signed-in caller's default
+    delivery address is the best available signal. Falls back to Abuja, which is
+    the rate default used across the app.
+    """
+    if current_user is None or pg_db is None:
+        return "Abuja"
+    try:
+        from sqlalchemy import select
+
+        from app.models.address import CustomerAddress
+
+        result = await pg_db.execute(
+            select(CustomerAddress.city)
+            .where(CustomerAddress.user_id == current_user.id)
+            .order_by(CustomerAddress.is_default.desc())
+            .limit(1)
+        )
+        city = result.scalar_one_or_none()
+        return city or "Abuja"
+    except Exception as exc:  # non-fatal: verification still runs at Abuja rates
+        logger.warning("Could not resolve rate city for BOQ verification: %s", exc)
+        return "Abuja"
+
+
+def _mask_verification_for_guest(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Mask an uploaded-BOQ verification result for anonymous callers.
+
+    Keeps a couple of verified lines and discrepancies as a teaser, masks the
+    quoted total and never returns a stored BOQ id. Every list that can carry
+    the full bill must be trimmed here — including the per-element breakdown,
+    which would otherwise hand a guest the whole verified BOQ.
+    """
+    parsed = result.get("parsed_boq") or {}
+    items = parsed.get("items") or []
+    if len(items) > _GUEST_ITEM_LIMIT:
+        hidden = len(items) - _GUEST_ITEM_LIMIT
+        parsed["items"] = items[:_GUEST_ITEM_LIMIT] + [_locked_item_stub(hidden)]
+    if parsed.get("total_quoted") is not None:
+        parsed["total_quoted"] = _mask_amount(float(parsed["total_quoted"] or 0))
+    parsed["stated"] = _mask_stated(parsed.get("stated"))
+    parsed["warnings"] = [_redact_amounts(w) for w in (parsed.get("warnings") or [])]
+    elements = parsed.get("elements") or []
+    if elements:
+        parsed["elements"] = [
+            {
+                "element_name": element.get("element_name"),
+                "item_count": element.get("item_count"),
+                "element_total": _mask_amount(float(element.get("element_total") or 0)),
+                "items": [],
+            }
+            for element in elements
+        ]
+    result["parsed_boq"] = parsed
+
+    analysis = result.get("analysis") or {}
+    verified = analysis.get("verified_items") or []
+    discrepancies = analysis.get("discrepancies") or []
+    analysis["verified_items"] = verified[:_GUEST_ITEM_LIMIT]
+    analysis["discrepancies"] = discrepancies[:_GUEST_DISCREPANCY_LIMIT]
+    analysis["hidden_items"] = max(len(verified) - _GUEST_ITEM_LIMIT, 0)
+    analysis["stated"] = _mask_stated(analysis.get("stated"))
+    analysis["warnings"] = [_redact_amounts(w) for w in (analysis.get("warnings") or [])]
+    # The element breakdown repeats the whole bill; mask its figures too.
+    analysis["elements"] = [
+        {
+            "element_name": element.get("element_name"),
+            "item_count": element.get("item_count"),
+            "computed_total": _mask_amount(float(element.get("computed_total") or 0)),
+            "stated_total": _mask_amount(float(element.get("stated_total") or 0)),
+            "difference": None,
+        }
+        for element in (analysis.get("elements") or [])
+    ]
+    for key in ("original_total", "adjusted_total", "net_variance"):
+        if analysis.get(key) is not None:
+            analysis[key] = _mask_amount(float(analysis[key] or 0))
+    analysis["flagged_items"] = (analysis.get("flagged_items") or [])[:_GUEST_DISCREPANCY_LIMIT]
+    result["analysis"] = analysis
+
+    # The arithmetic report restates every element total and the contract sum.
+    arithmetic = result.get("arithmetic") or analysis.get("arithmetic")
+    if arithmetic:
+        masked_arithmetic = {
+            **arithmetic,
+            "elements": [
+                {
+                    **element,
+                    "computed_total": _mask_amount(float(element.get("computed_total") or 0)),
+                    "stated_total": _mask_amount(float(element.get("stated_total") or 0)),
+                    "difference": None,
+                }
+                for element in (arithmetic.get("elements") or [])
+            ],
+            "items_total": _mask_amount(float(arithmetic.get("items_total") or 0)),
+            "stated_elements_total": _mask_amount(float(arithmetic.get("stated_elements_total") or 0)),
+            "items_total_difference": None,
+            "vat": {
+                **(arithmetic.get("vat") or {}),
+                "stated": _mask_amount(float((arithmetic.get("vat") or {}).get("stated") or 0)),
+                "expected": _mask_amount(float((arithmetic.get("vat") or {}).get("expected") or 0)),
+            },
+            "contract_sum": {
+                **(arithmetic.get("contract_sum") or {}),
+                "stated": _mask_amount(float((arithmetic.get("contract_sum") or {}).get("stated") or 0)),
+                "expected": _mask_amount(float((arithmetic.get("contract_sum") or {}).get("expected") or 0)),
+            },
+            # Finding messages spell out the real element totals, and each summary
+            # entry carries the stated contract figures — neither may reach a guest.
+            "findings": [
+                {
+                    "scope": finding.get("scope"),
+                    "difference": None,
+                    "message": (
+                        f"{finding.get('scope')}: this element's line items do not add up "
+                        "to its stated total."
+                    ),
+                }
+                for finding in (arithmetic.get("findings") or [])
+            ],
+            "summaries": [
+                {"sheet": summary.get("sheet")}
+                for summary in (arithmetic.get("summaries") or [])
+            ],
+        }
+        result["arithmetic"] = masked_arithmetic
+        analysis["arithmetic"] = masked_arithmetic
+
+    result["boq_id"] = ""
+    result["requires_signup"] = True
+    return result
+
 
 
 ### MITM Preview (no token cost, anonymous allowed)
@@ -497,12 +801,21 @@ async def mitm_preview(
 ### Upload a BOQ Excel/CSV file for verification
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload_boq(
+    http_request: Request,
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
-    db = Depends(get_mongodb)
+    current_user: Optional[User] = Depends(get_optional_user),
+    db = Depends(get_mongodb),
+    pg_db: AsyncSession = Depends(get_db),
 ):
-    """Upload an existing BOQ file (Excel/CSV) for verification and analysis."""
-    allowed_extensions = ['.xlsx', '.xls', '.csv']
+    """Upload an existing BOQ file (Excel/CSV) for verification and analysis.
+
+    Signed-in users get the full itemised analysis, stored under their account.
+    Anonymous users get a masked teaser (a few lines, masked total, no storage).
+    """
+    if current_user is None:
+        await _enforce_guest_rate_limit(http_request, "boq-verify")
+
+    allowed_extensions = ['.xlsx', '.xls', '.xlsm', '.csv']
     file_ext = '.' + file.filename.split('.')[-1].lower() if file.filename else ''
     
     if file_ext not in allowed_extensions:
@@ -518,11 +831,27 @@ async def upload_boq(
             detail="File size exceeds 50MB limit"
         )
     await file.seek(0)
-    
+
+    # Rates vary by state (Nigerian material prices move by market and LGA), so
+    # compare against the caller's own city when we know it.
+    rate_city = await _resolve_rate_city(pg_db, current_user)
+
+    # Guests: verify against DB market rates but persist nothing, then mask the
+    # response so the full analysis stays behind the sign-up wall.
+    if current_user is None:
+        guest_generator = BOQGenerator(db=None, pg_db=pg_db)
+        guest_result = await guest_generator.upload_and_verify(
+            file=file,
+            uploaded_by="anonymous",
+            city=rate_city,
+        )
+        return _mask_verification_for_guest(guest_result)
+
     boq_generator = BOQGenerator(db)
     result = await boq_generator.upload_and_verify(
         file=file,
-        uploaded_by=str(current_user.id)
+        uploaded_by=str(current_user.id),
+        city=rate_city,
     )
     
     return result

@@ -1,12 +1,12 @@
-"""Product Service - Real product management with database queries."""
 from typing import Dict, Any, Optional, List
 import logging
+import re
 import uuid
 from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, and_
 from sqlalchemy.orm import joinedload
 
 from app.models.product import Product, ProductImage
@@ -17,6 +17,92 @@ from app.schemas.product import ProductCreate, ProductUpdate, ProductFilter, Pro
 from app.crud import product as product_crud
 
 logger = logging.getLogger(__name__)
+
+
+# ── Search normalisation ─────────────────────────────────────────────────────
+# The catalog uses precise names ("Stone-Coated Roofing Sheet") while users and
+# the AI ask in natural language ("stone coated roofing sheets"). A raw substring
+# ILIKE misses those, so searches are tokenised and each token is matched with
+# '-'/' ' treated as equivalent and optional trailing plurals.
+
+_SEARCH_SPLIT = re.compile(r"[\s,/\-&]+")
+
+
+def _norm_like(column, value: str):
+    """Case-insensitive whole-word match, treating '-' and ' ' as equivalent.
+
+    A plain ``LIKE '%cement%'`` also matches "12mm Reinforcement Rod" because
+    "reinfor-cement" contains "cement", so word boundaries are enforced with the
+    Postgres regex operator.
+    """
+    pattern = r"\y" + re.escape(value) + r"\y"
+    return func.replace(column, "-", " ").op("~*")(pattern)
+
+
+def _token_variants(token: str) -> set:
+    """Plural/singular variants of a search token."""
+    variants = {token}
+    if token.endswith("s") and len(token) > 3:
+        variants.add(token[:-1])
+    return variants
+
+
+def _search_conditions(search: str):
+    """AND over a query's tokens; each token tolerates plural/hyphen variants.
+
+    Returns None when the query has no usable token (all shorter than 3 chars).
+    """
+    groups = []
+    for raw in _SEARCH_SPLIT.split((search or "").strip().lower()):
+        if len(raw) < 3:
+            continue
+        conds = []
+        for variant in _token_variants(raw):
+            conds.append(_norm_like(Product.name, variant))
+            conds.append(_norm_like(Product.description, variant))
+            conds.append(_norm_like(Product.sku, variant))
+            # Seeded rows keep short brand/material/spec words here
+            # ("cement, dangote, 50kg, abuja"), which the name alone often misses.
+            conds.append(_norm_like(Product.meta_keywords, variant))
+        groups.append(or_(*conds))
+    return and_(*groups) if groups else None
+
+
+def _category_conditions(category: str, relaxed: bool = False):
+    """Match a category across its name/division/material_type.
+
+    STRICT (the default, used by every marketplace request): every token must
+    match in at least one of those fields. Matching the tokens with OR instead
+    let the generic word "systems" — shared by five of the twenty parent
+    categories — bleed across them, so selecting "Roofing Systems" also returned
+    the "Plumbing Systems" rows (PVC pipes, water tanks).
+
+    Tokens match on word boundaries (`_norm_like`), not as bare substrings:
+    "cement" is a substring of "reinfor-cement Steel", so a ``'%cement%'`` LIKE
+    also listed reinforcement products under the Cement category.
+
+    RELAXED (chat tool only, on an empty strict result): any token may match, so
+    a free-text phrase such as "roofing sheets" still resolves to "Roofing
+    Systems". Never use this for a marketplace filter — it is what caused the
+    wrong results.
+    """
+    groups = []
+    for raw in _SEARCH_SPLIT.split((category or "").strip().lower()):
+        if len(raw) < 3:
+            continue
+        groups.append(or_(
+            # Word-boundary matching, not a bare '%token%' LIKE: "cement" is a
+            # substring of "reinfor-cement Steel", so substring matching listed
+            # reinforcement products under the Cement pill. `_norm_like` also
+            # treats '-' and ' ' as equivalent, so category names tokenise like
+            # the marketplace's slugs.
+            _norm_like(Category.name, raw),
+            _norm_like(Category.division, raw),
+            _norm_like(Category.material_type, raw),
+        ))
+    if not groups:
+        return None
+    return or_(*groups) if relaxed else and_(*groups)
 
 
 class ProductService:
@@ -48,13 +134,19 @@ class ProductService:
         filters: ProductFilter,
         page: int = 1,
         page_size: int = 20,
-        only_verified: bool = False
+        only_verified: bool = False,
+        relaxed_category: bool = False,
     ) -> Dict[str, Any]:
         """Get products with filtering, search, and pagination using real DB queries.
 
         When `only_verified=True`, only products belonging to VERIFIED vendors are
         returned — this is used by the public marketplace so that a pending vendor's
         products stay private (visible only to the vendor themselves via my-products).
+
+        `relaxed_category` is opt-in and used ONLY by the chat tool, as a retry after
+        a strict category filter returned nothing. Marketplace requests never set it:
+        a relaxed (token-OR) category filter is what made "Roofing Systems" list
+        plumbing products.
         """
         query = select(
             Product, Category.name, Category.division, Category.material_type, Brand.name
@@ -84,14 +176,28 @@ class ProductService:
             # Searching a supplier name as a subquery (instead of joining Vendor)
             # keeps this valid whether or not the verified-vendor join is present.
             vendor_match = select(Vendor.id).where(Vendor.business_name.ilike(search_term))
-            query = query.where(
-                or_(
-                    Product.name.ilike(search_term),
-                    Product.description.ilike(search_term),
-                    Product.sku.ilike(search_term),
+            # Brand rows ("Dangote Cement") often hold the brand the product name
+            # shortens ("Dangote Cement 50kg"), so match them too.
+            brand_match = select(Brand.id).where(Brand.name.ilike(search_term))
+            token_cond = _search_conditions(filters.search)
+            if token_cond is not None:
+                # Natural-language queries ("stone-coated roofing sheets") match on
+                # every token instead of the literal phrase.
+                query = query.where(or_(
+                    token_cond,
                     Product.vendor_id.in_(vendor_match),
+                    Product.brand_id.in_(brand_match),
+                ))
+            else:
+                query = query.where(
+                    or_(
+                        Product.name.ilike(search_term),
+                        Product.description.ilike(search_term),
+                        Product.sku.ilike(search_term),
+                        Product.vendor_id.in_(vendor_match),
+                        Product.brand_id.in_(brand_match),
+                    )
                 )
-            )
         if filters.in_stock:
             query = query.where(Product.quantity > 0)
         if filters.min_price is not None:
@@ -106,7 +212,12 @@ class ProductService:
             query = query.where(Category.material_type == filters.material_type)
 
         if filters.category:
-            query = query.where(Category.name.ilike(filters.category))
+            cat_cond = _category_conditions(
+                filters.category, relaxed=relaxed_category
+            )
+            query = query.where(
+                cat_cond if cat_cond is not None else Category.name.ilike(filters.category)
+            )
 
         # Count total
         count_query = select(func.count()).select_from(query.subquery())

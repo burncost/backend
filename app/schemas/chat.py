@@ -30,8 +30,9 @@ class ActionButton(BaseModel):
 
 class ChatCard(BaseModel):
     """A structured card rendered by the frontend chat widget."""
-    type: str  # price_comparison | supplier | quotation_analysis | savings |
-               # price_passport | procurement_plan | order_confirmation | project_memory
+    type: str  # price_comparison | cheapest_price | supplier | quotation_analysis |
+               # savings | price_passport | procurement_plan | order_confirmation |
+               # project_memory
     title: str
     data: Optional[dict] = None
 

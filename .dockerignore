@@ -32,6 +32,8 @@ tests/
 *~
 .DS_Store
 node_modules/
+google_creds.json
+credentials.json
 package-lock.json
 exported_pdfs/
 cads/
