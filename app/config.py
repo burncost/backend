@@ -138,7 +138,7 @@ class Settings(BaseSettings):
 
     # Google Gemini AI
     GOOGLE_PROJECT_ID: str = "burncost-493208"
-    GOOGLE_LOCATION: str = "europe-west1"
+    GOOGLE_LOCATION: str = "eu"
     GOOGLE_CREDS_PATH: str = "google_creds.json"
 
     # ── Online price search (BOQ price chain, tier 3) ──────────────────────
