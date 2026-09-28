@@ -383,7 +383,9 @@ async def generate_boq_from_drawing(
         return _truncate_boq_for_guest(boq)
 
     # Save to MongoDB (mirror generate-from-params)
-    if db:
+    # `is not None`, not truthiness: a pymongo Database raises NotImplementedError
+    # when coerced to bool, which killed the request after vision work finished.
+    if db is not None:
         from datetime import datetime as _dt
         now = _dt.utcnow()
         boq_doc = {
@@ -444,8 +446,9 @@ async def generate_boq_from_params(
         user_id=str(current_user.id)
     )
     
-    # Save to MongoDB if available
-    if db:
+    # Save to MongoDB if available (`is not None`: a pymongo Database is never
+    # safely truthiness-tested — it raises NotImplementedError.)
+    if db is not None:
         now = datetime.utcnow()
         boq_doc = {
             "projectId": request.project_info.project_title,

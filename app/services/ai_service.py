@@ -1,5 +1,6 @@
 """AI Service — Gemini-powered document analysis and chat."""
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -27,6 +28,31 @@ def _decode_tool_content(content: str) -> Dict[str, Any]:
     except (ValueError, TypeError):
         return {"result": content}
     return payload if isinstance(payload, dict) else {"result": payload}
+
+
+# --- Thought signatures -----------------------------------------------------
+# Gemini 3 models (gemini-3.6-flash) attach an opaque, per-part
+# `thought_signature` to the reasoning that produced a function call. Replaying
+# that function call in the next turn WITHOUT the signature is rejected with
+# 400 INVALID_ARGUMENT ("Function call is missing a thought_signature"), which
+# is what turned every second turn into a canned apology. The signature is
+# carried through our OpenAI-shaped history as base64 text (the SDK decodes a
+# base64 string straight back into bytes).
+def _encode_signature(signature: Any) -> Optional[str]:
+    """bytes → base64 str, so the signature survives JSON/Mongo round-trips."""
+    if not signature:
+        return None
+    if isinstance(signature, str):
+        return signature
+    try:
+        return base64.b64encode(bytes(signature)).decode("ascii")
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_missing_signature_error(exc: BaseException) -> bool:
+    """True when Gemini refused the replayed history for a missing signature."""
+    return "thought_signature" in str(getattr(exc, "message", "") or str(exc)).lower()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -220,6 +246,30 @@ class ChatAIService:
 
 
         except google_exceptions.GoogleAPIError as exc:
+            if _is_missing_signature_error(exc):
+                # History written before signatures were captured replays a
+                # function_call that carries none, and Gemini 3 refuses the whole
+                # turn. Replay only the text turns so the shopper still gets a
+                # real answer instead of the canned fallback.
+                logger.warning(
+                    "Gemini refused the replayed function-call history "
+                    "(missing thought_signature); retrying without function turns"
+                )
+                try:
+                    retry_response = await asyncio.to_thread(
+                        self.client.models.generate_content,
+                        model=self.model,
+                        contents=self._drop_function_turns(contents),
+                        config=genai_types.GenerateContentConfig(
+                            temperature=0.2,
+                            max_output_tokens=600,
+                            tools=gemini_tools,
+                            system_instruction=system_instruction,
+                        ),
+                    )
+                    return self._gemini_to_openai_response(retry_response, messages)
+                except google_exceptions.GoogleAPIError as retry_exc:
+                    exc = retry_exc
             logger.exception("Gemini API error (chat_completion): code=%s, details=%s", exc.code, exc.message)
             # is_error tells the caller this is a failure, not model prose: it
             # retries once and then answers from whatever the tools returned.
@@ -244,6 +294,25 @@ class ChatAIService:
 
     # ── Internal helpers ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _drop_function_turns(contents: List[dict]) -> List[dict]:
+        """Text-only view of a contents list (last-resort history repair).
+
+        Used when Gemini refuses a replayed function_call for lacking its thought
+        signature: the function call and every function_response are dropped, so
+        the model still sees what was said while the unusable tool turn — and the
+        signature-less call it carries — is left out entirely.
+        """
+        trimmed: List[dict] = []
+        for content in contents:
+            parts = [
+                part for part in content.get("parts", [])
+                if "text" in part and part.get("text")
+            ]
+            if parts:
+                trimmed.append({"role": content.get("role", "user"), "parts": parts})
+        return trimmed
+
     def _messages_to_contents(self, messages: List[dict]) -> List[dict]:
         """Convert OpenAI-format messages to Gemini contents list."""
         contents: List[dict] = []
@@ -267,14 +336,24 @@ class ChatAIService:
                 if tc:
                     parts = []
                     if content:
-                        parts.append({"text": content})
-                    for call in tc:
                         parts.append({
+                            "text": content,
+                            "thought_signature": msg.get("text_signature"),
+                        } if msg.get("text_signature") else {"text": content})
+                    for call in tc:
+                        part = {
                             "function_call": {
                                 "name": call["function"]["name"],
                                 "args": json.loads(call["function"]["arguments"]),
                             }
-                        })
+                        }
+                        # Gemini 3 rejects the turn (400 INVALID_ARGUMENT) when a
+                        # replayed function_call loses the signature it was issued
+                        # with, so it is echoed back exactly as received.
+                        signature = call.get("thought_signature")
+                        if signature:
+                            part["thought_signature"] = signature
+                        parts.append(part)
                     if not parts:
                         continue
                     contents.append({"role": "model", "parts": parts})
@@ -346,17 +425,25 @@ class ChatAIService:
         content = candidate.content
         text = ""
         tool_calls = []
+        # Gemini 3 signs the part that produced each function call (and its
+        # reasoning text). Both are handed back to the caller so the next turn can
+        # replay them verbatim — see _encode_signature.
+        text_signature = None
 
         if content and content.parts:
             for part in content.parts:
                 if hasattr(part, "text") and part.text:
                     text = part.text
+                    text_signature = _encode_signature(getattr(part, "thought_signature", None))
                 if hasattr(part, "function_call") and part.function_call:
                     fc = part.function_call
                     tool_calls.append(
                         _DuckToolCall(
                             id=fc.name,
                             function=_DuckFunction(name=fc.name, arguments=json.dumps(fc.args)),
+                            thought_signature=_encode_signature(
+                                getattr(part, "thought_signature", None)
+                            ),
                         )
                     )
 
@@ -375,7 +462,11 @@ class ChatAIService:
             )
 
         return _DuckResponse(
-            choices=[_DuckChoice(message=_DuckMessage(content=text, tool_calls=tool_calls or None))],
+            choices=[_DuckChoice(message=_DuckMessage(
+                content=text,
+                tool_calls=tool_calls or None,
+                text_signature=text_signature,
+            ))],
             usage=usage,
         )
 
@@ -389,16 +480,31 @@ class _DuckFunction:
 
 
 class _DuckToolCall:
-    def __init__(self, id: str, function: _DuckFunction):
+    def __init__(
+        self,
+        id: str,
+        function: _DuckFunction,
+        thought_signature: Optional[str] = None,
+    ):
         self.id = id
         self.type = "function"
         self.function = function
+        # Base64 Gemini 3 thought signature this call was issued with; replayed
+        # with the call in the next turn (None for non-thinking models).
+        self.thought_signature = thought_signature
 
 
 class _DuckMessage:
-    def __init__(self, content: Optional[str], tool_calls: Optional[List]):
+    def __init__(
+        self,
+        content: Optional[str],
+        tool_calls: Optional[List],
+        text_signature: Optional[str] = None,
+    ):
         self.content = content or ""
         self.tool_calls = tool_calls
+        # Signature carried by the reasoning text part, when the model sent one.
+        self.text_signature = text_signature
 
 
 class _DuckChoice:

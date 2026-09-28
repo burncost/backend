@@ -22,6 +22,69 @@ from app.services.ai_service import ChatAIService
 
 logger = logging.getLogger(__name__)
 
+# Tools that look up a price for ONE product. A turn that calls several of them
+# is a fan-out the shopper never asked for: every result renders its own line and
+# card, so the answer stops matching the question. One per turn is enforced in
+# the chat loop (see the cap in chat()).
+PRICE_LOOKUP_TOOLS = (
+    "get_cheapest_price",
+    "compare_prices",
+    "get_price_range",
+    "get_price_history",
+)
+
+
+def _cap_price_lookups(tool_calls) -> Tuple[list, List[str]]:
+    """Keep at most one price lookup per turn; return (kept, dropped_names).
+
+    The system prompt asks the model for one price lookup per turn, but a thinking
+    model still fanned out into ~5 parallel lookups in a single turn, and each of
+    those renders its own line and card — so the reply described products the
+    shopper never asked about. Extras are dropped before they run (and before they
+    are written to history, so every function_call we keep still gets a response).
+    """
+    if not tool_calls or len(tool_calls) < 2:
+        return tool_calls, []
+
+    kept, dropped, seen = [], [], False
+    for tc in tool_calls:
+        if tc.function.name in PRICE_LOOKUP_TOOLS:
+            if seen:
+                dropped.append(tc.function.name)
+                continue
+            seen = True
+        kept.append(tc)
+    return kept, dropped
+
+
+# Same tokenisation the catalogue search uses ('-'/' ' equivalent, 3+ chars).
+_NAME_SPLIT = re.compile(r"[\s,/&\-]+")
+
+
+def _query_tokens(text: str) -> List[str]:
+    """Lowercased usable tokens of a query (3+ chars), like the catalog's rule."""
+    return [t for t in _NAME_SPLIT.split((text or "").strip().lower()) if len(t) >= 3]
+
+
+def _name_matches_query(name: str, query: str) -> bool:
+    """True when every query token appears as a whole word in the product name.
+
+    The catalogue matches a token anywhere in name/description/sku/meta_keywords,
+    which is right for browsing but wrong for "cheapest X": "Tile Adhesive (25kg)"
+    describes itself as "Cement-based tile adhesive", so it used to win the
+    cheapest-cement slot (₦7,500) ahead of actual cement (₦11,500+). Whole words
+    (not substrings) also keep "reinfor-cement Rod" out of a "cement" query.
+    """
+    tokens = _query_tokens(query)
+    if not tokens:
+        return False
+    words = set(_NAME_SPLIT.split((name or "").strip().lower()))
+
+    def _has(token: str) -> bool:
+        return token in words or token[:-1] in words or f"{token}s" in words
+
+    return all(_has(t) for t in tokens)
+
 # Tool definitions for function calling
 
 TOOL_DEFINITIONS = [
@@ -943,6 +1006,17 @@ class ToolExecutor:
                 products = result.get("products", [])
                 relaxed_category_from = category
 
+        # Relevance: listings NAMED for the search rank above ones that only mention
+        # it in their description/keywords — a "cement" search used to lead with
+        # Tile Adhesive (a cement-based product) because the catalog sorts on price.
+        # Stable sort: the catalog order inside each group is untouched and nothing
+        # is hidden.
+        if matched_query:
+            products = sorted(
+                products,
+                key=lambda p: not _name_matches_query(p.get("name", ""), matched_query),
+            )
+
         # Serialize for JSON
         serialized = []
         for p in products:
@@ -1084,6 +1158,15 @@ class ToolExecutor:
                 "is_verified": bool(p.get("is_verified")),
                 "review_count": int(p.get("review_count") or 0),
             })
+
+        # A listing whose NAME contains the query beats one that only mentions it
+        # in the description/meta keywords: "Tile Adhesive (25kg)" is a cement-based
+        # product, but nobody asking for the cheapest cement wants it first, and at
+        # ₦7,500 it used to be the cheapest answer. Broad matches are still the
+        # fallback when nothing is named for the query.
+        named = [o for o in offers if _name_matches_query(o["product_name"], matched_query)]
+        if named:
+            offers = named
 
         # The catalogue sorts on base_price; re-rank on the effective price.
         offers.sort(key=lambda o: (o["rate"], o["total_procurement_cost"]))
@@ -1651,6 +1734,15 @@ class ChatService:
 
             msg = choice.message
 
+            # One price lookup per turn — see _cap_price_lookups.
+            if msg.tool_calls and len(msg.tool_calls) > 1:
+                kept_calls, capped_names = _cap_price_lookups(msg.tool_calls)
+                if capped_names:
+                    logger.info(
+                        "Capped parallel price lookups to 1: dropped %s", capped_names
+                    )
+                    msg.tool_calls = kept_calls
+
             # Track token usage
             token_usage = {
                 "total_tokens": response.usage.total_tokens if response.usage else 0,
@@ -1793,12 +1885,23 @@ class ChatService:
             # function_call to precede its function_response — the inverted order
             # made Gemini return EMPTY text and poisoned the stored history.
             assistant_msg = {"role": "assistant", "content": msg.content, "tool_calls": []}
+            text_signature = getattr(msg, "text_signature", None)
+            if text_signature:
+                assistant_msg["text_signature"] = text_signature
             for tc in msg.tool_calls:
-                assistant_msg["tool_calls"].append({
+                call = {
                     "id": tc.id,
                     "type": "function",
                     "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                })
+                }
+                # Gemini 3 signs the reasoning behind each function call and
+                # refuses the follow-up turn with 400 INVALID_ARGUMENT if the
+                # replayed call has lost that signature, so it is stored (base64)
+                # and re-emitted by the AI service.
+                signature = getattr(tc, "thought_signature", None)
+                if signature:
+                    call["thought_signature"] = signature
+                assistant_msg["tool_calls"].append(call)
             messages.append(assistant_msg)
 
             for tc in msg.tool_calls:
@@ -1974,32 +2077,47 @@ class ChatService:
         tool result — no price is ever invented, and the shopper still gets an
         answer. Returns None when there is nothing worth showing.
         """
-        price_tools = ("get_cheapest_price", "compare_prices", "get_price_range", "get_price_history")
         try:
             lines: List[str] = []
+            price_hits: List[Tuple[dict, List[dict]]] = []
+            other_lines: List[str] = []
+
             for tr in tool_results:
                 result = tr.get("result")
                 if not isinstance(result, dict):
                     continue
                 tool = tr.get("tool", "")
-                query = result.get("search") or result.get("matched_query") or result.get("description")
-                offers = [o for o in (result.get("offers") or []) if isinstance(o, dict)]
-                if offers and tool in price_tools:
-                    lines.append(
-                        f"Here are the prices I found for '{query}':" if query
-                        else "Here are the prices I found:"
-                    )
-                    lines.extend(ChatService._offer_line(o) for o in offers[:3])
-                    continue
+                if tool in PRICE_LOOKUP_TOOLS:
+                    offers = [o for o in (result.get("offers") or []) if isinstance(o, dict)]
+                    if offers:
+                        price_hits.append((result, offers))
+                        continue
                 # A tool that found nothing still explains why (no catalogue
                 # match, thin data) — echoing that beats a bare apology.
                 if result.get("explanation"):
-                    lines.append(f"• {str(result['explanation'])[:300]}")
+                    other_lines.append(f"• {str(result['explanation'])[:300]}")
                     continue
                 # Non-price tools (cart, order, project memory) carry their own
                 # confirmation text; echoing it is still truthful.
                 if result.get("message"):
-                    lines.append(f"• {str(result['message'])[:300]}")
+                    other_lines.append(f"• {str(result['message'])[:300]}")
+
+            # Exactly ONE price answer — the most exact lookup of the turn, which
+            # is also the card _build_cards keeps. Listing every fanned-out lookup
+            # here is what made this text describe products the cards never
+            # showed.
+            if price_hits:
+                result, offers = max(
+                    price_hits, key=lambda hit: ChatService._price_exactness(hit[0])
+                )
+                query = result.get("search") or result.get("matched_query") or result.get("description")
+                lines.append(
+                    f"Here are the prices I found for '{query}':" if query
+                    else "Here are the prices I found:"
+                )
+                lines.extend(ChatService._offer_line(o) for o in offers[:3])
+
+            lines.extend(other_lines)
             if not lines:
                 return None
             lines = lines[:10]
@@ -2199,15 +2317,15 @@ class ChatService:
         return list(best_by_type.values()) if best_by_type else None
 
     @staticmethod
-    def _card_exactness(card: ChatCard) -> Tuple[int, int, int]:
-        """Rank a card by how exactly its lookup matched what was asked.
+    def _price_exactness(result: dict) -> Tuple[int, int, int]:
+        """Rank a price tool result by how exactly its lookup matched the ask.
 
         Compared lexicographically, highest wins:
           1. real data beats an insufficient-data estimate,
           2. an unrelaxed lookup beats one broadened to find anything,
           3. a query that matched verbatim beats a near-miss.
         """
-        data = card.data or {}
+        data = result or {}
         matched = str(data.get("matched_query") or "").strip().lower()
         search = str(data.get("search") or "").strip().lower()
         return (
@@ -2215,6 +2333,15 @@ class ChatService:
             0 if data.get("relaxed_from") else 1,
             1 if matched and matched == search else 0,
         )
+
+    @staticmethod
+    def _card_exactness(card: ChatCard) -> Tuple[int, int, int]:
+        """Rank a card by how exactly its lookup matched what was asked.
+
+        Same ordering as _price_exactness — the card payload carries the same
+        matched_query / relaxed_from / insufficient_data fields the tool returned.
+        """
+        return ChatService._price_exactness(card.data or {})
 
     @staticmethod
     def _product_candidates(tool_results: List[dict]) -> List[dict]:
