@@ -141,6 +141,20 @@ class Settings(BaseSettings):
     GOOGLE_LOCATION: str = "europe-west1"
     GOOGLE_CREDS_PATH: str = "google_creds.json"
 
+    # ── Online price search (BOQ price chain, tier 3) ──────────────────────
+    # Consulted ONLY after the product catalogue and material_rates have no
+    # price for a line. Every lookup is cached and budgeted per BOQ run, and a
+    # failure (site down, no network) just moves on to the offline reference —
+    # a BOQ always completes.
+    ONLINE_PRICE_SEARCH_ENABLED: bool = True
+    # Comma-separated published price-list pages to read first.
+    ONLINE_PRICE_SEARCH_SOURCES: str = "https://www.landalyst.com/prices"
+    ONLINE_PRICE_SEARCH_TIMEOUT_SECONDS: float = 8.0
+    # Hard cap on live lookups per BOQ run (cache hits do not count).
+    ONLINE_PRICE_SEARCH_MAX_PER_RUN: int = 12
+    # How long a fetched online price may be reused (in-process + MongoDB).
+    ONLINE_PRICE_SEARCH_CACHE_HOURS: int = 168
+
     # OAuth (Phase 12)
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None

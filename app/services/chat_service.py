@@ -1,5 +1,5 @@
 """Chat Service - Conversational AI agent with tool execution."""
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import logging
 import uuid
 import json
@@ -669,6 +669,7 @@ GENERAL RESPONSE POLICY:
 11. CROSS-LOCATION RULE: If a tool returns offers for a different state/city than the user's (other_location is true), you may quote that verified price, but you MUST name its location explicitly (e.g. "verified FCT/Abuja rate of ₦11,500 per sheet") and make clear it is not a local price. Never present another location's price as the user's local price.
 12. TOOL USAGE RULE: Pass a plain product name to search_products and get_cheapest_price (e.g. "cement", "stone-coated roofing sheet"). Do NOT pass brand + grade + material combinations ("Dangote OPC cement") — pass the material and, if the user named a brand, that brand alone. Do not invent category names — an incorrect category returns zero results. If a search returns nothing, retry with a simpler product name before using the "no verified price" message.
 13. BROADENED-SEARCH RULE: when a tool result carries `relaxed_from`, the exact item was not found and the results are the closest alternatives. Say so plainly, then present the alternatives — for each one name the product, its price, the MARKETER (supplier) and the MARKET/location. Never say "we don't have it" or "no price available" while alternatives exist, and always name the alternative brand you are offering instead (e.g. "We don't stock Lafarge, but BUA and Dangote cement are available").
+14. ONE LOOKUP PER TURN: a price question gets at most ONE price lookup (get_cheapest_price or search_products) per turn. When the user asks about several brands or several items at once, look the material up ONCE (e.g. "cement") and answer from that single result — never fire one lookup per brand or per item. Repeat lookups return near-identical listings, waste tokens, and each one must never be presented as a separate answer: give ONE answer covering what the user asked, and say plainly which of the brands/items you do and do not stock.
 
 GREETING RULES:
 - Greetings ("hi", "hello", "good morning") get one short friendly line that also
@@ -998,7 +999,13 @@ class ToolExecutor:
             "sku": product.get("sku", ""),
         }
 
-    async def _get_cheapest_price(self, search: str, location: Optional[str] = None, limit: int = 3) -> dict:
+    async def _get_cheapest_price(
+        self,
+        search: str,
+        location: Optional[str] = None,
+        limit: int = 3,
+        only_verified: bool = False,
+    ) -> dict:
         """Cheapest catalog listing(s) for a product, with provenance.
 
         Backed by the same product catalogue the marketplace uses (not the
@@ -1006,11 +1013,20 @@ class ToolExecutor:
         can link to, plus the marketer (supplier business name), the market
         location and the supplier's minimum order quantity / shipping — making
         the unit rate and the MOQ-inclusive procurement total unambiguous.
+
+        `only_verified=True` restricts offers to active (verified) vendors. Chat
+        leaves it False — it quotes what the shopper asked for — while a checkout
+        path such as the BOQ cart sets it so no suspended vendor can be billed.
         """
         from app.schemas.product import ProductFilter
         page_size = max(limit * 4, 20)
         filters = ProductFilter(search=search, sort_by="price", sort_order="asc")
-        result = await self.product_service.list_products(filters=filters, page=1, page_size=page_size)
+        # Only pass the gate when it is actually needed, so every existing chat
+        # call keeps hitting list_products with exactly the same arguments.
+        list_kwargs: dict = {"filters": filters, "page": 1, "page_size": page_size}
+        if only_verified:
+            list_kwargs["only_verified"] = True
+        result = await self.product_service.list_products(**list_kwargs)
         products = result.get("products", [])
         matched_query = search
 
@@ -1019,7 +1035,10 @@ class ToolExecutor:
         if not products:
             for alt in self._retry_terms(search, await self._known_brand_tokens()):
                 alt_result = await self.product_service.list_products(
-                    filters=filters.model_copy(update={"search": alt}), page=1, page_size=page_size
+                    filters=filters.model_copy(update={"search": alt}),
+                    page=1,
+                    page_size=page_size,
+                    only_verified=only_verified,
                 )
                 if alt_result.get("products"):
                     products = alt_result.get("products", [])
@@ -1058,6 +1077,12 @@ class ToolExecutor:
                 "city": location or "",
                 "price_source": "catalogue",
                 "verified": bool(p.get("status") == "active"),
+                # Product status gates "can this be bought right now"; rating and
+                # verified-product badge rank otherwise equally cheap offers.
+                "status": p.get("status", ""),
+                "rating": round(float(p.get("rating") or 0), 2),
+                "is_verified": bool(p.get("is_verified")),
+                "review_count": int(p.get("review_count") or 0),
             })
 
         # The catalogue sorts on base_price; re-rank on the effective price.
@@ -1585,6 +1610,7 @@ class ChatService:
         cart_claim_retry = 0
         cart_fail_retry = 0
         partial_add_retry = 0
+        ai_call_retry = 0
         for turn in range(max_turns):
             try:
                 response = await self.ai_service.chat_completion(
@@ -1594,16 +1620,26 @@ class ChatService:
 
             except Exception as e:
                 logger.error(f"AI service error (turn {turn}): {e}")
-                # Return a helpful fallback instead of a generic error
-                return ChatResponse(
-                    reply=(
-                        "I'm sorry, I'm having trouble processing that right now. "
-                        "Could you try rephrasing your question? I can help with:\n"
-                        "• Material prices and product searches\n"
-                        "• Construction advice and project guidance\n"
-                        "• Comparing suppliers and finding alternatives"
-                    ),
-                    conversation_id=conversation_id,
+                if ai_call_retry < 1:
+                    # One retry absorbs a transient network/timeout blip.
+                    ai_call_retry += 1
+                    logger.warning("Retrying the AI call once (turn %s)", turn)
+                    continue
+                return await self._ai_failure_response(
+                    conversation_id, tool_results_list, messages, user_id
+                )
+
+            # A failed provider call comes back flagged (the service degrades to
+            # canned text instead of raising): retry once, then answer from the
+            # tool results rather than showing the shopper a bare apology over
+            # prices we already have.
+            if getattr(response, "is_error", False):
+                if ai_call_retry < 1:
+                    ai_call_retry += 1
+                    logger.warning("AI call reported an error; retrying once (turn %s)", turn)
+                    continue
+                return await self._ai_failure_response(
+                    conversation_id, tool_results_list, messages, user_id
                 )
 
             choice = response.choices[0] if response.choices else None
@@ -1880,6 +1916,102 @@ class ChatService:
             parts.append(f"error: {str(result['error'])[:120]}")
         return "; ".join(parts)[:1000]
 
+    async def _ai_failure_response(
+        self,
+        conversation_id: str,
+        tool_results: List[dict],
+        messages: List[dict],
+        user_id: Optional[str] = None,
+    ) -> ChatResponse:
+        """Answer when the model is unreachable even after the one retry.
+
+        Whatever the tools returned is still true, so it is shown as cards plus
+        a plain summary instead of a bare apology that hides the prices we have.
+        With no tool results the canned apology is kept. The reply is stored as
+        the assistant turn so the next question sees what the shopper saw.
+        """
+        reply = self._prices_found_reply(tool_results)
+        if not reply:
+            response = ChatResponse(
+                reply=(
+                    "I'm sorry, I'm having trouble processing that right now. "
+                    "Could you try rephrasing your question? I can help with:\n"
+                    "• Material prices and product searches\n"
+                    "• Construction advice and project guidance\n"
+                    "• Comparing suppliers and finding alternatives"
+                ),
+                conversation_id=conversation_id,
+            )
+        else:
+            response = ChatResponse(
+                reply=reply,
+                conversation_id=conversation_id,
+                cards=self._build_cards(tool_results),
+                has_tool_results=True,
+            )
+
+        messages.append({"role": "assistant", "content": response.reply})
+        await self._save_history(conversation_id, messages, user_id)
+        return response
+
+    @staticmethod
+    def _offer_line(offer: dict) -> str:
+        """One readable bullet for an offer: name, price per unit, where."""
+        line = f"• {offer.get('product_name') or 'Listing'}"
+        rate = offer.get("rate")
+        if isinstance(rate, (int, float)):
+            line += f" — ₦{rate:,.0f} per {offer.get('unit') or 'unit'}"
+        where = offer.get("market") or offer.get("city")
+        if where:
+            line += f" at {where}"
+        return line
+
+    @staticmethod
+    def _prices_found_reply(tool_results: List[dict]) -> Optional[str]:
+        """Plain "here is what I found" summary built only from tool results.
+
+        Used when the AI call failed, so every line is taken verbatim from a
+        tool result — no price is ever invented, and the shopper still gets an
+        answer. Returns None when there is nothing worth showing.
+        """
+        price_tools = ("get_cheapest_price", "compare_prices", "get_price_range", "get_price_history")
+        try:
+            lines: List[str] = []
+            for tr in tool_results:
+                result = tr.get("result")
+                if not isinstance(result, dict):
+                    continue
+                tool = tr.get("tool", "")
+                query = result.get("search") or result.get("matched_query") or result.get("description")
+                offers = [o for o in (result.get("offers") or []) if isinstance(o, dict)]
+                if offers and tool in price_tools:
+                    lines.append(
+                        f"Here are the prices I found for '{query}':" if query
+                        else "Here are the prices I found:"
+                    )
+                    lines.extend(ChatService._offer_line(o) for o in offers[:3])
+                    continue
+                # A tool that found nothing still explains why (no catalogue
+                # match, thin data) — echoing that beats a bare apology.
+                if result.get("explanation"):
+                    lines.append(f"• {str(result['explanation'])[:300]}")
+                    continue
+                # Non-price tools (cart, order, project memory) carry their own
+                # confirmation text; echoing it is still truthful.
+                if result.get("message"):
+                    lines.append(f"• {str(result['message'])[:300]}")
+            if not lines:
+                return None
+            lines = lines[:10]
+            lines.append(
+                "I couldn't finish writing that up just now — ask me again if you'd "
+                "like the full breakdown."
+            )
+            return "\n".join(lines)
+        except Exception as e:  # never let the fallback itself become the error
+            logger.warning(f"Failed to summarise tool results for the fallback reply: {e}")
+            return None
+
     async def _save_history(
         self,
         conversation_id: str,
@@ -1945,7 +2077,9 @@ class ChatService:
                     data={"tool": tool, "description": result.get("description"),
                           "city": result.get("city"),
                           "source": result.get("source"),
-                          "verified": result.get("verified", False),
+                          # Left blank unless our own database asserted it — a
+                          # negative flag is never shipped to the client.
+                          "verified": result.get("verified"),
                           "insufficient_data": result.get("insufficient_data", False),
                           "offers": result.get("offers"),
                           "range": result.get("range"),
@@ -1969,7 +2103,7 @@ class ChatService:
                         "market": offer.get("market"),
                         "minimum_order_quantity": offer.get("minimum_order_quantity"),
                         "price_source": offer.get("price_source") or result.get("source"),
-                        "verified": offer.get("verified", result.get("verified", False)),
+                        "verified": offer.get("verified", result.get("verified")),
                         "confidence": offer.get("confidence"),
                         "last_verified_at": offer.get("last_verified_at"),
                     })
@@ -2051,7 +2185,36 @@ class ChatService:
                           "message": result.get("message"), "items": result.get("items")},
                 ))
 
-        return cards if cards else None
+        # One card per card type per turn: a model that fans out into several
+        # lookups (e.g. one per brand) must not stack near-identical cards in
+        # the transcript. The most exact match wins — a lookup that hit the
+        # query outright beats a broadened/relaxed one or an estimate; equal
+        # results keep the first, which is what the reply answers from.
+        best_by_type: Dict[str, ChatCard] = {}
+        for card in cards:
+            current = best_by_type.get(card.type)
+            if current is None or self._card_exactness(card) > self._card_exactness(current):
+                best_by_type[card.type] = card
+
+        return list(best_by_type.values()) if best_by_type else None
+
+    @staticmethod
+    def _card_exactness(card: ChatCard) -> Tuple[int, int, int]:
+        """Rank a card by how exactly its lookup matched what was asked.
+
+        Compared lexicographically, highest wins:
+          1. real data beats an insufficient-data estimate,
+          2. an unrelaxed lookup beats one broadened to find anything,
+          3. a query that matched verbatim beats a near-miss.
+        """
+        data = card.data or {}
+        matched = str(data.get("matched_query") or "").strip().lower()
+        search = str(data.get("search") or "").strip().lower()
+        return (
+            0 if data.get("insufficient_data") else 1,
+            0 if data.get("relaxed_from") else 1,
+            1 if matched and matched == search else 0,
+        )
 
     @staticmethod
     def _product_candidates(tool_results: List[dict]) -> List[dict]:

@@ -16,7 +16,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
-from app.services.price_service import normalize_state
+from app.services.price_service import LIVE_SOURCE, PROMOTED_SOURCE, normalize_state
 
 logger = logging.getLogger(__name__)
 
@@ -138,14 +138,40 @@ class ProcurementIntelligenceService:
                 ),
             }
 
-        # Flagged AI-estimate fallback (never presented as verified).
-        estimate = await PriceService().get_rate(description, city)
+        # DB-less fallbacks, tried in order: the product catalogue/market rates
+        # this service already had a session for, then the current best online
+        # price, then the observed online average price, then a flagged AI
+        # estimate. Only the first two are ever presented as verified.
+        estimate = await PriceService(pg_db=self.pg_db).get_rate(description, city)
         if estimate:
             unit = float(estimate["rate"])
             total = round(quantity * unit, 2)
+            fallback_source = (
+                estimate.get("price_source") or estimate.get("source") or "ai_estimate"
+            )
+            if fallback_source == PROMOTED_SOURCE:
+                explanation = (
+                    f"BurnCost does not currently have a vendor-verified price for "
+                    f"'{description}' in {city}. The figure shown is an online average "
+                    "price so a total can still be computed. A demand "
+                    "alert will be raised for suppliers to provide real prices."
+                )
+            elif fallback_source == LIVE_SOURCE:
+                explanation = (
+                    f"BurnCost does not currently have a vendor-verified price for "
+                    f"'{description}' in {city}. The figure shown is the current best "
+                    "price found online so a total can still be computed. "
+                    "A demand alert will be raised for suppliers to provide real prices."
+                )
+            else:
+                explanation = (
+                    f"BurnCost does not currently have a verified price for '{description}' "
+                    f"in {city}. The figure shown is an AI estimate so a "
+                    "total can still be computed. A demand alert will be raised for "
+                    "suppliers to provide real prices."
+                )
             return {
-                "source": "ai_estimate",
-                "verified": False,
+                "source": fallback_source,
                 "confidence": estimate.get("confidence", 0.3),
                 "description": description,
                 "city": city,
@@ -154,23 +180,16 @@ class ProcurementIntelligenceService:
                     "rate": unit,
                     "unit": estimate.get("unit", ""),
                     "product_name": estimate.get("product_name", description),
-                    "price_source": "ai_estimate",
-                    "verified": False,
+                    "price_source": fallback_source,
                     "total_procurement_cost": total,
                 }],
                 "best_price": total,
                 "insufficient_data": True,
-                "explanation": (
-                    f"BurnCost does not currently have a verified price for '{description}' "
-                    f"in {city}. The figure shown is an AI estimate (unverified) so a "
-                    "total can still be computed. A demand alert will be raised for "
-                    "suppliers to provide real prices."
-                ),
+                "explanation": explanation,
             }
 
         return {
             "source": "unavailable",
-            "verified": False,
             "description": description,
             "city": city,
             "offers": [],
@@ -450,7 +469,6 @@ class ProcurementIntelligenceService:
                     "market_rate": None,
                     "status": "unverified",
                     "price_source": "unavailable",
-                    "verified": False,
                 })
                 estimated_items.append({
                     "description": description,
@@ -458,7 +476,7 @@ class ProcurementIntelligenceService:
                     "unit": line.get("unit", ""),
                 })
 
-        # Raise demand alerts for unverified items.
+        # Raise demand alerts for lines with no comparable DB price.
         demand_alerts = 0
         if estimated_items and self.pg_db is not None:
             from app.services.price_service import PriceService
@@ -496,7 +514,8 @@ class ProcurementIntelligenceService:
             "price_anomalies_persisted": persisted_flags,
             "explanation": (
                 "Flags are based on verified DB prices only. "
-                "Items without sufficient DB comparison data are marked unverified, not inflated."
+                "Lines without a comparable DB price are reported as "
+                "unmeasured rather than inflated."
             ),
         }
 

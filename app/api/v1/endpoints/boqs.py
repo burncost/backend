@@ -18,6 +18,7 @@ from app.core.database import get_mongodb, get_db
 from app.core.ratelimit import rate_limit
 from app.repositories.boq_repository import BOQRepository
 from app.services.boq_generator import BOQGenerator
+from app.services.boq_cart_service import BOQCartService
 from app.services.mitm_engine import MITMEngine
 from app.services.price_service import PriceService
 from app.services.token_service import TokenService
@@ -33,6 +34,7 @@ from app.schemas.boq import (
     DrawingQuality,
     BOQOrderRequest,
     BOQOrderResponse,
+    BOQCartRequest,
 )
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1267,3 +1269,59 @@ async def delete_boq(
     
     await boq_repo.delete(boq_id)
     return None
+
+
+### Resolve a BOQ's material lines to verified vendor offers (cart preview)
+@router.post("/cart-preview")
+async def preview_boq_cart(
+    request: BOQCartRequest,
+    current_user: Optional[User] = Depends(get_optional_user),
+    db = Depends(get_mongodb),
+    pg_db: AsyncSession = Depends(get_db),
+):
+    """Rank a bill's purchasable lines by verified vendor, availability and price.
+
+    Read-only: nothing is written here. The client adds the lines it keeps through
+    the existing `/cart/add` endpoint (see the frontend `cartStore`), so guests
+    fill their on-device cart and signed-in shoppers their account cart — the same
+    path the marketplace and chat already use.
+
+    Vendors are gated on being active/verified with enough stock for the required
+    quantity; among those, a supplier rated 3.5+ is preferred and the cheapest
+    landed cost wins, with the next best offers returned as alternates.
+    """
+    boq = request.boq
+    if boq is None:
+        if not request.boq_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide either boq_id or the boq payload.",
+            )
+        doc = await BOQRepository(db).get_by_id(request.boq_id)
+        if not doc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="BOQ not found",
+            )
+        # A stored bill is only resolvable by the account that owns it.
+        owner = doc.get("createdBy")
+        if current_user is not None and owner and str(owner) != str(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not your BOQ",
+            )
+        boq = doc.get("boqData") or doc
+
+    service = BOQCartService(pg_db)
+    try:
+        return await service.resolve(
+            boq,
+            city=request.city or "",
+            limit_offers=max(0, min(request.limit_offers, 10)),
+        )
+    except Exception as exc:
+        logger.error("BOQ cart resolution failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not match vendors for this bill right now. Please try again.",
+        )

@@ -87,7 +87,7 @@ class AIService:
 
     def __init__(self):
         self.client = get_gemini_client()
-        self.model = "gemini-2.5-flash"
+        self.model = "gemini-3.6-flash"
 
     async def analyze_document(
         self,
@@ -177,7 +177,7 @@ class ChatAIService:
 
     def __init__(self):
         self.client = get_gemini_client()
-        self.model = "gemini-2.5-flash"
+        self.model = "gemini-3.6-flash"
 
     async def chat_completion(
         self,
@@ -221,12 +221,15 @@ class ChatAIService:
 
         except google_exceptions.GoogleAPIError as exc:
             logger.exception("Gemini API error (chat_completion): code=%s, details=%s", exc.code, exc.message)
+            # is_error tells the caller this is a failure, not model prose: it
+            # retries once and then answers from whatever the tools returned.
             return _DuckResponse(
                 choices=[_DuckChoice(message=_DuckMessage(
                     content="I'm sorry, our AI assistant is temporarily unavailable. Please try again shortly.",
                     tool_calls=None,
                 ))],
                 usage=_DuckUsage(total_tokens=0, prompt_tokens=0, completion_tokens=0),
+                is_error=True,
             )
         except Exception as exc:
             logger.exception("Unexpected error in ChatAIService.chat_completion: %s", exc)
@@ -236,6 +239,7 @@ class ChatAIService:
                     tool_calls=None,
                 ))],
                 usage=_DuckUsage(total_tokens=0, prompt_tokens=0, completion_tokens=0),
+                is_error=True,
             )
 
     # ── Internal helpers ─────────────────────────────────────────────────
@@ -332,9 +336,11 @@ class ChatAIService:
         """Wrap a Gemini response in a duck-typed OpenAI-like object."""
         candidate = gemini_response.candidates[0] if gemini_response.candidates else None
         if not candidate:
+            # An empty candidate is a transient model hiccup, not an answer.
             return _DuckResponse(
                 choices=[_DuckChoice(message=_DuckMessage(content="", tool_calls=None))],
                 usage=_DuckUsage(total_tokens=0, prompt_tokens=0, completion_tokens=0),
+                is_error=True,
             )
 
         content = candidate.content
@@ -409,6 +415,10 @@ class _DuckUsage:
 
 
 class _DuckResponse:
-    def __init__(self, choices: List[_DuckChoice], usage: _DuckUsage):
+    def __init__(self, choices: List[_DuckChoice], usage: _DuckUsage, is_error: bool = False):
         self.choices = choices
         self.usage = usage
+        # True only when the call failed (API/network/empty candidate) rather
+        # than the model producing text. Callers use it to retry once and to
+        # fall back to a tool-backed answer instead of the canned apology.
+        self.is_error = is_error

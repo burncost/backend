@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.schemas.boq import BOQGenerationRequest
 from app.services.boq_file_parser import group_items_by_element, parse_boq_file
 from app.services.mitm_engine import MITMEngine
-from app.services.price_service import PriceService, PriceTruthService
+from app.services.price_service import DB_SOURCES, PriceService, PriceTruthService
 from app.services.gemini_client import get_gemini_client
 from app.config import settings
 
@@ -64,6 +64,125 @@ _UNIT_ALIASES: Dict[str, str] = {
 _M2_TO_BLOCK_FACTOR = 9.9
 _BLOCK_CATALOGUE_HINTS = ("block",)
 _WALLING_HINTS = ("blockwork", "block wall", "sandcrete", "wall")
+
+# Which Python take-off value owns a bill line's quantity. Rules are evaluated in
+# order and the first match wins, so the more specific descriptions come first.
+#   units     — normalised units the rule applies to (empty = any)
+#   all_hints — every one of these must appear in the description
+#   any_hints — at least one must appear
+#   anti      — the rule is skipped when any of these appears
+#   factor    — converts the take-off value to the bill's unit (e.g. tonnes→kg)
+# A line matching no rule keeps the model's own quantity and is labelled
+# `quantity_source="ai"` (see BOQGenerator._apply_python_quantities).
+_PYTHON_QUANTITY_RULES: Tuple[Dict[str, Any], ...] = (
+    # Blockwork: the bill measures the wall, the catalogue sells blocks.
+    {
+        "key": "external_blocks_225mm",
+        "units": {"nr"},
+        "all_hints": ("block",),
+        "any_hints": ("225", "9 inch", "9-inch", "9in", "external"),
+        "anti": ("150", "6 inch", "6-inch", "6in", "internal"),
+    },
+    {
+        "key": "internal_blocks_150mm",
+        "units": {"nr"},
+        "all_hints": ("block",),
+        "any_hints": ("150", "6 inch", "6-inch", "6in", "internal"),
+    },
+    {"key": "blocks_total_nr", "units": {"nr"}, "all_hints": ("block",)},
+    {"key": "net_wall_area_m2", "units": {"m2"}, "all_hints": ("block",)},
+    # Tiling — floor first, then walls, then a generic m² fallback.
+    {
+        "key": "floor_tiles_m2",
+        "units": {"m2"},
+        "any_hints": ("floor tile", "floor tiles", "floor tiling", "tiles to floor"),
+    },
+    {
+        "key": "wall_tiles_m2",
+        "units": {"m2"},
+        "any_hints": ("wall tile", "wall tiles", "wall tiling", "tiles to wall"),
+    },
+    {"key": "floor_tiles_m2", "units": {"m2"}, "all_hints": ("tile",)},
+    {
+        "key": "floor_tile_boxes",
+        "units": {"nr", "box", "carton", "pack"},
+        "all_hints": ("tile",),
+        "any_hints": ("box", "carton", "pack"),
+    },
+    # Roof structure and covering.
+    {"key": "roof_purlin_m", "units": {"m"}, "all_hints": ("purlin",)},
+    {"key": "roof_rafter_m", "units": {"m"}, "any_hints": ("rafter", "truss")},
+    {"key": "roof_truss_count", "units": {"nr"}, "any_hints": ("truss",)},
+    {
+        "key": "roof_covering_m2",
+        "units": {"m2"},
+        "all_hints": ("roof",),
+        "any_hints": (
+            "sheet", "covering", "long span", "longspan", "aluminium",
+            "aluminum", "stone coated", "stone-coated", "shingle",
+        ),
+    },
+    {"key": "roof_ceiling_m2", "units": {"m2"}, "any_hints": ("ceiling", "pop")},
+    # Substructure.
+    {"key": "foundation_excavation_m3", "units": {"m3"}, "all_hints": ("excavat",)},
+    {"key": "foundation_hardcore_m3", "units": {"m3"}, "all_hints": ("hardcore",)},
+    {"key": "foundation_blinding_m3", "units": {"m3"}, "all_hints": ("blind",)},
+    {"key": "foundation_dpm_m2", "units": {"m2"}, "any_hints": ("damp proof", "dpm", "d.p.m")},
+    {"key": "slab_concrete_m3", "units": {"m3"}, "all_hints": ("slab",)},
+    {
+        "key": "foundation_concrete_m3",
+        "units": {"m3"},
+        "all_hints": ("concrete",),
+        "any_hints": ("foundation", "footing", "pad base", "raft", "strip"),
+    },
+    # Reinforcement, finishes.
+    {
+        "key": "estimated_rebar_kg",
+        "units": {"kg"},
+        "any_hints": ("reinforcement", "rebar", "y12", "y16", "iron rod", "steel bar"),
+    },
+    {
+        "key": "estimated_rebar_kg",
+        "units": {"tonne"},
+        # The take-off is in kg, so a bill measured in tonnes divides by 1000
+        # (e.g. 3 000 kg of take-off = 3.0 t on the bill).
+        "factor": 0.001,
+        "any_hints": ("reinforcement", "rebar", "y12", "y16", "iron rod", "steel bar"),
+    },
+    {"key": "wall_finish_area_m2", "units": {"m2"}, "any_hints": ("plaster", "render", "skim")},
+    {"key": "floor_finish_area_m2", "units": {"m2"}, "all_hints": ("screed",)},
+    {
+        "key": "wall_finish_area_m2",
+        "units": {"m2"},
+        "any_hints": ("paint", "emulsion", "gloss", "texture"),
+    },
+)
+
+
+def _python_quantity_for(item: Dict[str, Any]) -> Optional[Tuple[str, float]]:
+    """Take-off key (and unit factor) that owns this bill line, or None.
+
+    Matching is on the description text plus the normalised unit, because a
+    Nigerian bill measures the *work* ("blockwork in 225mm wall, m2") while the
+    catalogue sells the *material* ("9-inch sandcrete block, nr").
+    """
+    description = str(item.get("description") or "").lower()
+    unit = _normalise_unit(str(item.get("unit") or ""))
+
+    for rule in _PYTHON_QUANTITY_RULES:
+        units = rule.get("units") or set()
+        if units and unit not in units:
+            continue
+        if any(term in description for term in rule.get("anti", ())):
+            continue
+        if not all(term in description for term in rule.get("all_hints", ())):
+            continue
+        any_hints = rule.get("any_hints", ())
+        if any_hints and not any(term in description for term in any_hints):
+            continue
+        return rule["key"], float(rule.get("factor", 1.0))
+
+    return None
 
 # Nigerian material rates for the same item do not differ by an order of
 # magnitude; a bigger gap almost always means the match paired the wrong
@@ -760,9 +879,9 @@ class BOQGenerator:
                     distinct.append(_lookup_text(item))
 
             lookup_targets = distinct[:_MAX_RATE_LOOKUPS]
-            # Verified DB rates only. `get_rate` would fall back to an AI
-            # estimate, and an estimate must never be what a rate check reports
-            # as "the market rate" — it is also a network call per line.
+            # Verified DB rates only. `get_rate` would fall back to an online
+            # price or an AI estimate, and neither may be what a rate check
+            # reports as "the market rate" — it is also a network call per line.
             price_truth = PriceTruthService(self.price_service)
             gate = asyncio.Semaphore(_MAX_CONCURRENT_RATE_LOOKUPS)
 
@@ -832,7 +951,8 @@ class BOQGenerator:
             if len(distinct) > len(lookup_targets):
                 warnings.append(
                     f"Compared the first {len(lookup_targets)} distinct descriptions; "
-                    f"{len(distinct) - len(lookup_targets)} more were left unverified."
+                    f"{len(distinct) - len(lookup_targets)} more were checked without a "
+                    "comparable rate."
                 )
             analysis["verified_count"] = sum(
                 1 for v in analysis["verified_items"] if v["status"] != "unverified"
@@ -888,7 +1008,8 @@ class BOQGenerator:
                 "message": (
                     f"Verified {len(parsed_items)} items. "
                     f"{inflated_count} inflated, {fair_count} fair, "
-                    f"{len(parsed_items) - inflated_count - fair_count} unverified."
+                    f"{len(parsed_items) - inflated_count - fair_count} without a "
+                    "comparable rate."
                 ),
             }
 
@@ -962,7 +1083,7 @@ Return ONLY valid JSON with this structure:
 }}"""
 
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 contents=[prompt],
                 config=genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -993,12 +1114,21 @@ Return ONLY valid JSON with this structure:
             estimated_items = []
 
             for item in result.get("items", []):
-                db_rate = await self.price_service.get_rate(item["description"])
+                db_rate = await self.price_service.get_rate(
+                    item["description"], unit=item.get("unit")
+                )
                 quoted_rate = float(item.get("quoted_rate", 0))
                 if db_rate and db_rate.get("rate"):
+                    source = db_rate.get("price_source", "database")
                     item["market_rate"] = db_rate["rate"]
-                    item["price_source"] = db_rate.get("price_source", "database")
-                    item["verified"] = db_rate.get("verified", True)
+                    item["price_source"] = source
+                    # Only our own DB sources assert verification. A rate that
+                    # arrives without the flag (live online / online average /
+                    # AI estimate) is priced but never claimed as verified, so it
+                    # can never produce an inflation flag.
+                    item["verified"] = bool(
+                        db_rate.get("verified", source in DB_SOURCES)
+                    )
                     item["confidence"] = db_rate.get("confidence", 1.0)
                     total_market += item["quantity"] * db_rate["rate"]
                     if item["verified"]:
@@ -1024,7 +1154,6 @@ Return ONLY valid JSON with this structure:
                 else:
                     item["market_rate"] = None
                     item["status"] = "unverified"
-                    item["verified"] = False
                     item["price_source"] = "unavailable"
                     unverified_count += 1
 
@@ -1093,6 +1222,11 @@ Return ONLY valid JSON with this structure:
         # rejection threshold) — surfaced so the bill is not treated as final.
         missing_groups = boq.pop("_missing_element_groups", []) or []
 
+        # Arithmetic is Python's: swap the draft's quantities for the engine's
+        # take-off BEFORE anything is priced, so every amount and the contract sum
+        # come from the engine's own numbers (see _apply_python_quantities).
+        quantity_stats = self._apply_python_quantities(boq["elements"], enriched)
+
         city = enriched["project_info"]["city"]
         enriched_elements, discrepancies, out_of_stock = await self.price_service.enrich_boq_elements(
             boq["elements"], city
@@ -1106,7 +1240,9 @@ Return ONLY valid JSON with this structure:
         if drawing_extracted:
             for element in enriched_elements:
                 for item in element.get("items", []):
-                    item["quantity_source"] = "drawing"
+                    # The engine's take-off outranks a figure read off the drawing.
+                    if item.get("quantity_source") != "python":
+                        item["quantity_source"] = "drawing"
 
         boq["elements"] = enriched_elements
         boq["drawing_extracted"] = drawing_extracted
@@ -1195,11 +1331,67 @@ Return ONLY valid JSON with this structure:
                 "The AI BOQ omitted these element groups: "
                 f"{', '.join(missing_groups)} — review before issuing the bill."
             )
+        # Quantity provenance: how much of the bill the engine measured itself.
+        boq["quantity_provenance"] = {
+            "python": quantity_stats["applied"],
+            "ai": len(quantity_stats["ai_kept"]),
+        }
+        if quantity_stats["ai_kept"]:
+            boq["warnings"].append(
+                f"{quantity_stats['applied']} quantities were measured by the take-off "
+                f"engine; {len(quantity_stats['ai_kept'])} lines had no take-off value and "
+                "keep the draft's own figures — check these before issuing the bill."
+            )
         boq["generation_method"] = "template" if fallback_reason else "ai"
         boq["generated_at"] = datetime.utcnow().isoformat()
         boq["project_info"] = enriched["project_info"]
 
         return boq
+
+    def _apply_python_quantities(
+        self, elements: List[Dict], enriched: Dict
+    ) -> Dict[str, Any]:
+        """Replace bill quantities with the application's own take-off.
+
+        The model supplies structure and specification only. Every line that maps
+        to a take-off value has its quantity overwritten here — before pricing —
+        so the amounts and the contract sum are always derived from the engine's
+        numbers. The model's own figure is preserved as `ai_quantity` for audit.
+        Lines with no take-off value keep the model's quantity and are labelled
+        `quantity_source="ai"`, so a QS can see exactly which figures to check.
+
+        Returns {"applied": n, "ai_kept": [descriptions]} for the caller to
+        report.
+        """
+        derived = enriched.get("derived_quantities") or {}
+        applied = 0
+        ai_kept: List[str] = []
+
+        for element in elements or []:
+            for item in element.get("items") or []:
+                match = _python_quantity_for(item) if derived else None
+                value: Optional[float] = None
+                if match:
+                    raw = derived.get(match[0])
+                    try:
+                        value = float(raw) if raw is not None else None
+                    except (TypeError, ValueError):
+                        value = None
+
+                if value is None or value <= 0:
+                    # No take-off value for this line: keep the draft's figure,
+                    # but label it so the provenance is never ambiguous.
+                    if not item.get("quantity_source"):
+                        item["quantity_source"] = "ai"
+                    ai_kept.append(str(item.get("description") or "")[:70])
+                    continue
+
+                item["ai_quantity"] = item.get("quantity")
+                item["quantity"] = round(value * match[1], 2)
+                item["quantity_source"] = "python"
+                applied += 1
+
+        return {"applied": applied, "ai_kept": ai_kept}
 
     # AI generation
 
@@ -1211,11 +1403,16 @@ Return ONLY valid JSON with this structure:
         from app.services.gemini_client import get_gemini_client
 
         client = get_gemini_client()
-        prompt = self._build_boq_prompt(request, enriched)
+        # Verified DB rates go in as context only — the model names the
+        # specification, the price service does every calculation afterwards.
+        catalogue_context = await self.price_service.get_catalogue_context_for_prompt(
+            enriched["project_info"]["city"]
+        )
+        prompt = self._build_boq_prompt(request, enriched, catalogue_context)
 
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 contents=[prompt],
                 config=genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -1297,6 +1494,15 @@ Return ONLY valid JSON with this structure:
                     item["item_code"] = item.get("itemCode") or ""
                 if not item.get("quantity_source") and item.get("quantitySource"):
                     item["quantity_source"] = item["quantitySource"]
+        # New QS sections the model may echo back in camelCase.
+        for camel, snake in (
+            ("buildingSummary", "building_summary"),
+            ("materialEstimates", "material_estimates"),
+            ("variationOptions", "variation_options"),
+            ("narrativeMarkdown", "narrative_markdown"),
+        ):
+            if camel in boq and snake not in boq:
+                boq[snake] = boq.pop(camel)
         return boq
 
     @staticmethod
@@ -1307,8 +1513,19 @@ Return ONLY valid JSON with this structure:
         )
         return [group for group in REQUIRED_AI_ELEMENTS if group not in names]
 
-    def _build_boq_prompt(self, request: BOQGenerationRequest, enriched: Dict) -> str:
-        """Build the BOQ generation prompt with Nigerian standards."""
+    def _build_boq_prompt(
+        self,
+        request: BOQGenerationRequest,
+        enriched: Dict,
+        catalogue_context: str = "",
+    ) -> str:
+        """Build the BOQ generation prompt with Nigerian standards.
+
+        `catalogue_context` is the verified DB rate list (see
+        `PriceService.get_catalogue_context_for_prompt`) that fills the prompt's
+        price-list section. It defaults to empty so callers that only read the
+        shape of the prompt keep working.
+        """
         import json as j
 
         derived = enriched.get("derived_quantities", {})
@@ -1317,6 +1534,36 @@ Return ONLY valid JSON with this structure:
 
         return f"""You are a professional Quantity Surveyor registered with NIQS (Nigerian Institute of Quantity Surveyors).
 Generate a detailed Bill of Quantities (BOQ) in JSON format following the Nigerian SMM7 standard.
+
+YOUR BRIEF — cover every section below and return each one as part of the JSON:
+1. PROJECT / BUILDING SUMMARY — what is being built: bedrooms, functional spaces, footprint
+   area (m2) and layout notes, in the `building_summary` object.
+2. MATERIAL ESTIMATION — the material schedule the design implies, in
+   `material_estimates`. The DERIVED QUANTITIES block below was computed by the
+   application's measuring engine: use those figures verbatim. Never recompute,
+   re-round or re-derive a quantity.
+3. VARIATION & OPTIONS ANALYSIS — the design's own specification is the measured bill;
+   then list the alternatives a client weighs in `variation_options`: foundation
+   A strip / B raft / C pad and ground beam, and roofing A long-span aluminium /
+   B stone-coated steel. Indicative quantities only — the application prices them.
+4. COST CALCULATIONS — every rate comes from the VERIFIED DATABASE PRICE LIST below.
+   Name the catalogue specification in `description` so the item can be matched, and
+   leave `rate` at 0. The application computes each rate, amount, sub-total, contingency,
+   overheads, VAT and the total contract sum.
+5. GEOTECHNICAL RECOMMENDATIONS — in `geotechnical`, give the likely soil conditions for
+   the location, the foundation option you recommend (A, B or C) and the reason.
+6. NARRATIVE REPORT — in `narrative_markdown`, write the client-facing report with bold
+   headers and Markdown tables (summary, material schedule, variation comparison, cost
+   commentary, geotechnical note). Copy quantities and costs out of this same JSON; never
+   compute them.
+
+ARITHMETIC RULE (MOST IMPORTANT): all calculation is performed by the application, not by
+you. Never compute, sum, average, convert, add wastage to, or estimate any quantity, area,
+volume, weight, percentage or money value. Report the figures you are given, and leave
+every monetary field at 0.
+
+VERIFIED DATABASE PRICE LIST:
+{catalogue_context}
 
 PROJECT INFORMATION:
 - Title: {request.project_info.project_title}
@@ -1334,7 +1581,8 @@ IMPORTANT RULES:
 1. Do NOT provide market rates/prices. Generate quantities and specifications ONLY.
    Prices are added separately from verified database rates by the price enrichment service.
    If a price is unavoidable in an item, set rate=0 — do not estimate or invent prices.
-2. Apply these wastage factors: blocks 5%, concrete 5%, tiles 10%, roofing 12%, reinforcement 5%
+2. Wastage factors: blocks 5%, concrete 5%, tiles 10%, roofing 12%, reinforcement 5%. They
+   are already applied inside DERIVED QUANTITIES — quote those figures exactly as given.
 3. Structure the BOQ in this Nigerian standard order:
    - Preliminaries (site setup, insurance, scaffolding)
    - Substructure (excavation, hardcore, blinding, foundation concrete, DPC, ground slab)
@@ -1346,13 +1594,39 @@ IMPORTANT RULES:
    - Plumbing & Drainage (water supply, sanitary fittings, drainage)
    - Electrical (conduit, wiring, light fittings, sockets, DB)
    - External Works (fence, gate, paving, borehole if applicable)
-4. Include contingency (10%), overheads & profit (10%), VAT (7.5%) in summary
-5. Provide cost scenarios: low (90%), expected (100%), high (110%)
+4. Contingency (10%), overheads & profit (10%) and VAT (7.5%) are applied by the
+   application — describe them in `assumptions` / `notes`, never calculate them.
+5. Cost scenarios low (90%), expected (100%) and high (110%) are calculated by the
+   application from the priced bill.
+6. All arithmetic belongs to the application. Never compute a quantity, total, percentage,
+   wastage, unit conversion or cost — repeat the take-off figures you were given.
+7. `quantity_source` must record who measured the line: "python" for a figure taken from
+   DERIVED QUANTITIES, "drawing" for one read off the drawing, "user" for an entered
+   figure, and "ai" only for a line with no take-off figure available.
 
 Return ONLY valid JSON with this exact structure:
 {{
   "projectTitle": string,
   "generatedAt": "ISO datetime",
+  "building_summary": {{
+    "bedrooms": number,
+    "functional_spaces": [string],
+    "footprint_m2": number,
+    "layout_notes": string
+  }},
+  "material_estimates": {{
+    "<material>": {{ "quantity": number, "unit": string, "source": "python" | "ai" }}
+  }},
+  "variation_options": {{
+    "foundation": {{ "A": object, "B": object, "C": object }},
+    "roofing": {{ "A": object, "B": object }}
+  }},
+  "geotechnical": {{
+    "soil_conditions": [string],
+    "recommended_foundation": "A" | "B" | "C",
+    "reason": string
+  }},
+  "narrative_markdown": string,
   "elements": [
     {{
       "elementName": string,
@@ -1367,7 +1641,7 @@ Return ONLY valid JSON with this exact structure:
           "rate": number,
           "amount": number,
           "estimated": bool,
-          "quantity_source": "mitm" | "drawing" | "user" | "ai"
+          "quantity_source": "python" | "drawing" | "user" | "ai"
         }}
       ]
     }}
@@ -1417,6 +1691,10 @@ Return ONLY valid JSON with this exact structure:
         sink_count = pf.get("kitchen_sink", 1)
         has_overhead_tank = enriched["services"].get("overhead_tank", True)
 
+        # Template fallback bill. The numeric column is a composite supply &
+        # fix default used only when neither the DB nor the online average
+        # reference can price the line (see _resolve_rate below), so it can
+        # never override a real rate.
         all_items = [
             ("PRE-001", "Site clearance & preparation", 1, "ls", 150000, False),
             ("PRE-002", "Scaffolding hire", total_area, "m2", 800, False),
@@ -1472,10 +1750,18 @@ Return ONLY valid JSON with this exact structure:
             ("EXTW-004", "Landscaping & planting", round(total_area * 0.2, 2), "m2", 3500, False),
         ]
 
-        # Fetch all rates concurrently
+        # Fetch all rates concurrently. Units are passed through because the
+        # chain is: our product catalogue (discount price first) -> our
+        # material_rates (current_price) -> current best online price -> the
+        # offline online-average reference -> a flagged AI estimate. Only the
+        # online tiers need the unit, so a per-bag figure can never price an m2
+        # line; the AI estimate and the hard-coded default rate below are the
+        # documented last resort that keeps this BOQ complete.
         descriptions = [item[1] for item in all_items]
+        units = [item[3] for item in all_items]
         rate_results = await asyncio.gather(*[
-            self.price_service.get_rate(desc, city) for desc in descriptions
+            self.price_service.get_rate(desc, city, unit=unit)
+            for desc, unit in zip(descriptions, units)
         ])
         batch_rates = {}
         for desc, result in zip(descriptions, rate_results):

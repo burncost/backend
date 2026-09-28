@@ -6,10 +6,19 @@ Interfaces with the building materials database to:
   1. Look up current market prices per material/product code
   2. Enrich BOQ line items with real DB prices
   3. Flag items where BOQ price deviates significantly from DB price
-  4. Internet search fallback when no DB price exists
+  4. Fallback chain when our own database has no price for a line, tried in
+     exactly this order and never in any other:
+        a. `products` (PostgreSQL) — vendor catalogue, the DISCOUNT price first,
+           cheapest sellable offer wins
+        b. `material_rates` (PostgreSQL `current_price`, then MongoDB)
+        c. published online price lists / general web search (online_market)
+        d. offline observed online average reference (online_average)
+        e. clearly-flagged AI estimate (ai_estimate) — never presented as
+           verified; it exists so a BOQ always totals
   5. Vendor notification for out-of-stock items
 
-Supports both MongoDB (material_rates collection) and PostgreSQL (material_rates table).
+Supports both MongoDB (material_rates collection) and PostgreSQL (`products`
+and `material_rates` tables).
 """
 import os
 import math
@@ -24,9 +33,22 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
+from app.config import settings
 from app.services.gemini_client import get_gemini_client
+from app.services.online_average_prices import PROMOTED_SOURCE, find_online_average
+from app.services.online_price_search import (
+    LIVE_LABEL,
+    LIVE_SOURCE,
+    search_online_price,
+)
 
 logger = logging.getLogger(__name__)
+
+# Provenance values that mean "our own database priced this line". Anything else
+# (live online market, offline online average, AI estimate) is still priced so
+# the BOQ totals, but it is never tagged as verified — the `verified` field is
+# simply left out of the payload rather than shipped as a negative flag.
+DB_SOURCES = frozenset({"database", "product_catalogue", "product_discount"})
 
 # -- Location normalization -------------------------------------------------
 # material_rates stores the geo column as a STATE value (e.g. "FCT" for the
@@ -130,6 +152,60 @@ class DBProduct:
     supplier: Optional[str] = None
     brand: Optional[str] = None
     last_updated: Optional[str] = None
+    # Provenance of the rate: "database"/"material_rate" for a material_rates
+    # row, "product_discount" when a catalogue product's discount price was
+    # used, "product_catalogue" when its base price was.
+    price_source: str = "database"
+    product_id: Optional[str] = None
+    base_price: Optional[float] = None
+    discount_price: Optional[float] = None
+    vendor_id: Optional[str] = None
+    in_stock: Optional[int] = None
+
+
+# ─────────────────────────────────────────
+# PRODUCT CATALOGUE PRICING (tier 1 — PostgreSQL `products`)
+# ─────────────────────────────────────────
+
+# Bill wording that is not part of a product name. Mirrors
+# BOQCartService._search_term (that module imports boq_generator, so it cannot
+# be imported here without a cycle).
+_LEADING_VERBS = re.compile(
+    r"^(?:provide and fix|provide and install|supply and fix|supply and install|"
+    r"laying of|erection of|provide|supply|install|fix|lay|erect)\s+(?:and\s+)?",
+    re.I,
+)
+_PARENTHETICAL = re.compile(r"\([^)]*\)|\[[^\]]*\]")
+
+# How many catalogue offers to inspect per line before choosing the best price.
+CATALOGUE_OFFERS = 20
+
+
+def catalogue_search_term(description: str) -> str:
+    """The product name hiding inside a bill line description."""
+    term = _PARENTHETICAL.sub(" ", description or "").strip()
+    for _ in range(3):
+        stripped = _LEADING_VERBS.sub("", term).strip()
+        if stripped == term:
+            break
+        term = stripped
+    return re.sub(r"\s{2,}", " ", term).strip(" .,-")[:80]
+
+
+def effective_product_price(product: Dict[str, Any]) -> Tuple[float, str]:
+    """Rate a buyer actually pays for a catalogue product, and its provenance.
+
+    The discount price wins whenever it is a real positive figure — that is the
+    price we sell at — and the list price is the fallback. Same rule (and same
+    ranking) as ToolExecutor._get_cheapest_price, so a BOQ line prices exactly
+    like the same item searched in chat.
+    """
+    base = float(product.get("base_price") or 0)
+    raw_discount = product.get("discount_price")
+    discount = float(raw_discount) if raw_discount else 0.0
+    if discount > 0:
+        return discount, "product_discount"
+    return base, "product_catalogue"
 
 
 # ─────────────────────────────────────────
@@ -217,9 +293,10 @@ FINISH_MULTIPLIERS: Dict[str, float] = {
 class PriceEngine:
     """
     PriceEngine queries the MongoDB material_rates collection for real prices.
-    No hallucinated prices — DB only. For unmatched items the caller uses
-    get_market_rate_estimate which returns a clearly-flagged AI estimate
-    (never presented as a verified market price).
+    No hallucinated prices — DB only. For unmatched items the caller falls back
+    to the observed online average price reference, and only when that has
+    nothing either, to get_market_rate_estimate — a clearly-flagged AI estimate
+    that is never presented as a verified market price.
     """
 
     def __init__(self, mongo_db: Optional[AsyncIOMotorDatabase] = None):
@@ -297,10 +374,9 @@ class PriceEngine:
     async def get_market_rate_estimate(self, description: str, city: str = "Abuja") -> Optional[Dict[str, Any]]:
         """
         Return a clearly-flagged AI estimate for a material with no DB match.
-        The result is tagged price_source='ai_estimate' and verified=false —
-        it is NEVER presented as a verified market price. Callers must
-        surface the flag to the user and create a demand alert so suppliers
-        can respond with real prices.
+        The result is tagged price_source='ai_estimate' so callers can surface
+        it as an estimate, and create a demand alert so suppliers can respond
+        with real prices.
         """
         try:
             client = get_gemini_client()
@@ -323,7 +399,7 @@ Return ONLY valid JSON with this exact structure:
 If you cannot provide an estimate, return: {{"rate": null, "confidence": 0}}"""
 
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 contents=[prompt],
                 config={"temperature": 0.1, "max_output_tokens": 1024},
             )
@@ -352,13 +428,30 @@ If you cannot provide an estimate, return: {{"rate": null, "confidence": 0}}"""
                 "product_code": "",
                 "price_source": "ai_estimate",
                 "source": "ai_estimate",
-                "verified": False,
                 "confidence": float(result.get("confidence", 0.3)),
                 "city": city,
             }
         except Exception as e:
             logger.warning(f"Market rate estimate failed for '{description}': {e}")
             return None
+
+    def get_online_average_rate(
+        self, description: str, city: str = "Abuja", unit: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Observed online average price for a material the DB has no rate for.
+
+        Strictly offline (no scraping at request time) and never consulted
+        before the database, so it can only ever fill a gap the DB left open.
+        The rate is tagged price_source='online_average' and is always surfaced
+        to the user as "Online average price".
+        """
+        return find_online_average(
+            description,
+            city,
+            unit=unit,
+            city_factor=CITY_FACTORS.get(city, 1.0),
+        )
 
     async def get_prices_by_category(self, category: str, city: str = "Abuja") -> List[Dict[str, Any]]:
         """Get all prices for a category in a city."""
@@ -448,9 +541,12 @@ class PriceService:
     """
     Retrieves product prices from database and enriches BOQ items.
     Supports MongoDB (material_rates collection) and PostgreSQL.
-    Verified prices come from the DB only. For unmatched items, a clearly-flagged
-    AI estimate may be returned (price_source='ai_estimate', verified=false) so a
-    total can always be produced — never presented as a verified market price.
+    Verified prices come from the database only, in a strict order:
+    `products` (vendor catalogue, discount price first) -> `material_rates`
+    (current_price) -> live online price search -> offline observed online
+    average reference -> a clearly-flagged AI estimate (price_source=
+    'ai_estimate') so a total can always be produced. Only the database tiers
+    set `verified`; the lower tiers leave it blank.
     """
 
     def __init__(self, mongo_db: Optional[AsyncIOMotorDatabase] = None, pg_db: Optional[AsyncSession] = None):
@@ -459,6 +555,12 @@ class PriceService:
         self._price_cache: Optional[Dict[str, DBProduct]] = None
         self._cache_timestamp: Optional[datetime] = None
         self.engine = PriceEngine(mongo_db)
+        # Live online lookups performed by THIS instance (one BOQ run), capped so
+        # a long bill cannot fan out into hundreds of third-party requests.
+        self._online_lookups = 0
+        # Catalogue lookups are memoised per instance: real bills repeat lines
+        # ("Ditto", the same tile across floors), and each lookup is a DB query.
+        self._catalogue_cache: Dict[str, Optional[Dict[str, Any]]] = {}
 
     async def _get_pg_session(self) -> Optional[AsyncSession]:
         """Return the injected Postgres session, or lazily create one."""
@@ -493,10 +595,12 @@ class PriceService:
                     name=r.material_name,
                     category=str(r.category_id),
                     unit=r.unit,
+                    # The market rate column, exactly as specified: `current_price`.
                     unit_price=float(r.current_price),
                     city=r.state or "Abuja",
                     supplier=str(r.supplier_id) if r.supplier_id else None,
                     last_updated=str(r.updated_at or ""),
+                    price_source="material_rate",
                 )
                 products[code] = p
             logger.info(f"Loaded {len(products)} prices from PostgreSQL material_rates")
@@ -571,6 +675,169 @@ class PriceService:
         logger.info("No DB prices loaded — verified prices unavailable; AI estimates may be used")
         return self._price_cache
 
+    # ── Tier 1: product catalogue (PostgreSQL `products`) ───────────────────
+
+    async def get_catalogue_rate(
+        self, description: str, city: str = "Abuja", unit: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Cheapest sellable catalogue offer for a line item, or None.
+
+        Reads the `products` table through the same ProductService the
+        marketplace and chat use, so a BOQ carries the price a buyer actually
+        pays: the discount price whenever there is one, the list price
+        otherwise, cheapest offer wins. Only ACTIVE listings with a positive
+        price from non-suspended vendors qualify — a draft or discontinued row
+        must never anchor a contract sum.
+
+        Runs only when a Postgres session was injected: a service built without
+        one (offline/test use) must never open a database connection implicitly.
+        """
+        if self.pg_db is None:
+            return None
+
+        term = catalogue_search_term(description)
+        if not term:
+            return None
+
+        cache_key = f"{term}|{city}|{unit or ''}"
+        if cache_key in self._catalogue_cache:
+            return self._catalogue_cache[cache_key]
+
+        result = await self._lookup_catalogue(term, description, city, unit)
+        self._catalogue_cache[cache_key] = result
+        return result
+
+    async def _lookup_catalogue(
+        self, term: str, description: str, city: str, unit: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """One catalogue query for a prepared search term."""
+        try:
+            from app.schemas.product import ProductFilter
+            from app.services.product_service import ProductService
+
+            result = await ProductService(self.pg_db).list_products(
+                filters=ProductFilter(search=term, sort_by="price", sort_order="asc"),
+                page=1,
+                page_size=CATALOGUE_OFFERS,
+                only_verified=True,
+            )
+        except Exception as exc:
+            logger.warning(f"Catalogue price lookup failed for '{description}': {exc}")
+            return None
+
+        best: Optional[Dict[str, Any]] = None
+        best_rate = 0.0
+        for product in result.get("products") or []:
+            if str(product.get("status") or "").lower() != "active":
+                continue
+            rate, provenance = effective_product_price(product)
+            if rate <= 0:
+                continue
+            if best is None or rate < best_rate or (
+                rate == best_rate
+                and int(product.get("quantity") or 0) > int(best.get("quantity") or 0)
+            ):
+                best = dict(product, _rate=rate, _provenance=provenance)
+                best_rate = rate
+
+        if best is None:
+            return None
+
+        discounted = best["_provenance"] == "product_discount"
+        return {
+            "rate": round(best_rate, 2),
+            "unit": best.get("unit_of_measure") or (unit or ""),
+            "product_name": best.get("name") or description,
+            "product_code": best.get("sku") or "",
+            "price_source": best["_provenance"],
+            "source": "database",
+            "verified": True,
+            "confidence": 1.0,
+            "city": city,
+            "supplier_id": str(best.get("vendor_id") or "") or None,
+            "product_id": str(best.get("id") or ""),
+            "base_price": float(best.get("base_price") or 0) or None,
+            "discount_price": float(best.get("discount_price") or 0) or None,
+            "discounted": discounted,
+            "in_stock": int(best.get("quantity") or 0),
+            "price_basis": "Discounted vendor price" if discounted else "Vendor catalogue price",
+            "last_verified_at": str(best.get("updated_at") or "") or None,
+        }
+
+    # ── Tier 3: live online price search ────────────────────────────────────
+
+    async def get_online_market_rate(
+        self, description: str, city: str = "Abuja", unit: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Current best price found online, or None (budgeted per BOQ run).
+
+        Only reached after both database stores missed. Cached by the search
+        module, counted against settings.ONLINE_PRICE_SEARCH_MAX_PER_RUN, and
+        non-fatal: any failure returns None so the caller falls through to the
+        offline reference and the BOQ still totals.
+        """
+        if not settings.ONLINE_PRICE_SEARCH_ENABLED:
+            return None
+        if self._online_lookups >= max(0, int(settings.ONLINE_PRICE_SEARCH_MAX_PER_RUN)):
+            logger.info("Online price search budget reached — skipping '%s'", description)
+            return None
+
+        self._online_lookups += 1
+        return await search_online_price(
+            description, city, unit, mongo_db=self.mongo_db
+        )
+
+    async def get_catalogue_context_for_prompt(
+        self, city: str = "Abuja", limit: int = 0
+    ) -> str:
+        """Verified DB rates, as compact lines, for the BOQ prompt.
+
+        The prompt's `[INSERT YOUR APP'S DATABASE PRICE LIST CONTEXT HERE]`
+        placeholder is filled from the application's own `material_rates` data so
+        the model can name the right specification from a real catalogue — it
+        still never states a price: enrichment does the arithmetic afterwards.
+
+        A full rate table would blow the input budget, so rows are capped (city
+        matches first) and truncated per line. `_load_prices` is cached, so the
+        only per-call cost is string building.
+        """
+        row_cap = limit or 120
+        row_chars = 96
+
+        try:
+            prices = await self._load_prices()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Catalogue context unavailable: %s", exc)
+            prices = {}
+
+        if not prices:
+            return (
+                "  (no verified catalogue rates are loaded — leave every rate at 0 "
+                "and let the price service fill them in)"
+            )
+
+        city_norm = (city or "").strip().lower()
+        local: List[str] = []
+        other: List[str] = []
+        for product in prices.values():
+            row = (
+                f"  - {product.name} | {product.unit} | NGN {product.unit_price:,.0f}"
+                f" | {product.city}"
+            )[:row_chars]
+            if (product.city or "").strip().lower() == city_norm:
+                local.append(row)
+            else:
+                other.append(row)
+
+        rows = (local + other)[:row_cap]
+        return "\n".join(
+            [
+                f"VERIFIED DATABASE PRICE LIST ({len(prices)} rates on file, "
+                f"{len(local)} priced for {city or 'Abuja'}; showing {len(rows)}):",
+                *rows,
+            ]
+        )
+
     async def search_products(
         self, query: str, city: str = "Abuja", limit: int = 10
     ) -> List[DBProduct]:
@@ -602,22 +869,53 @@ class PriceService:
         return verified
 
     async def get_rate(
-        self, description: str, city: str = "Abuja", quantity: float = 1.0
+        self, description: str, city: str = "Abuja", quantity: float = 1.0,
+        unit: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Get the best matching rate for a BOQ item description.
-        Returns a DB-verified rate (source='database') when found.
-        Otherwise returns a clearly-flagged AI estimate (price_source='ai_estimate',
-        verified=false) so a total can always be produced.
-        Returns None only when neither a DB price nor an estimate is available.
+        Sources are tried in this order and never in any other:
+          1. Product catalogue in our database (products table): discount price
+             first, cheapest sellable offer — price_source='product_discount'
+             or 'product_catalogue'
+          2. Market rates in our database (material_rates.current_price, then
+             MongoDB) — price_source='database'
+          3. Current best price found online (price_source='online_market')
+          4. Offline observed online average reference (price_source=
+             'online_average')
+          5. Clearly-flagged AI estimate (price_source='ai_estimate') so a total
+             can always be produced
+        Returns None only when no source could price the item at all.
+        Only tiers 1-2 are our own database and set `verified`; tiers 3-5 are
+        priced but carry no verification flag.
+
+        `unit` is the line item's unit; it is passed to the online sources so a
+        per-bag figure can never land on an m2 line.
         """
-        # Try DB-verified match first (never hallucinated)
+        # 1. Our own catalogue, discount price first (a database price).
+        catalogue = await self.get_catalogue_rate(description, city, unit)
+        if catalogue:
+            return catalogue
+
+        # 2. Market rates in our own database (never hallucinated).
         verified = await PriceTruthService(self).get_verified_rate(description, city)
         if verified:
             return verified
 
-        # Flagged AI estimate fallback (never presented as verified)
-        logger.info(f"DB price not found for '{description}' — returning flagged AI estimate")
+        # 3. Live online price search — only after both DB stores missed.
+        online_market = await self.get_online_market_rate(description, city, unit)
+        if online_market:
+            logger.info(f"Database price not found for '{description}' — using online market price")
+            return online_market
+
+        # 4. Observed online average reference (offline, deterministic).
+        online = self.engine.get_online_average_rate(description, city, unit)
+        if online:
+            logger.info(f"Database price not found for '{description}' — using online average price")
+            return online
+
+        # 5. Flagged AI estimate fallback (never presented as verified)
+        logger.info(f"Database price not found for '{description}' — returning flagged AI estimate")
         estimate = await self.engine.get_market_rate_estimate(description, city)
         if estimate:
             return estimate
@@ -697,18 +995,42 @@ class PriceService:
         description = item.get("description", "").lower()
         item_code = item.get("item_code", "")
 
-        # Search by description keywords
-        matching_product = None
-        for desc_key, keywords in DESCRIPTION_KEYWORDS.items():
-            if any(kw.lower() in description for kw in [desc_key]):
-                matching_product = await self._search_by_keywords(keywords, city)
-                if matching_product:
-                    break
+        # 1. Our own product catalogue first: discount price wins, cheapest
+        # sellable offer. Only runs when a Postgres session was injected.
+        matching_product: Optional[DBProduct] = None
+        catalogue = await self.get_catalogue_rate(description, city, item.get("unit"))
+        if catalogue:
+            matching_product = DBProduct(
+                product_code=catalogue.get("product_code", ""),
+                name=catalogue["product_name"],
+                category=item.get("element_name", ""),
+                unit=catalogue.get("unit") or (item.get("unit") or ""),
+                unit_price=float(catalogue["rate"]),
+                city=city,
+                supplier=catalogue.get("supplier_id"),
+                last_updated=catalogue.get("last_verified_at"),
+                price_source=catalogue.get("price_source", "product_catalogue"),
+                product_id=catalogue.get("product_id"),
+                base_price=catalogue.get("base_price"),
+                discount_price=catalogue.get("discount_price"),
+                in_stock=catalogue.get("in_stock"),
+            )
+            item["price_source"] = matching_product.price_source
+            item["price_basis"] = catalogue.get("price_basis")
+            item["discounted"] = bool(catalogue.get("discounted"))
 
-        if not matching_product:
-            words = [w for w in description.split() if len(w) > 3]
-            if words:
-                matching_product = await self._search_by_keywords(words[:4], city)
+        # 2. Market rates in our own database (material_rates.current_price).
+        if matching_product is None:
+            for desc_key, keywords in DESCRIPTION_KEYWORDS.items():
+                if any(kw.lower() in description for kw in [desc_key]):
+                    matching_product = await self._search_by_keywords(keywords, city)
+                    if matching_product:
+                        break
+
+            if not matching_product:
+                words = [w for w in description.split() if len(w) > 3]
+                if words:
+                    matching_product = await self._search_by_keywords(words[:4], city)
 
         if matching_product:
             item["db_price_matched"] = True
@@ -716,6 +1038,14 @@ class PriceService:
             item["db_product_code"] = matching_product.product_code
             item["db_unit_price"] = matching_product.unit_price
             item["out_of_stock"] = False
+            # A catalogue hit keeps its own label ("product_discount" /
+            # "product_catalogue") so a discounted vendor price is visible as
+            # such; a material_rates hit stays "database".
+            db_label = (
+                matching_product.price_source
+                if matching_product.price_source in ("product_discount", "product_catalogue")
+                else "database"
+            )
             # Quantity provenance — preserve existing label (user/drawing/ai),
             # default to "mitm" (Nigerian default ratios) when not set.
             if not item.get("quantity_source"):
@@ -728,7 +1058,7 @@ class PriceService:
                     old_amount = item.get("amount", 0)
                     item["adjusted_rate"] = matching_product.unit_price
                     item["amount"] = round(item.get("quantity", 0) * matching_product.unit_price, 2)
-                    item["rate_source"] = "database"
+                    item["rate_source"] = db_label
 
                     discrepancy = {
                         "item_code": item_code,
@@ -742,10 +1072,53 @@ class PriceService:
                 else:
                     item["rate_source"] = "gemini_verified"
             else:
-                item["rate_source"] = "database"
+                item["rate_source"] = db_label
                 item["adjusted_rate"] = matching_product.unit_price
                 item["amount"] = round(item.get("quantity", 0) * matching_product.unit_price, 2)
 
+            return item, None, None
+
+        # Current best price found online — reached only because both of our own
+        # stores (products, material_rates) had nothing. Never presented as
+        # verified, and the page it came from travels with the figure.
+        market = await self.get_online_market_rate(
+            item.get("description", ""), city, item.get("unit")
+        )
+        if market:
+            logger.info(f"No database match for '{description}' — using online market price")
+            item["db_price_matched"] = False
+            item["db_product_name"] = market.get("product_name", description)
+            item["db_product_code"] = market.get("product_code", "")
+            item["db_unit_price"] = market["rate"]
+            item["adjusted_rate"] = market["rate"]
+            item["amount"] = round(item.get("quantity", 0) * market["rate"], 2)
+            item["rate_source"] = LIVE_SOURCE
+            item["price_source"] = LIVE_SOURCE
+            item["confidence"] = market.get("confidence", 0.6)
+            item["out_of_stock"] = False
+            item["price_basis"] = market.get("price_basis", LIVE_LABEL)
+            item["source_name"] = market.get("source_name")
+            return item, None, None
+
+        # Observed online average price — the DB had nothing, so an observed
+        # market median completes the total. It is never presented as verified
+        # and is always labelled "online average price" to the user.
+        online = self.engine.get_online_average_rate(
+            item.get("description", ""), city, item.get("unit")
+        )
+        if online:
+            logger.info(f"No DB match for '{description}' — using online average price")
+            item["db_price_matched"] = False
+            item["db_product_name"] = online.get("product_name", description)
+            item["db_product_code"] = online.get("product_code", "")
+            item["db_unit_price"] = online["rate"]
+            item["adjusted_rate"] = online["rate"]
+            item["amount"] = round(item.get("quantity", 0) * online["rate"], 2)
+            item["rate_source"] = PROMOTED_SOURCE
+            item["price_source"] = PROMOTED_SOURCE
+            item["confidence"] = online.get("confidence", 0.55)
+            item["out_of_stock"] = False
+            item["price_basis"] = online.get("price_basis")
             return item, None, None
 
         # Flagged AI estimate fallback (never presented as verified)
@@ -760,7 +1133,6 @@ class PriceService:
             item["amount"] = round(item.get("quantity", 0) * estimate["rate"], 2)
             item["rate_source"] = "ai_estimate"
             item["price_source"] = "ai_estimate"
-            item["verified"] = False
             item["confidence"] = estimate.get("confidence", 0.3)
             item["out_of_stock"] = False
             item["estimated"] = True

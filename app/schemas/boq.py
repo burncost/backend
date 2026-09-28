@@ -239,6 +239,11 @@ class BOQItem(BaseModel):
     confidence: float = 1.0
     confidence_reason: Optional[str] = None
     estimated: bool = False
+    # Who measured this quantity: "python" (take-off engine), "drawing",
+    # "user", or "ai" for a draft figure with no take-off value behind it.
+    quantity_source: Optional[str] = None
+    # The draft's own figure, retained for audit when the engine overrode it.
+    ai_quantity: Optional[float] = None
 
 
 class BOQElement(BaseModel):
@@ -316,6 +321,15 @@ class BOQResponse(BaseModel):
     assumptions_used: Dict[str, Any]
     generated_at: str
     warnings: List[str] = []
+    # QS report sections produced alongside the measured bill. Optional so bills
+    # saved before these existed still validate.
+    building_summary: Optional[Dict[str, Any]] = None
+    material_estimates: Optional[Dict[str, Any]] = None
+    variation_options: Optional[Dict[str, Any]] = None
+    geotechnical: Optional[Dict[str, Any]] = None
+    narrative_markdown: Optional[str] = None
+    # How many quantities the take-off engine measured vs. left to the draft.
+    quantity_provenance: Optional[Dict[str, int]] = None
 
 
 # ─── Order schemas ────────────────────────────────────────────────────────────
@@ -344,5 +358,21 @@ class BOQOrderResponse(BaseModel):
     message: str
     items_ordered: int = 0
     total_amount: float = 0.0
+
+
+class BOQCartRequest(BaseModel):
+    """Resolve a BOQ's material lines to the best verified vendor offers.
+
+    Supply either a stored `boq_id` or the inline `boq` payload (the
+    just-generated result, or a guest preview that was never persisted).
+
+    Resolution is read-only — the cart itself is written by the existing
+    `/cart/add` endpoint, so guests keep their on-device cart and signed-in
+    shoppers keep their account cart.
+    """
+    boq_id: Optional[str] = None
+    boq: Optional[Dict[str, Any]] = None
+    city: Optional[str] = None
+    limit_offers: int = 3
 
 

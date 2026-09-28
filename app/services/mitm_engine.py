@@ -41,6 +41,32 @@ WASTAGE = {
     "reinforcement": 0.05,
 }
 
+# ── Take-off constants (quantities are computed here, never by the model) ────
+# Every measured quantity the bill carries comes from these documented factors,
+# so the arithmetic behind a rate is reproducible and auditable.
+
+# A carton of four 600x600mm tiles covers 1.44 m² — the pack most Nigerian
+# catalogues sell. 400mm and 300mm packs are listed for when a finish calls for
+# a smaller format.
+TILE_BOX_COVERAGE_M2: Dict[int, float] = {600: 1.44, 400: 0.96, 300: 0.54}
+DEFAULT_TILE_SIZE_MM = 600
+
+# Kitchen and bathrooms are the only wall-tiled areas on a standard Nigerian
+# finish; ~18% of the net wall area is the accepted rule of thumb.
+WET_AREA_WALL_TILE_RATIO = 0.18
+
+# Roof timber: trusses and purlins at 900mm centres, plus 15% for overhang,
+# ridge and cutting waste.
+ROOF_TRUSS_SPACING_M = 0.9
+ROOF_PURLIN_SPACING_M = 0.9
+ROOF_TIMBER_CUT_ALLOWANCE = 0.15
+
+# Substructure assumptions used by the foundation option table.
+STRIP_FOOTING_WIDTH_M = 0.6
+WORKING_SPACE_M = 0.3
+HARDCORE_THICKNESS_M = 0.15
+BLINDING_THICKNESS_M = 0.05
+
 # Accuracy caps per drawing type
 ACCURACY_CAPS: Dict[str, Dict[str, float]] = {
     "complete_set": {
@@ -287,18 +313,55 @@ class MITMEngine:
         # Reinforcement estimate (kg)
         rebar_kg = self._estimate_rebar(total_area, sub, sup, floors)
 
+        # ── Take-off quantities the bill carries ─────────────────────────────
+        # Computed here (not by the model) so every quantity is reproducible.
+        # Ground-floor span follows the same "roughly square plan" convention as
+        # `_estimate_perimeter`.
+        span_m = math.sqrt(floors[0]["floor_area_m2"]) if floors else 0.0
+
+        floor_tiles_m2 = total_area * (1 + WASTAGE["tiles"])
+        floor_tile_boxes = math.ceil(
+            floor_tiles_m2 / TILE_BOX_COVERAGE_M2[DEFAULT_TILE_SIZE_MM]
+        )
+        wall_tiles_m2 = net_wall_area * WET_AREA_WALL_TILE_RATIO * (1 + WASTAGE["tiles"])
+        roof_covering_m2 = roof_slope_area * (1 + WASTAGE["roofing"])
+        roof_truss_count = math.ceil(span_m / ROOF_TRUSS_SPACING_M) + 1 if span_m else 0
+        roof_purlin_m = roof_slope_area / ROOF_PURLIN_SPACING_M
+        roof_rafter_m = (
+            roof_truss_count * span_m * slope_factor * (1 + ROOF_TIMBER_CUT_ALLOWANCE)
+        )
+        # Option A is the engine's own default foundation, so the flat
+        # substructure keys below can never disagree with `foundation_vol`.
+        foundation_options = self._foundation_options(total_area, total_perimeter, sub)
+        foundation = foundation_options["A_strip_footing"]
+
         return {
             "gross_wall_area_m2": round(gross_wall_area, 2),
             "net_wall_area_m2": round(net_wall_area, 2),
             "opening_area_m2": round(opening_area, 2),
             "external_blocks_225mm": round(ext_blocks),
             "internal_blocks_150mm": round(int_blocks),
+            "blocks_total_nr": round(ext_blocks + int_blocks),
             "foundation_concrete_m3": round(foundation_vol, 2),
             "slab_concrete_m3": round(slab_vol, 2),
             "roof_slope_area_m2": round(roof_slope_area, 2),
             "estimated_rebar_kg": round(rebar_kg),
             "floor_finish_area_m2": round(total_area, 2),
             "wall_finish_area_m2": round(net_wall_area, 2),
+            "floor_tiles_m2": round(floor_tiles_m2, 2),
+            "floor_tile_boxes": floor_tile_boxes,
+            "wall_tiles_m2": round(wall_tiles_m2, 2),
+            "roof_covering_m2": round(roof_covering_m2, 2),
+            "roof_ceiling_m2": round(total_area, 2),
+            "roof_truss_count": roof_truss_count,
+            "roof_purlin_m": round(roof_purlin_m, 2),
+            "roof_rafter_m": round(roof_rafter_m, 2),
+            "foundation_excavation_m3": foundation["excavation_m3"],
+            "foundation_hardcore_m3": foundation["hardcore_m3"],
+            "foundation_blinding_m3": foundation["blinding_m3"],
+            "foundation_dpm_m2": foundation["dpm_m2"],
+            "foundation_reinforcement_kg": foundation["reinforcement_kg"],
+            "foundation_options": foundation_options,
         }
 
     def _calc_foundation_volume(self, area: float, sub: Dict) -> float:
@@ -313,6 +376,58 @@ class MITMEngine:
         elif ft == "pile":
             return area * 0.15
         return area * 0.25
+
+    def _foundation_options(
+        self, area: float, perimeter: float, sub: Dict
+    ) -> Dict[str, Dict[str, float]]:
+        """Indicative take-off for the foundation options a QS compares.
+
+        Option A keeps exactly the strip-footing formula used by
+        `_calc_foundation_volume`, so the option table can never contradict the
+        concrete volume carried in the bill for the chosen foundation. B and C
+        are the raft and pad-plus-beam alternatives a geotechnical report can
+        push a client towards (soft/expansive laterite over a high water table).
+        """
+        depth = sub.get("foundation_depth_m", DEFAULT_FOUNDATION_DEPTH_M)
+        hardcore = round(area * HARDCORE_THICKNESS_M * (1 + WASTAGE["concrete"]), 2)
+        blinding = round(area * BLINDING_THICKNESS_M * (1 + WASTAGE["concrete"]), 2)
+
+        return {
+            "A_strip_footing": {
+                # Excavation allows working space either side of the footing.
+                "excavation_m3": round(
+                    perimeter * (STRIP_FOOTING_WIDTH_M + 2 * WORKING_SPACE_M) * depth, 2
+                ),
+                "hardcore_m3": hardcore,
+                "blinding_m3": blinding,
+                "concrete_m3": round(
+                    self._calc_foundation_volume(area, {**sub, "foundation_type": "strip"}),
+                    2,
+                ),
+                "dpm_m2": round(area, 2),
+                "reinforcement_kg": round(area * 12, 1),
+            },
+            "B_raft": {
+                "excavation_m3": round(area * 0.45, 2),
+                "hardcore_m3": hardcore,
+                "blinding_m3": blinding,
+                "concrete_m3": round(
+                    self._calc_foundation_volume(area, {**sub, "foundation_type": "raft"}), 2
+                ),
+                "dpm_m2": round(area, 2),
+                "reinforcement_kg": round(area * 45, 1),
+            },
+            "C_pad_and_beam": {
+                "excavation_m3": round(area * 0.35, 2),
+                "hardcore_m3": hardcore,
+                "blinding_m3": blinding,
+                # Pad bases plus ground beam work out at ~0.20 m³ of concrete
+                # per m² of floor area on a bungalow.
+                "concrete_m3": round(area * 0.20, 2),
+                "dpm_m2": round(area, 2),
+                "reinforcement_kg": round(area * 30, 1),
+            },
+        }
 
     def _estimate_rebar(self, area: float, sub: Dict, sup: Dict, floors: List) -> float:
         """Estimate total rebar weight in kg."""
