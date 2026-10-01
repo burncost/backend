@@ -901,7 +901,7 @@ class ToolExecutor:
         with any market landmark) falling back to city, state. Blank strings are
         returned when unknown so callers never fabricate a supplier or market.
         """
-        meta = {"marketer": "", "market": ""}
+        meta = {"marketer": "", "market": "", "city": "", "state": ""}
         if not vendor_id:
             return meta
         try:
@@ -910,6 +910,8 @@ class ToolExecutor:
             if not vendor:
                 return meta
             meta["marketer"] = vendor.business_name or ""
+            meta["city"] = vendor.city or ""
+            meta["state"] = vendor.state or ""
             addr = None
             try:
                 from app.models.vendor_address import VendorAddress
@@ -1035,9 +1037,27 @@ class ToolExecutor:
                 # assistant can always name who is selling and where.
                 "vendor_name": meta["marketer"],
                 "vendor_market": meta["market"],
+                "vendor_city": meta["city"],
+                "vendor_state": meta["state"],
                 "status": p.get("status", ""),
                 "rating": float(p.get("rating", 0)),
             })
+
+        # Nearest-supplier first: when we know the shopper's location, list the
+        # vendors in that city/state ahead of the rest (stable - the relevance
+        # order from above is preserved inside each group).
+        if self.user_location:
+            tokens = {
+                tok for tok in self.user_location.lower().replace(",", " ").replace("/", " ").split()
+                if len(tok) >= 3
+            }
+            if tokens:
+                def _near(item: dict) -> bool:
+                    region = f"{item.get('vendor_city', '')} {item.get('vendor_state', '')} {item.get('vendor_market', '')}".lower()
+                    return any(tok in region for tok in tokens)
+
+                serialized.sort(key=lambda item: not _near(item))
+
         return {
             "products": serialized,
             "total": result.get("total", 0),

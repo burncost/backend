@@ -29,6 +29,7 @@ TOKEN_COSTS: Dict[str, int] = {
     "export_pdf": 1,
     "export_excel": 0.5,
     "export_docx": 0.5,
+    "export_csv": 0.5,
     "boq_regenerate": 1,
     # Phase 4/8 — AI procurement intelligence operations
     "drawing_analysis": 1,

@@ -13,6 +13,9 @@ Blank rows separate items, description-only rows are section headings, and
 "TO COLLECTION" / "TO SUMMARY" / "TO GENERAL SUMMARY" rows carry the element
 subtotal. Legacy .xls (BIFF8) is read with xlrd, .xlsx/.xlsm with openpyxl;
 neither reader is assumed present (a warning is returned instead of raising).
+Word (.docx) tables are read with python-docx and PDF (.pdf) pages with
+pdfplumber; both are flattened into the same (sheet name, rows) shape, so the
+element/summary logic below is shared and verification stays AI-free.
 
 Pure and synchronous by design: no DB, no async, so it is cheap to unit test.
 """
@@ -20,11 +23,11 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = (".xls", ".xlsx", ".xlsm", ".csv")
+SUPPORTED_EXTENSIONS = (".xls", ".xlsx", ".xlsm", ".csv", ".docx", ".pdf")
 
 # Sheet roles. Element sheets hold the measurable items; the rest are wrappers.
 _SUMMARY_SHEET_RE = re.compile(r"^summary\b", re.I)
@@ -66,6 +69,18 @@ _WS_RE = re.compile(r"\s+")
 _POSITIONAL_COLUMNS = {
     "ref": 0, "description": 1, "quantity": 2, "unit": 3, "rate": 4, "amount": 5,
 }
+
+# A Word/PDF page heading that names the element the table below it belongs to.
+# Matching it lets a PDF page be classified as an element/summary/cover sheet
+# exactly like an Excel sheet tab is.
+_DOC_HEADING_RE = re.compile(
+    r"^\s*(?:element\s*(?:nr\.?|no\.?|number)?\s*\d*|bill\s*(?:nr\.?|no\.?)?\s*\d*"
+    r"|general\s+summary|summary|cover(?:\s+page)?|preamble|preliminar)",
+    re.I,
+)
+# pdfplumber's layout mode pads columns with runs of spaces, so two or more
+# spaces mark a column boundary when a bill has no ruled table grid.
+_LAYOUT_GAP_RE = re.compile(r"\s{2,}")
 
 
 
@@ -218,35 +233,174 @@ def _clean_description(text: str) -> str:
 
 # ── sheet reading ────────────────────────────────────────────────────────────
 
-def _read_sheets(
+def _clean_cell(value: Any) -> str:
+    """Flatten one table cell to a single line (docx/pdfplumber give multi-line text)."""
+    return _WS_RE.sub(" ", str(value or "").replace("\n", " ")).strip()
+
+
+def _iter_docx_blocks(document: Any):
+    """Yield the body's paragraphs and tables in document order."""
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, document)
+        elif child.tag == qn("w:tbl"):
+            yield Table(child, document)
+
+
+def _docx_table_rows(table: Any) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for row in table.rows:
+        cells = [_clean_cell(cell.text) for cell in row.cells]
+        if any(cells):
+            rows.append(cells)
+    return rows
+
+
+def _read_docx(
     content: bytes, filename: str
 ) -> Tuple[List[Tuple[str, List[List[Any]]]], List[str]]:
-    """Return [(sheet_name, rows)] plus non-fatal warnings."""
-    extension = _extension(filename)
+    """Flatten a Word BOQ into [(table heading, rows)] — one table = one element.
+
+    The paragraph immediately above each table names it, so a document laid out
+    as "ELEMENT NR.3 CONCRETE" + table is classified and grouped like an Excel
+    sheet tab; a table with no heading falls back to a TABLE n label.
+    """
+    try:
+        import io
+
+        from docx import Document
+    except ImportError:  # pragma: no cover - dependency is declared
+        return [], ["Reading Word (.docx) BOQ files requires the 'python-docx' package."]
+    try:
+        document = Document(io.BytesIO(content))
+    except Exception as exc:  # noqa: BLE001 - never raise on user input
+        return [], [f"Could not open the Word document: {exc}"]
+
+    sheets: List[Tuple[str, List[List[Any]]]] = []
     warnings: List[str] = []
+    heading = ""
+    table_no = 0
+    for block in _iter_docx_blocks(document):
+        text = _clean_cell(getattr(block, "text", ""))
+        if text:
+            heading = text
+            continue
+        rows = _docx_table_rows(block)
+        if not rows:
+            continue
+        table_no += 1
+        sheets.append((heading or f"TABLE {table_no}", rows))
+        heading = ""
+    if not sheets:
+        warnings.append("No tables were found in the Word document.")
+    return sheets, warnings
+
+
+def _pdf_page_name(text: str, index: int) -> str:
+    """Name a page after its own heading (ELEMENT NR.n / SUMMARY / …) when it has one."""
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped and _DOC_HEADING_RE.match(stripped):
+            return stripped[:60]
+    return f"PAGE {index}"
+
+
+def _pdf_table_rows(page: Any) -> List[List[str]]:
+    rows: List[List[str]] = []
+    for table in page.extract_tables() or []:
+        for row in table:
+            cells = [_clean_cell(cell) for cell in row]
+            if any(cells):
+                rows.append(cells)
+    return rows
+
+
+def _pdf_text_rows(text: str) -> List[List[str]]:
+    """Split layout-mode page text into rows; 2+ spaces separate columns."""
+    rows: List[List[str]] = []
+    for line in (text or "").splitlines():
+        if line.strip():
+            rows.append([part.strip() for part in _LAYOUT_GAP_RE.split(line.rstrip())])
+    return rows
+
+
+def _read_pdf(
+    content: bytes, filename: str
+) -> Tuple[List[Tuple[str, List[List[Any]]]], List[str]]:
+    """Flatten a PDF BOQ into [(page heading, rows)] — one sheet per page.
+
+    Uses pdfplumber's ruled-table grid when the bill has one, and falls back to
+    layout-mode text so a borderless bill still reaches the shared row parser.
+    """
+    try:
+        import io
+
+        import pdfplumber
+    except ImportError:  # pragma: no cover - dependency is declared
+        return [], ["Reading PDF BOQ files requires the 'pdfplumber' package."]
+
+    sheets: List[Tuple[str, List[List[Any]]]] = []
+    warnings: List[str] = []
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for index, page in enumerate(pdf.pages, start=1):
+                text = page.extract_text() or ""
+                rows = _pdf_table_rows(page) or _pdf_text_rows(
+                    page.extract_text(layout=True) or text
+                )
+                if rows:
+                    sheets.append((_pdf_page_name(text, index), rows))
+                elif not text.strip():
+                    warnings.append(
+                        f"Page {index} has no extractable text "
+                        "(a scanned or image-only PDF needs OCR)."
+                    )
+    except Exception as exc:  # noqa: BLE001 - never raise on user input
+        return [], [f"Could not read the PDF: {exc}"]
+    if not sheets:
+        warnings.append("No extractable rows were found in the PDF.")
+    return sheets, warnings
+
+
+def _iter_sheets(
+    content: bytes, filename: str, warnings: List[str]
+) -> Iterator[Tuple[str, List[List[Any]]]]:
+    """Yield (sheet_name, rows) one sheet at a time; append non-fatal warnings.
+
+    Sheets are produced lazily so a large workbook is never materialised as a
+    list of every sheet's rows: the rows are the dominant memory cost of an
+    upload (a 5 MB bill is easily 40 MB of Python lists), and the caller only
+    ever needs one sheet at a time. `warnings` is caller-owned because the
+    reader that fails may only be discovered mid-iteration.
+    """
+    extension = _extension(filename)
 
     if extension == ".csv":
         import csv
         import io
 
         text = content.decode("utf-8-sig", errors="replace")
-        return [("CSV", [list(r) for r in csv.reader(io.StringIO(text))])], warnings
+        yield "CSV", [list(r) for r in csv.reader(io.StringIO(text))]
+        return
 
     if extension == ".xls":
         try:
             import xlrd
         except ImportError:  # pragma: no cover - dependency is declared
-            return [], ["Reading legacy .xls BOQ files requires the 'xlrd' package."]
+            warnings.append("Reading legacy .xls BOQ files requires the 'xlrd' package.")
+            return
         book = xlrd.open_workbook(file_contents=content)
-        sheets = [
-            (
+        for sheet in book.sheets():
+            yield (
                 sheet.name,
                 [[sheet.cell_value(r, c) for c in range(sheet.ncols)]
                  for r in range(sheet.nrows)],
             )
-            for sheet in book.sheets()
-        ]
-        return sheets, warnings
+        return
 
     if extension in (".xlsx", ".xlsm"):
         try:
@@ -254,17 +408,34 @@ def _read_sheets(
 
             import openpyxl
         except ImportError:  # pragma: no cover - dependency is declared
-            return [], ["Reading .xlsx BOQ files requires the 'openpyxl' package."]
+            warnings.append("Reading .xlsx BOQ files requires the 'openpyxl' package.")
+            return
         book = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-        sheets = [
-            (ws.title, [list(row) for row in ws.iter_rows(values_only=True)])
-            for ws in book.worksheets
-        ]
-        return sheets, warnings
+        try:
+            for ws in book.worksheets:
+                yield ws.title, [list(row) for row in ws.iter_rows(values_only=True)]
+        finally:
+            # A read-only workbook keeps the zip handle open; release it even if
+            # the caller stops consuming the generator early.
+            book.close()
+        return
 
-    return [], [
-        f"Unsupported file format: {extension or 'unknown'}. Upload CSV, .xls or .xlsx."
-    ]
+    if extension == ".docx":
+        sheets, doc_warnings = _read_docx(content, filename)
+        warnings.extend(doc_warnings)
+        yield from sheets
+        return
+
+    if extension == ".pdf":
+        sheets, pdf_warnings = _read_pdf(content, filename)
+        warnings.extend(pdf_warnings)
+        yield from sheets
+        return
+
+    warnings.append(
+        f"Unsupported file format: {extension or 'unknown'}. "
+        "Upload Excel (.xls/.xlsx/.xlsm), Word (.docx), PDF or CSV."
+    )
 
 
 
@@ -429,16 +600,18 @@ def parse_boq_file(content: bytes, filename: str) -> Dict[str, Any]:
     Never raises for malformed content: the caller decides how to report
     `warnings` and an empty `items` list.
     """
-    sheets, warnings = _read_sheets(content, filename)
-    if not sheets:
-        return {"sheets": [], "items": [], "stated": {}, "warnings": warnings}
-
+    warnings: List[str] = []
     items: List[Dict[str, Any]] = []
     sheet_reports: List[Dict[str, Any]] = []
     stated: Dict[str, Any] = {}
     element_sheets = 0
 
-    for name, rows in sheets:
+    # Sheets are parsed one at a time and their rows released with each pass, so
+    # the peak footprint is the largest single sheet rather than the whole
+    # workbook (see `_iter_sheets`). A file that yields no sheet at all leaves
+    # `items`/`stated` empty and carries its reason in `warnings` — the same
+    # result the previous read-everything-first version returned.
+    for name, rows in _iter_sheets(content, filename, warnings):
         kind = _classify_sheet(name)
         if kind in ("cover", "ignore"):
             continue

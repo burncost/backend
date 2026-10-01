@@ -208,6 +208,68 @@ def effective_product_price(product: Dict[str, Any]) -> Tuple[float, str]:
     return base, "product_catalogue"
 
 
+# ── Unit reconciliation ──────────────────────────────────────────────────────
+# A catalogue price and a bill line describe the same material in different
+# units: the seed catalogue sells steel by the 12 m bar ("length") or the tonne
+# while a Nigerian bill measures it in kg. Stamping a per-bar rate onto a kg
+# quantity billed 12 m of steel at one bar's price per kilogram - the single
+# biggest cause of an inflated contract sum. These helpers convert the catalogue
+# rate into the bill's unit before it is used.
+
+# Mass of one 12 m high-yield (Y) bar, kg, by nominal diameter.
+_STEEL_BAR_MASS_KG: Dict[int, float] = {
+    8: 4.74, 10: 7.40, 12: 10.65, 16: 18.96, 20: 29.63, 25: 46.00, 32: 75.90,
+}
+# Mass units expressed in kg (the anchor unit for the conversion).
+_MASS_UNIT_KG: Dict[str, float] = {
+    "kg": 1.0, "kgs": 1.0, "kilogram": 1.0, "kilograms": 1.0,
+    "tonne": 1000.0, "tonnes": 1000.0, "ton": 1000.0, "tons": 1000.0, "t": 1000.0,
+}
+# Units that mean "one bar".
+_BAR_UNITS = frozenset({"length", "lengths", "bar", "bars"})
+
+
+def rebar_bar_mass_kg(description: str) -> Optional[float]:
+    """Mass of one 12 m bar named in a description ('Y16', 'Y12 rebar'), or None."""
+    for match in re.finditer(r"\bY\s*(\d{1,2})\b", description or "", re.I):
+        diameter = int(match.group(1))
+        if diameter in _STEEL_BAR_MASS_KG:
+            return _STEEL_BAR_MASS_KG[diameter]
+    return None
+
+
+def _norm_unit(unit: Any) -> str:
+    text = str(unit or "").strip().lower().rstrip(".")
+    return text.replace("\u00b2", "2").replace("\u00b3", "3")
+
+
+def unit_reconciliation_factor(bill_unit: Any, catalogue_unit: Any, description: str = "") -> Optional[float]:
+    """Multiplier turning a catalogue unit price into one per ``bill_unit``.
+
+    Returns 1.0 when the units already agree (or either is blank), a factor when
+    they measure the same material in different units, and ``None`` when they
+    cannot be reconciled - the caller must then leave the line's own rate alone
+    rather than stamp a meaningless catalogue figure.
+    """
+    bill = _norm_unit(bill_unit)
+    catalogue = _norm_unit(catalogue_unit)
+    if not bill or not catalogue or bill == catalogue:
+        return 1.0
+    # Mass to mass: kg <-> tonne. Price per catalogue unit -> price per bill unit.
+    if bill in _MASS_UNIT_KG and catalogue in _MASS_UNIT_KG:
+        return _MASS_UNIT_KG[bill] / _MASS_UNIT_KG[catalogue]
+    # Rebar: bar ("length") <-> mass, using the diameter in the description.
+    bar_mass = rebar_bar_mass_kg(description)
+    if bar_mass:
+        # Priced per bar -> the same money spread over the bar's mass.
+        if catalogue in _BAR_UNITS and bill in _MASS_UNIT_KG:
+            return _MASS_UNIT_KG[bill] / bar_mass
+        # Priced per mass unit -> the cost of a whole bar.
+        if catalogue in _MASS_UNIT_KG and bill in _BAR_UNITS:
+            return bar_mass / _MASS_UNIT_KG[catalogue]
+    return None
+
+
 # ─────────────────────────────────────────
 # MATERIAL CODE MAPPING
 # ─────────────────────────────────────────
@@ -1051,20 +1113,51 @@ class PriceService:
             if not item.get("quantity_source"):
                 item["quantity_source"] = "mitm"
 
+            # Reconcile the catalogue unit with the bill's unit before stamping
+            # the rate. A per-12m-bar steel price applied to a kg quantity (or a
+            # per-tonne price applied to a kg bill) inflated the contract sum by
+            # an order of magnitude.
+            factor = unit_reconciliation_factor(
+                item.get("unit"), matching_product.unit, item.get("description", "")
+            )
+            if factor is None:
+                # The units measure different things, so the catalogue rate
+                # would be meaningless: keep the line's own rate and report the
+                # mismatch instead of overwriting it.
+                item["unit_mismatch"] = {
+                    "bill_unit": item.get("unit"),
+                    "catalogue_unit": matching_product.unit,
+                }
+                item["rate_source"] = "gemini_verified" if item.get("adjusted_rate") else db_label
+                if not item.get("adjusted_rate") and item.get("rate"):
+                    item["adjusted_rate"] = item["rate"]
+                return item, {
+                    "item_code": item_code,
+                    "description": item.get("description", ""),
+                    "reason": "unit_mismatch",
+                    "bill_unit": item.get("unit"),
+                    "db_rate": matching_product.unit_price,
+                    "db_rate_unit": matching_product.unit,
+                    "action": "skipped_incompatible_unit",
+                }, None
+
+            matched_price = round(matching_product.unit_price * factor, 2)
+
             gemini_rate = item.get("adjusted_rate", 0)
             if gemini_rate > 0:
-                deviation_pct = abs(gemini_rate - matching_product.unit_price) / matching_product.unit_price * 100
+                deviation_pct = abs(gemini_rate - matched_price) / matched_price * 100
                 if deviation_pct > 25:
                     old_amount = item.get("amount", 0)
-                    item["adjusted_rate"] = matching_product.unit_price
-                    item["amount"] = round(item.get("quantity", 0) * matching_product.unit_price, 2)
+                    item["adjusted_rate"] = matched_price
+                    item["amount"] = round(item.get("quantity", 0) * matched_price, 2)
                     item["rate_source"] = db_label
 
                     discrepancy = {
                         "item_code": item_code,
                         "description": item.get("description", ""),
                         "gemini_rate": gemini_rate,
-                        "db_rate": matching_product.unit_price,
+                        "db_rate": matched_price,
+                        "db_rate_unit": matching_product.unit,
                         "deviation_pct": round(deviation_pct, 1),
                         "action": "replaced_with_db_price",
                     }
@@ -1073,8 +1166,8 @@ class PriceService:
                     item["rate_source"] = "gemini_verified"
             else:
                 item["rate_source"] = db_label
-                item["adjusted_rate"] = matching_product.unit_price
-                item["amount"] = round(item.get("quantity", 0) * matching_product.unit_price, 2)
+                item["adjusted_rate"] = matched_price
+                item["amount"] = round(item.get("quantity", 0) * matched_price, 2)
 
             return item, None, None
 

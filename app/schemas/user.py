@@ -81,23 +81,34 @@ class OAuthRegisterRequest(BaseModel):
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     phone_number: Optional[str] = None
-    first_name: Optional[str] = Field(None, min_length=2, max_length=100)
+    # min_length is 0 so a cleared field (empty string) doesn't 422. An empty
+    # value is normalised to None below and skipped by the endpoint, so a blank
+    # field can never wipe an existing value.
+    first_name: Optional[str] = Field(None, min_length=0, max_length=100)
     other_name: Optional[str] = Field(None, min_length=0, max_length=100)
-    last_name: Optional[str] = Field(None, min_length=2, max_length=100)
+    last_name: Optional[str] = Field(None, min_length=0, max_length=100)
     business_name: Optional[str] = Field(None, max_length=255)
     avatar_url: Optional[str] = None
     date_of_birth: Optional[date] = None
-    location: Optional[str] = Field(None, min_length=2, max_length=100)
+    location: Optional[str] = Field(None, min_length=0, max_length=100)
     role: Optional[str] = Field(None, max_length=50)
-    
+
+    @field_validator('first_name', 'other_name', 'last_name', 'business_name', 'location')
+    @classmethod
+    def _blank_to_none(cls, v: Optional[str]) -> Optional[str]:
+        """Treat an empty/whitespace-only field as 'not provided'."""
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
 
     @field_validator('phone_number')
     @classmethod
     def validate_phone_update(cls, v: Optional[str]) -> Optional[str]:
         """Validate phone number on update"""
-        if v is None:
-            return v
-        
+        if v is None or not v.strip():
+            return None
+
         v = v.strip().replace(' ', '').replace('-', '')
         
         if v.startswith('0'):

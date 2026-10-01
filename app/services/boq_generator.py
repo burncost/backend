@@ -22,17 +22,42 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _plain_dashes(value: Any) -> Any:
+    """Replace typographic dashes with a plain hyphen in every string.
+
+    Applied to BOQ payloads before they leave the service so the returned text
+    clients render never carries an em/en dash. Walks dicts and lists so the
+    whole document (warnings, notes, narrative, flags) is normalised.
+    """
+    if isinstance(value, str):
+        return value.replace("\u2014", "-").replace("\u2013", "-")
+    if isinstance(value, dict):
+        return {key: _plain_dashes(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain_dashes(item) for item in value]
+    return value
+
+
+
+
 # Cap on distinct market-rate lookups per uploaded BOQ. A real bill carries
 # hundreds of lines; without a cap the request would fire hundreds of DB/AI
 # lookups. The caller reports how many lines were left unverified.
 _MAX_RATE_LOOKUPS = 300
 
 # How many of those lookups may run at once. A real bill has hundreds of lines
-# and `PriceService._load_prices` populates a cache on first use — firing the
+# and `PriceService._load_prices` populates a cache on first use - firing the
 # whole batch concurrently opened one DB session per line and exhausted the
 # Postgres pool ("too many clients already"), which silently unverified the
 # entire bill.
 _MAX_CONCURRENT_RATE_LOOKUPS = 5
+
+# Lookups are also dispatched in bounded batches: the semaphore caps *running*
+# lookups, but gathering all 300 targets at once still allocated 300 coroutines,
+# their argument tuples and their result slots. 50 keeps a large bill's peak
+# allocation flat without slowing the common (few-line) case.
+_RATE_LOOKUP_CHUNK = 50
 
 # Band around the market rate treated as "within range" when quoting a
 # comparable figure for an item (Nigerian practice: ±5-10% on material rates).
@@ -67,11 +92,11 @@ _WALLING_HINTS = ("blockwork", "block wall", "sandcrete", "wall")
 
 # Which Python take-off value owns a bill line's quantity. Rules are evaluated in
 # order and the first match wins, so the more specific descriptions come first.
-#   units     — normalised units the rule applies to (empty = any)
-#   all_hints — every one of these must appear in the description
-#   any_hints — at least one must appear
-#   anti      — the rule is skipped when any of these appears
-#   factor    — converts the take-off value to the bill's unit (e.g. tonnes→kg)
+#   units     - normalised units the rule applies to (empty = any)
+#   all_hints - every one of these must appear in the description
+#   any_hints - at least one must appear
+#   anti      - the rule is skipped when any of these appears
+#   factor    - converts the take-off value to the bill's unit (e.g. tonnes→kg)
 # A line matching no rule keeps the model's own quantity and is labelled
 # `quantity_source="ai"` (see BOQGenerator._apply_python_quantities).
 _PYTHON_QUANTITY_RULES: Tuple[Dict[str, Any], ...] = (
@@ -91,7 +116,7 @@ _PYTHON_QUANTITY_RULES: Tuple[Dict[str, Any], ...] = (
     },
     {"key": "blocks_total_nr", "units": {"nr"}, "all_hints": ("block",)},
     {"key": "net_wall_area_m2", "units": {"m2"}, "all_hints": ("block",)},
-    # Tiling — floor first, then walls, then a generic m² fallback.
+    # Tiling - floor first, then walls, then a generic m² fallback.
     {
         "key": "floor_tiles_m2",
         "units": {"m2"},
@@ -275,7 +300,7 @@ def _comparable_rate(
         return None, "weak_match"
 
     # "100mm uPVC pipe" against "110mm PVC Pipe" is a different product, not a
-    # rate gap — withhold when the dimensions disagree.
+    # rate gap - withhold when the dimensions disagree.
     item_dimensions = _dimension_tokens(description)
     market_dimensions = _dimension_tokens(catalogue_name)
     if item_dimensions and market_dimensions and not (item_dimensions & market_dimensions):
@@ -524,6 +549,111 @@ def _verification_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
+# ── Phase 5: regenerate an uploaded bill on accept ─────────────────────────
+#
+# An uploaded bill lives in `boq_verifications`; accepting it ("regenerate")
+# rebuilds a real, priced BOQ as a new `boqs` version. The quantities are the
+# upload's own take-off and are never touched - regeneration corrects the
+# *rates*, reusing the market rates the verification pass already resolved from
+# the DB. No second, divergent pricing pass runs, so the regenerated figures can
+# never disagree with what the verification screen showed.
+
+def _to_object_id(value: Any) -> Optional[ObjectId]:
+    """Parse an id without raising on the malformed values a bad request sends."""
+    try:
+        return ObjectId(str(value))
+    except Exception:
+        return None
+
+
+def _rate_lookup(verified_items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Index the verify pass by description so regeneration can reprice lines."""
+    index: Dict[str, Dict[str, Any]] = {}
+    for entry in verified_items or []:
+        key = (entry.get("description") or "").strip().lower()
+        if key and entry.get("market_rate"):
+            index[key] = entry
+    return index
+
+
+def _reprice_lines(
+    items: List[Dict[str, Any]],
+    verified_by_description: Dict[str, Dict[str, Any]],
+    city: str,
+) -> List[Dict[str, Any]]:
+    """Apply each line's verified market rate, keeping the upload's quantities.
+
+    A line with no comparable rate keeps its quoted figure and is marked
+    `was_revised=False` with a note, so a QS can see it was left untouched
+    rather than quietly repriced to zero.
+    """
+    corrected: List[Dict[str, Any]] = []
+    for item in items or []:
+        description = item.get("description") or ""
+        quantity = float(item.get("quantity") or 0.0)
+        quoted_rate = float(item.get("rate") or 0.0)
+        quoted_amount = float(item.get("amount") or 0.0)
+
+        match = verified_by_description.get(description.strip().lower())
+        market_rate = float(match["market_rate"]) if match else None
+        if market_rate:
+            rate = market_rate
+            rate_source = match.get("market_rate_source") or "database"
+            revised = abs(rate - quoted_rate) > 0.01
+            note = (
+                f"Repriced from {quoted_rate:,.2f} to the verified "
+                f"{match.get('market_rate_city') or city} rate ({rate_source})."
+                if revised
+                else "Already within range of the verified rate."
+            )
+        else:
+            rate = quoted_rate
+            rate_source = "quoted"
+            revised = False
+            note = "No comparable rate in the catalogue - quoted rate kept."
+
+        corrected.append({
+            "description": description,
+            "element_name": item.get("element_name"),
+            "unit": item.get("unit", ""),
+            "quantity": quantity,
+            "rate": rate,
+            "adjusted_rate": rate,
+            "amount": round(quantity * rate, 2),
+            "rate_source": rate_source,
+            "quantity_source": "upload",
+            "original_rate": quoted_rate,
+            "original_amount": quoted_amount,
+            "was_revised": revised,
+            "revision_note": note,
+        })
+    return corrected
+
+
+def _regenerated_elements(
+    corrected_items: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Group repriced lines into the element shape the app stores and renders."""
+    elements: List[Dict[str, Any]] = []
+    for group in group_items_by_element(corrected_items):
+        lines = group.get("items") or []
+        original_total = round(
+            sum(float(line.get("original_amount") or 0.0) for line in lines), 2
+        )
+        regenerated_total = round(
+            sum(float(line.get("amount") or 0.0) for line in lines), 2
+        )
+        elements.append({
+            "element_name": group.get("element_name"),
+            "items": lines,
+            "element_total": regenerated_total,
+            "original_total": original_total,
+            "regenerated_total": regenerated_total,
+            "variance": round(regenerated_total - original_total, 2),
+        })
+    return elements
+
+
 class BOQGenerator:
     """Service for generating Bills of Quantities from building parameters."""
 
@@ -548,7 +678,9 @@ class BOQGenerator:
         created_by: str = ""
     ) -> Dict[str, Any]:
         """Create a new BOQ record in MongoDB."""
-        if not self.db:
+        # NOTE: motor's AsyncIOMotorDatabase raises NotImplementedError on
+        # truth-value testing, so always compare against None.
+        if self.db is None:
             raise RuntimeError("MongoDB connection not available")
 
         boq_doc = {
@@ -580,7 +712,7 @@ class BOQGenerator:
     ) -> None:
         """Generate BOQ items in background using AI."""
         logger.info(f"Generating BOQ items for {boq_id} from {len(document_ids)} documents")
-        if not self.db:
+        if self.db is None:
             logger.warning("No DB connection - cannot generate BOQ items")
             return
 
@@ -619,8 +751,10 @@ class BOQGenerator:
             boq_data["summary"] = {
                 "sub_total": totals["sub_total"],
                 "contingency": totals["contingency_amount"],
+                "contingency_amount": totals["contingency_amount"],
                 "contingency_pct": totals["contingency_pct"],
                 "vat": totals["vat_amount"],
+                "vat_amount": totals["vat_amount"],
                 "vat_pct": totals["vat_pct"],
                 "total_contract_sum": totals["total_contract_sum"],
             }
@@ -640,7 +774,7 @@ class BOQGenerator:
             logger.info(f"BOQ {boq_id} items generated successfully")
         except Exception as e:
             logger.error(f"Failed to generate BOQ items for {boq_id}: {e}")
-            if self.db:
+            if self.db is not None:
                 await self.db["boqs"].update_one(
                     {"_id": ObjectId(boq_id)},
                     {"$set": {"status": "failed", "error": str(e), "updatedAt": datetime.utcnow()}}
@@ -652,7 +786,7 @@ class BOQGenerator:
         approved_by: str
     ) -> Optional[Dict[str, Any]]:
         """Approve a BOQ."""
-        if not self.db:
+        if self.db is None:
             raise RuntimeError("MongoDB connection not available")
 
         result = await self.db["boqs"].find_one_and_update(
@@ -674,57 +808,123 @@ class BOQGenerator:
     async def export_boq(
         self,
         boq_id: str,
-        format: str
-    ) -> str:
-        """Export a BOQ to the specified format and return a file URL."""
-        logger.info(f"Exporting BOQ {boq_id} to {format}")
-        if not self.db:
-            return f"/exports/{boq_id}.{format}"
+        format: str,
+    ) -> Optional[Tuple[str, str, bytes]]:
+        """Build a BOQ export in memory and return a downloadable payload.
+
+        Returns ``(filename, media_type, content_bytes)`` for the caller to
+        stream, or ``None`` when the BOQ cannot be found. Rendering happens in
+        memory (no temp files), so concurrent exports and multiple workers never
+        collide on disk. ``word`` is accepted as an alias for ``docx``.
+        """
+        # `word` is the user-facing name for the .docx format.
+        fmt = "docx" if format in ("word", "docx") else format
+        logger.info(f"Exporting BOQ {boq_id} to {fmt}")
+
+        if fmt not in ("csv", "excel", "pdf", "docx"):
+            raise ValueError(f"Unsupported export format: {format}")
+        if self.db is None:
+            return None
 
         try:
             boq = await self.db["boqs"].find_one({"_id": ObjectId(boq_id)})
             if not boq:
+                # Bills uploaded for verification live in their own collection.
+                # Normalise their shape (element_name → elementName) so the same
+                # writers below can render csv/excel/pdf/docx unchanged.
+                v = await self.db["boq_verifications"].find_one({"_id": ObjectId(boq_id)})
+                if v:
+                    # An uploaded bill carries no computed totals, so fall back to
+                    # the figures the document itself states.
+                    stated = v.get("stated") or {}
+                    boq = {
+                        "title": v.get("filename") or "Uploaded BOQ",
+                        "elements": [
+                            {
+                                "elementName": el.get("element_name") or el.get("elementName") or "",
+                                "items": el.get("items", []),
+                            }
+                            for el in v.get("elements", [])
+                        ],
+                        "summary": {
+                            "sub_total": stated.get("sub_total") or 0,
+                            "contingency": stated.get("contingency") or 0,
+                            "vat": stated.get("vat") or 0,
+                            "total_contract_sum": stated.get("total_contract_sum")
+                            or v.get("total_quoted")
+                            or 0,
+                        },
+                    }
+            if not boq:
                 logger.warning(f"BOQ {boq_id} not found for export")
-                return f"/exports/{boq_id}.{format}"
+                return None
 
-            elements = boq.get("elements", [])
-            summary = boq.get("summary", {})
-            project_title = boq.get("title", "BOQ")
+            # Generated bills persist their payload nested under `boqData` (only the
+            # background regenerator mirrors `elements` to the top level), so unwrap
+            # it the same way /cart-preview does - otherwise every export is blank.
+            # `elementName` is also normalised here because the generator emits
+            # snake_case `element_name` while the writers below read camelCase.
+            data = boq.get("boqData") if isinstance(boq.get("boqData"), dict) else {}
+            elements = [
+                {
+                    "elementName": el.get("elementName") or el.get("element_name") or "",
+                    "items": [
+                        {
+                            **item,
+                            # Price enrichment writes `adjusted_rate` and leaves
+                            # `rate` at 0 for AI-estimated lines. The UI prefers
+                            # adjusted_rate (BOQResults.tsx), so the Rate column in
+                            # an export would otherwise show N0.00 while the screen
+                            # shows the real figure.
+                            "rate": item.get("adjusted_rate") or item.get("rate") or 0,
+                        }
+                        for item in (el.get("items") or [])
+                    ],
+                }
+                for el in (data.get("elements") or boq.get("elements") or [])
+            ]
+            summary = data.get("summary") or boq.get("summary") or {}
+            project_title = (
+                boq.get("title")
+                or (data.get("project_info") or {}).get("project_title")
+                or "BOQ"
+            )
 
-            export_dir = os.path.join(os.getcwd(), "exports")
-            os.makedirs(export_dir, exist_ok=True)
+            # Human-friendly, filesystem-safe attachment base name.
+            safe_title = re.sub(r"[^A-Za-z0-9 _-]", "", project_title or "").strip()
+            safe_title = (safe_title or boq_id)[:60]
+            from io import BytesIO, StringIO
 
-            if format == "csv":
+            if fmt == "csv":
                 import csv
-                filepath = os.path.join(export_dir, f"{boq_id}.csv")
-                with open(filepath, "w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Element", "Item Code", "Description", "Quantity", "Unit", "Rate", "Amount"])
-                    for el in elements:
-                        for item in el.get("items", []):
-                            writer.writerow([
-                                el.get("elementName", ""),
-                                item.get("item_code", item.get("itemCode", "")),
-                                item.get("description", ""),
-                                item.get("quantity", 0),
-                                item.get("unit", ""),
-                                item.get("rate", 0),
-                                item.get("amount", 0),
-                            ])
-                    writer.writerow([])
-                    writer.writerow(["Total Contract Sum", "", "", "", "", "", summary.get("total_contract_sum", 0)])
-                logger.info(f"Exported BOQ {boq_id} to CSV: {filepath}")
-                return f"/exports/{boq_id}.csv"
+                buf = StringIO()
+                writer = csv.writer(buf)
+                writer.writerow(["Element", "Item Code", "Description", "Quantity", "Unit", "Rate", "Amount"])
+                for el in elements:
+                    for item in el.get("items", []):
+                        writer.writerow([
+                            el.get("elementName", ""),
+                            item.get("item_code", item.get("itemCode", "")),
+                            item.get("description", ""),
+                            item.get("quantity", 0),
+                            item.get("unit", ""),
+                            item.get("rate", 0),
+                            item.get("amount", 0),
+                        ])
+                writer.writerow([])
+                writer.writerow(["Total Contract Sum", "", "", "", "", "", summary.get("total_contract_sum", 0)])
+                logger.info(f"Exported BOQ {boq_id} to CSV")
+                # utf-8-sig: Excel opens CSV with the naira/accents intact.
+                return (f"{safe_title}.csv", "text/csv", buf.getvalue().encode("utf-8-sig"))
 
-            elif format == "excel":
+            elif fmt == "excel":
                 try:
                     import openpyxl
-                    from openpyxl.styles import Font, Alignment
+                    from openpyxl.styles import Font, Alignment, PatternFill
                 except ImportError:
                     logger.warning("openpyxl not installed, falling back to CSV")
                     return await self.export_boq(boq_id, "csv")
 
-                filepath = os.path.join(export_dir, f"{boq_id}.xlsx")
                 wb = openpyxl.Workbook()
                 ws = wb.active
                 ws.title = "BOQ"
@@ -733,9 +933,12 @@ class BOQGenerator:
                 ws.merge_cells("A1:G1")
 
                 headers = ["Element", "Item Code", "Description", "Quantity", "Unit", "Rate (NGN)", "Amount (NGN)"]
+                # BurnCost orange header row so the workbook matches the PDF/Word.
+                brand_fill = PatternFill("solid", fgColor="FF6B00")
                 for col, h in enumerate(headers, 1):
                     cell = ws.cell(row=3, column=col, value=h)
-                    cell.font = Font(bold=True)
+                    cell.font = Font(bold=True, color="FFFFFF")
+                    cell.fill = brand_fill
 
                 row = 4
                 for el in elements:
@@ -765,58 +968,57 @@ class BOQGenerator:
                 ws.cell(row=row, column=1, value="TOTAL CONTRACT SUM").font = Font(bold=True, size=13)
                 ws.cell(row=row, column=7, value=summary.get("total_contract_sum", 0)).font = Font(bold=True, size=13)
 
-                wb.save(filepath)
-                logger.info(f"Exported BOQ {boq_id} to Excel: {filepath}")
-                return f"/exports/{boq_id}.xlsx"
+                buf = BytesIO()
+                wb.save(buf)
+                logger.info(f"Exported BOQ {boq_id} to Excel")
+                return (
+                    f"{safe_title}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    buf.getvalue(),
+                )
 
-            elif format == "pdf":
+            elif fmt == "pdf":
+                # Branded, watermarked renderer (PyMuPDF) shared with the vendor
+                # report. It always has a title block + summary, so the download
+                # can never come back blank.
                 try:
-                    from reportlab.lib.pagesizes import A4
-                    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-                    from reportlab.lib.styles import getSampleStyleSheet
-                    from reportlab.lib import colors
+                    from app.services.boq_report_service import build_boq_pdf
                 except ImportError:
-                    logger.warning("reportlab not installed, falling back to CSV")
+                    logger.warning("PyMuPDF not installed, falling back to CSV")
                     return await self.export_boq(boq_id, "csv")
 
-                filepath = os.path.join(export_dir, f"{boq_id}.pdf")
-                doc = SimpleDocTemplate(filepath, pagesize=A4)
-                styles = getSampleStyleSheet()
-                story = [Paragraph(f"Bill of Quantities - {project_title}", styles["Title"]), Spacer(1, 12)]
+                content = build_boq_pdf(
+                    project_title=project_title,
+                    elements=elements,
+                    summary=summary,
+                    project_info=(data.get("project_info") or boq.get("project_info") or {}),
+                )
+                logger.info(f"Exported BOQ {boq_id} to PDF")
+                return (f"{safe_title}.pdf", "application/pdf", content)
 
-                for el in elements:
-                    story.append(Paragraph(el.get("elementName", ""), styles["Heading2"]))
-                    data = [["Item Code", "Description", "Qty", "Unit", "Rate", "Amount"]]
-                    for item in el.get("items", []):
-                        data.append([
-                            item.get("item_code", item.get("itemCode", "")),
-                            item.get("description", ""),
-                            str(item.get("quantity", 0)),
-                            item.get("unit", ""),
-                            f"N{float(item.get('rate') or 0):,.2f}",
-                            f"N{float(item.get('amount') or 0):,.2f}",
-                        ])
-                    t = Table(data, colWidths=[60, 200, 50, 40, 70, 70])
-                    t.setStyle(TableStyle([
-                        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                        ("FONTSIZE", (0, 0), (-1, -1), 8),
-                        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                    ]))
-                    story.append(t)
-                    story.append(Spacer(1, 12))
+            elif fmt == "docx":
+                try:
+                    from app.services.boq_report_service import build_boq_docx
+                except ImportError:
+                    logger.warning("python-docx not installed, falling back to CSV")
+                    return await self.export_boq(boq_id, "csv")
 
-                doc.build(story)
-                logger.info(f"Exported BOQ {boq_id} to PDF: {filepath}")
-                return f"/exports/{boq_id}.pdf"
-
-            else:
-                logger.warning(f"Unsupported export format: {format}")
-                return f"/exports/{boq_id}.{format}"
+                content = build_boq_docx(
+                    project_title=project_title,
+                    elements=elements,
+                    summary=summary,
+                    project_info=(data.get("project_info") or boq.get("project_info") or {}),
+                )
+                logger.info(f"Exported BOQ {boq_id} to DOCX")
+                return (
+                    f"{safe_title}.docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    content,
+                )
 
         except Exception as e:
             logger.error(f"Export failed for BOQ {boq_id}: {e}")
-            return f"/exports/{boq_id}.{format}"
+            raise
 
     async def upload_and_verify(
         self,
@@ -824,17 +1026,20 @@ class BOQGenerator:
         uploaded_by: str,
         city: str = "Abuja",
     ) -> Dict[str, Any]:
-        """Upload and verify a BOQ file (Excel/CSV) against market prices.
+        """Upload and verify a BOQ file (Excel/Word/PDF/CSV) against market prices.
 
         Handles the real Nigerian QS layout: a multi-sheet workbook with one
         sheet per SMM7 element (plus COVER PAGE / SUMMARY / GENERAL SUMMARY),
-        parsed by `boq_file_parser`. Rates are compared against `city` (Nigerian
+        parsed by `boq_file_parser` - Word tables and PDF pages are flattened to
+        the same shape. Rates are compared against `city` (Nigerian
         material prices vary by state), and repeated descriptions share a single
         lookup so a 300-line bill does not fire 300 market-rate queries.
         """
         logger.info(f"Processing uploaded BOQ file by user {uploaded_by}")
         try:
-            content = await file.read()
+            # Accepts a Starlette UploadFile (async read) or a plain file object
+            # (the upload endpoint hands us a spooled temp file).
+            content = await file.read() if asyncio.iscoroutinefunction(file.read) else file.read()
             filename = file.filename or "uploaded"
 
             parsed = parse_boq_file(content, filename)
@@ -881,7 +1086,7 @@ class BOQGenerator:
             lookup_targets = distinct[:_MAX_RATE_LOOKUPS]
             # Verified DB rates only. `get_rate` would fall back to an online
             # price or an AI estimate, and neither may be what a rate check
-            # reports as "the market rate" — it is also a network call per line.
+            # reports as "the market rate" - it is also a network call per line.
             price_truth = PriceTruthService(self.price_service)
             gate = asyncio.Semaphore(_MAX_CONCURRENT_RATE_LOOKUPS)
 
@@ -889,9 +1094,16 @@ class BOQGenerator:
                 async with gate:
                     return await price_truth.get_verified_rate(description, city)
 
-            lookups = await asyncio.gather(*[
-                _verified_rate(description) for description in lookup_targets
-            ])
+            # Bounded batches: dispatch the targets in chunks instead of
+            # gathering the whole list at once, so a 300-line bill holds at most
+            # `_RATE_LOOKUP_CHUNK` live coroutines. `gather` preserves order, so
+            # the zip below still maps every rate back to its description.
+            lookups: List[Any] = []
+            for start in range(0, len(lookup_targets), _RATE_LOOKUP_CHUNK):
+                batch = lookup_targets[start:start + _RATE_LOOKUP_CHUNK]
+                lookups.extend(await asyncio.gather(*[
+                    _verified_rate(description) for description in batch
+                ]))
             rate_by_description = {
                 description.strip().lower(): result
                 for description, result in zip(lookup_targets, lookups)
@@ -966,12 +1178,12 @@ class BOQGenerator:
             if arithmetic["findings"]:
                 warnings.append(
                     f"{arithmetic['mismatch_count']} arithmetic issue(s) found in the "
-                    "uploaded BOQ — see the arithmetic report."
+                    "uploaded BOQ - see the arithmetic report."
                 )
             analysis.update(_verification_summary(analysis))
 
             boq_id = ""
-            if self.db:
+            if self.db is not None:
                 doc = {
                     "filename": filename,
                     "uploadedBy": uploaded_by,
@@ -993,7 +1205,7 @@ class BOQGenerator:
             inflated_count = len([v for v in analysis["verified_items"] if v.get("status") == "inflated"])
             fair_count = len([v for v in analysis["verified_items"] if v.get("status") == "fair"])
 
-            return {
+            return _plain_dashes({
                 "boq_id": boq_id,
                 "record_type": "verification",
                 "parsed_boq": {
@@ -1011,7 +1223,7 @@ class BOQGenerator:
                     f"{len(parsed_items) - inflated_count - fair_count} without a "
                     "comparable rate."
                 ),
-            }
+            })
 
         except Exception as e:
             logger.error(f"Upload and verify failed: {e}")
@@ -1028,13 +1240,33 @@ class BOQGenerator:
         decision: str,
         user_id: str
     ) -> Optional[Dict[str, Any]]:
-        """Handle user decision on a BOQ (regenerate or save original)."""
-        if not self.db:
+        """Handle a user decision on a BOQ.
+
+        Generated bills (collection `boqs`) only record the decision. Uploaded
+        bills (collection `boq_verifications`) are regenerated for real:
+        `regenerate` rebuilds a priced BOQ as a new `boqs` version from the
+        verified items, `save_original` just records the choice. Returns ``None``
+        when the id names nothing the caller owns.
+        """
+        if self.db is None:
             raise RuntimeError("MongoDB connection not available")
+
+        oid = _to_object_id(boq_id)
+        if oid is None:
+            return None
+
+        verification = await self.db["boq_verifications"].find_one({"_id": oid})
+        if verification:
+            # A verification record may only be decided on by the uploader.
+            if str(verification.get("uploadedBy") or "") != str(user_id):
+                return None
+            if decision == "regenerate":
+                return await self._regenerate_verification(verification, user_id)
+            return await self._save_verification(oid, user_id)
 
         new_status = "regenerated" if decision == "regenerate" else "saved_original"
         result = await self.db["boqs"].find_one_and_update(
-            {"_id": ObjectId(boq_id)},
+            {"_id": oid},
             {
                 "$set": {
                     "status": new_status,
@@ -1050,6 +1282,196 @@ class BOQGenerator:
             result["_id"] = str(result["_id"])
         return result
 
+    async def _save_verification(
+        self, oid: ObjectId, user_id: str
+    ) -> Dict[str, Any]:
+        """Record a `save_original` decision on an uploaded bill."""
+        now = datetime.utcnow()
+        await self.db["boq_verifications"].update_one(
+            {"_id": oid},
+            {"$set": {
+                "status": "saved_original",
+                "userDecision": "save_original",
+                "decidedBy": user_id,
+                "decidedAt": now,
+                "updatedAt": now,
+            }},
+        )
+        return {
+            "boq_id": str(oid),
+            "record_type": "verification",
+            "status": "saved_original",
+            "message": "Original bill saved as-is - nothing was repriced.",
+        }
+
+    async def _regenerate_verification(
+        self, verification: Dict[str, Any], user_id: str
+    ) -> Dict[str, Any]:
+        """Rebuild a priced BOQ from an uploaded bill's verified items.
+
+        Reuses the verification's own DB rates (no second pricing pass, so the
+        regenerated figures can never diverge from what was shown on screen),
+        the SMM7 grouping, and `PriceService.recalculate_totals` for the summary.
+        An optional Gemini pass only tidies wording - quantities and rates are
+        never touched by the model.
+        """
+        city = verification.get("city") or "Abuja"
+        items = verification.get("items") or []
+        verified_by_description = _rate_lookup(
+            (verification.get("analysis") or {}).get("verified_items") or []
+        )
+
+        corrected = _reprice_lines(items, verified_by_description, city)
+        if self.api_key and corrected:
+            try:
+                await self._rewrite_specifications(corrected)
+            except Exception as exc:  # non-fatal: the deterministic rebuild stands
+                logger.warning("Regeneration wording pass skipped: %s", exc)
+
+        elements = _regenerated_elements(corrected)
+        totals = self.price_service.recalculate_totals(
+            [{"element_name": el["element_name"], "items": el["items"]} for el in elements]
+        )
+
+        line_items = [line for el in elements for line in el["items"]]
+        items_revised = sum(1 for line in line_items if line.get("was_revised"))
+        original_sub_total = round(sum(el["original_total"] for el in elements), 2)
+        regenerated_sub_total = round(totals["sub_total"], 2)
+
+        now = datetime.utcnow()
+        title = verification.get("filename") or "Uploaded BOQ"
+        summary = {
+            "sub_total": regenerated_sub_total,
+            "contingency": totals["contingency_amount"],
+            "contingency_amount": totals["contingency_amount"],
+            "contingency_pct": totals["contingency_pct"],
+            "vat": totals["vat_amount"],
+            "vat_amount": totals["vat_amount"],
+            "vat_pct": totals["vat_pct"],
+            "total_contract_sum": totals["total_contract_sum"],
+        }
+
+        inserted = await self.db["boqs"].insert_one({
+            "projectId": "",
+            "boqNumber": f"BOQ-{now.strftime('%Y%m%d%H%M%S')}",
+            "title": title,
+            "status": "pending_review",
+            "version": int(verification.get("version") or 1),
+            "generationMethod": "regenerated",
+            "sourceVerificationId": str(verification["_id"]),
+            "city": city,
+            "elements": elements,
+            "summary": summary,
+            "createdBy": user_id,
+            "createdAt": now,
+            "updatedAt": now,
+        })
+        new_id = str(inserted.inserted_id)
+
+        await self.db["boq_verifications"].update_one(
+            {"_id": verification["_id"]},
+            {"$set": {
+                "status": "regenerated",
+                "userDecision": "regenerate",
+                "decidedBy": user_id,
+                "decidedAt": now,
+                "regeneratedBoqId": new_id,
+                "updatedAt": now,
+            }},
+        )
+
+        if items_revised:
+            revision_notes = [
+                f"{items_revised} of {len(line_items)} lines repriced to verified "
+                f"{city} market rates."
+            ]
+        else:
+            revision_notes = [
+                "Every quoted rate already matched its verified market rate - "
+                "quantities and rates were kept."
+            ]
+
+        return {
+            "boq_id": new_id,
+            "record_type": "verification",
+            "status": "regenerated",
+            "regenerated_boq": {
+                "project_title": title,
+                "regenerated_at": now.isoformat(),
+                "elements": [
+                    {
+                        "element_name": el["element_name"],
+                        "original_total": el["original_total"],
+                        "regenerated_total": el["regenerated_total"],
+                        "variance": el["variance"],
+                        "line_items": el["items"],
+                    }
+                    for el in elements
+                ],
+                "summary": {
+                    "original_sub_total": original_sub_total,
+                    "regenerated_sub_total": regenerated_sub_total,
+                    "contingencies": totals["contingency_amount"],
+                    "vat_rate": totals["vat_pct"],
+                    "vat_amount": totals["vat_amount"],
+                    "total_contract_sum": totals["total_contract_sum"],
+                    "total_saving": round(original_sub_total - regenerated_sub_total, 2),
+                },
+                "items_revised": items_revised,
+                "revision_notes": revision_notes,
+            },
+            "message": (
+                f"Repriced {items_revised} of {len(line_items)} items against "
+                f"verified {city} market rates. The regenerated bill is saved as "
+                "a new version."
+            ),
+        }
+
+    async def _rewrite_specifications(self, corrected: List[Dict[str, Any]]) -> None:
+        """Let Gemini tidy wording into SMM7 element groups (wording only).
+
+        The model echoes each line back by index and may not invent or drop
+        lines; only `element_name`/`description` are read from its reply, so
+        quantities and rates are structurally impossible to change. Failures
+        propagate to the caller, which keeps the deterministic rebuild.
+        """
+        from google.genai import types as genai_types
+
+        listing = "\n".join(
+            f'{i}. [{row.get("element_name") or "Unclassified"}] '
+            f'{row.get("description")} ({row.get("unit") or "-"})'
+            for i, row in enumerate(corrected)
+        )
+        prompt = (
+            "You are a Nigerian quantity surveyor tidying a bill of quantities.\n"
+            "For each numbered line below, return the SMM7 element group and a "
+            "cleaner description. Do NOT change, add or drop lines - echo each "
+            "index exactly once.\n\n"
+            f"{listing}\n\n"
+            'Return ONLY JSON: {"items": [{"i": number, "element_name": '
+            '"SMM7 element", "description": "cleaned description"}]}'
+        )
+
+        client = get_gemini_client()
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=[prompt],
+            config=genai_types.GenerateContentConfig(
+                temperature=0.0, max_output_tokens=8192
+            ),
+        )
+        parsed = self._parse_boq_json(response.text or "")
+        if not parsed:
+            raise ValueError("unparseable wording response")
+        for row in parsed.get("items") or []:
+            idx = row.get("i")
+            if not isinstance(idx, int) or not 0 <= idx < len(corrected):
+                continue
+            if row.get("element_name"):
+                corrected[idx]["element_name"] = str(row["element_name"])
+            if row.get("description"):
+                corrected[idx]["description"] = str(row["description"])
+
     async def verify_quote_text(
         self,
         quote_text: str,
@@ -1063,7 +1485,7 @@ class BOQGenerator:
 
             client = get_gemini_client()
             prompt = f"""You are a Nigerian quantity surveyor. Parse the following quote text and extract line items.
-Do NOT estimate market rates — extract only the quoted values. Market rates are supplied from the database.
+Do NOT estimate market rates - extract only the quoted values. Market rates are supplied from the database.
 
 Quote text:
 {quote_text}
@@ -1142,7 +1564,7 @@ Return ONLY valid JSON with this structure:
                             item["status"] = "fair"
                             fair_count += 1
                     else:
-                        # Flagged estimate — do not claim inflation
+                        # Flagged estimate - do not claim inflation
                         item["status"] = "unverified"
                         item["deviation_pct"] = None
                         unverified_count += 1
@@ -1219,7 +1641,7 @@ Return ONLY valid JSON with this structure:
             boq = await self._generate_from_template(request, enriched)
 
         # Element groups an accepted AI draft still omitted (those below the
-        # rejection threshold) — surfaced so the bill is not treated as final.
+        # rejection threshold) - surfaced so the bill is not treated as final.
         missing_groups = boq.pop("_missing_element_groups", []) or []
 
         # Arithmetic is Python's: swap the draft's quantities for the engine's
@@ -1297,10 +1719,12 @@ Return ONLY valid JSON with this structure:
         boq["summary"] = {
             "sub_total": totals["sub_total"],
             "contingency": totals["contingency_amount"],
+            "contingency_amount": totals["contingency_amount"],
             "contingency_pct": totals["contingency_pct"],
             "overheads_profit": totals.get("overheads_profit_amount", 0),
             "overheads_profit_pct": totals.get("overheads_profit_pct", 0),
             "vat": totals["vat_amount"],
+            "vat_amount": totals["vat_amount"],
             "vat_pct": totals["vat_pct"],
             "total_contract_sum": total,
             "total_low": round(total * 0.9, 2),
@@ -1329,7 +1753,7 @@ Return ONLY valid JSON with this structure:
         if missing_groups:
             boq["warnings"].append(
                 "The AI BOQ omitted these element groups: "
-                f"{', '.join(missing_groups)} — review before issuing the bill."
+                f"{', '.join(missing_groups)} - review before issuing the bill."
             )
         # Quantity provenance: how much of the bill the engine measured itself.
         boq["quantity_provenance"] = {
@@ -1340,13 +1764,13 @@ Return ONLY valid JSON with this structure:
             boq["warnings"].append(
                 f"{quantity_stats['applied']} quantities were measured by the take-off "
                 f"engine; {len(quantity_stats['ai_kept'])} lines had no take-off value and "
-                "keep the draft's own figures — check these before issuing the bill."
+                "keep the draft's own figures - check these before issuing the bill."
             )
         boq["generation_method"] = "template" if fallback_reason else "ai"
         boq["generated_at"] = datetime.utcnow().isoformat()
         boq["project_info"] = enriched["project_info"]
 
-        return boq
+        return _plain_dashes(boq)
 
     def _apply_python_quantities(
         self, elements: List[Dict], enriched: Dict
@@ -1354,7 +1778,7 @@ Return ONLY valid JSON with this structure:
         """Replace bill quantities with the application's own take-off.
 
         The model supplies structure and specification only. Every line that maps
-        to a take-off value has its quantity overwritten here — before pricing —
+        to a take-off value has its quantity overwritten here - before pricing -
         so the amounts and the contract sum are always derived from the engine's
         numbers. The model's own figure is preserved as `ai_quantity` for audit.
         Lines with no take-off value keep the model's quantity and are labelled
@@ -1403,7 +1827,7 @@ Return ONLY valid JSON with this structure:
         from app.services.gemini_client import get_gemini_client
 
         client = get_gemini_client()
-        # Verified DB rates go in as context only — the model names the
+        # Verified DB rates go in as context only - the model names the
         # specification, the price service does every calculation afterwards.
         catalogue_context = await self.price_service.get_catalogue_context_for_prompt(
             enriched["project_info"]["city"]
@@ -1503,6 +1927,29 @@ Return ONLY valid JSON with this structure:
         ):
             if camel in boq and snake not in boq:
                 boq[snake] = boq.pop(camel)
+        # Double-counting guard: the model sometimes echoes the same material and
+        # quantity under a second element (e.g. reinforcement billed in both
+        # SUBSTRUCTURE and SUPERSTRUCTURE), which prices the contract sum twice.
+        # A line whose (description, unit, quantity) already appeared is dropped.
+        seen: set = set()
+        for el in boq["elements"]:
+            kept = []
+            for item in el["items"]:
+                try:
+                    qty = round(float(str(item.get("quantity") or 0).replace(",", "")), 3)
+                except (TypeError, ValueError):
+                    qty = 0.0
+                key = (
+                    re.sub(r"\s+", " ", str(item.get("description") or "").strip().lower()),
+                    str(item.get("unit") or "").strip().lower(),
+                    qty,
+                )
+                if key[0] and key[1] and qty and key in seen:
+                    item["duplicate_line"] = True
+                    continue
+                seen.add(key)
+                kept.append(item)
+            el["items"] = kept
         return boq
 
     @staticmethod
@@ -1535,24 +1982,24 @@ Return ONLY valid JSON with this structure:
         return f"""You are a professional Quantity Surveyor registered with NIQS (Nigerian Institute of Quantity Surveyors).
 Generate a detailed Bill of Quantities (BOQ) in JSON format following the Nigerian SMM7 standard.
 
-YOUR BRIEF — cover every section below and return each one as part of the JSON:
-1. PROJECT / BUILDING SUMMARY — what is being built: bedrooms, functional spaces, footprint
+YOUR BRIEF - cover every section below and return each one as part of the JSON:
+1. PROJECT / BUILDING SUMMARY - what is being built: bedrooms, functional spaces, footprint
    area (m2) and layout notes, in the `building_summary` object.
-2. MATERIAL ESTIMATION — the material schedule the design implies, in
+2. MATERIAL ESTIMATION - the material schedule the design implies, in
    `material_estimates`. The DERIVED QUANTITIES block below was computed by the
    application's measuring engine: use those figures verbatim. Never recompute,
    re-round or re-derive a quantity.
-3. VARIATION & OPTIONS ANALYSIS — the design's own specification is the measured bill;
+3. VARIATION & OPTIONS ANALYSIS - the design's own specification is the measured bill;
    then list the alternatives a client weighs in `variation_options`: foundation
    A strip / B raft / C pad and ground beam, and roofing A long-span aluminium /
-   B stone-coated steel. Indicative quantities only — the application prices them.
-4. COST CALCULATIONS — every rate comes from the VERIFIED DATABASE PRICE LIST below.
+   B stone-coated steel. Indicative quantities only - the application prices them.
+4. COST CALCULATIONS - every rate comes from the VERIFIED DATABASE PRICE LIST below.
    Name the catalogue specification in `description` so the item can be matched, and
    leave `rate` at 0. The application computes each rate, amount, sub-total, contingency,
    overheads, VAT and the total contract sum.
-5. GEOTECHNICAL RECOMMENDATIONS — in `geotechnical`, give the likely soil conditions for
+5. GEOTECHNICAL RECOMMENDATIONS - in `geotechnical`, give the likely soil conditions for
    the location, the foundation option you recommend (A, B or C) and the reason.
-6. NARRATIVE REPORT — in `narrative_markdown`, write the client-facing report with bold
+6. NARRATIVE REPORT - in `narrative_markdown`, write the client-facing report with bold
    headers and Markdown tables (summary, material schedule, variation comparison, cost
    commentary, geotechnical note). Copy quantities and costs out of this same JSON; never
    compute them.
@@ -1580,9 +2027,9 @@ DERIVED QUANTITIES (pre-calculated):
 IMPORTANT RULES:
 1. Do NOT provide market rates/prices. Generate quantities and specifications ONLY.
    Prices are added separately from verified database rates by the price enrichment service.
-   If a price is unavoidable in an item, set rate=0 — do not estimate or invent prices.
+   If a price is unavoidable in an item, set rate=0 - do not estimate or invent prices.
 2. Wastage factors: blocks 5%, concrete 5%, tiles 10%, roofing 12%, reinforcement 5%. They
-   are already applied inside DERIVED QUANTITIES — quote those figures exactly as given.
+   are already applied inside DERIVED QUANTITIES - quote those figures exactly as given.
 3. Structure the BOQ in this Nigerian standard order:
    - Preliminaries (site setup, insurance, scaffolding)
    - Substructure (excavation, hardcore, blinding, foundation concrete, DPC, ground slab)
@@ -1595,11 +2042,11 @@ IMPORTANT RULES:
    - Electrical (conduit, wiring, light fittings, sockets, DB)
    - External Works (fence, gate, paving, borehole if applicable)
 4. Contingency (10%), overheads & profit (10%) and VAT (7.5%) are applied by the
-   application — describe them in `assumptions` / `notes`, never calculate them.
+   application - describe them in `assumptions` / `notes`, never calculate them.
 5. Cost scenarios low (90%), expected (100%) and high (110%) are calculated by the
    application from the priced bill.
 6. All arithmetic belongs to the application. Never compute a quantity, total, percentage,
-   wastage, unit conversion or cost — repeat the take-off figures you were given.
+   wastage, unit conversion or cost - repeat the take-off figures you were given.
 7. `quantity_source` must record who measured the line: "python" for a figure taken from
    DERIVED QUANTITIES, "drawing" for one read off the drawing, "user" for an entered
    figure, and "ai" only for a line with no take-off figure available.

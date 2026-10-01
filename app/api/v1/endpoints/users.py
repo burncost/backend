@@ -87,9 +87,12 @@ async def update_user_me(
     # Fields that belong to User model
     user_model_fields = {'email', 'phone_number'}
     # Fields that belong to UserProfile model
-    profile_model_fields = {'first_name', 'last_name','other_name', 'business_name', 'avatar_url'}
+    profile_model_fields = {'first_name', 'last_name','other_name', 'business_name', 'avatar_url', 'location'}
     
     for field, value in update_data.items():
+        # A normalised empty field is "not provided" - never let it overwrite.
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
         if field in user_model_fields:
             user_fields[field] = value
         elif field in profile_model_fields:
@@ -134,6 +137,7 @@ async def update_user_me(
                 last_name=profile_fields.get('last_name', ''),
                 other_name=profile_fields.get('other_name', ''),
                 business_name=profile_fields.get('business_name'),
+                location=profile_fields.get('location'),
                 avatar_url=profile_fields.get('avatar_url')
             )
             db.add(profile)
@@ -224,6 +228,15 @@ class NotificationPreferences(BaseModel):
     promotions: bool = False
     email_notifications: bool = True
     sms_notifications: bool = False
+    # Granular settings-screen toggles (builder/supplier settings).
+    email_orders: bool = True
+    email_payments: bool = True
+    email_promotions: bool = False
+    push_orders: bool = True
+    push_payments: bool = True
+    push_promotions: bool = True
+    sms_orders: bool = False
+    sms_payments: bool = True
 
 
 async def _get_profile_for(db: AsyncSession, user_id) -> Optional[UserProfile]:

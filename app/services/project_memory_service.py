@@ -90,7 +90,7 @@ class ProjectMemoryService:
             return {}
         try:
             # Match orders belonging to this project's owner via project.ownerId/creator.
-            project = await self.mongo_db["projects"].find_one({"_id": self._oid(project_id)}) if self.mongo_db else None
+            project = await self.mongo_db["projects"].find_one({"_id": self._oid(project_id)}) if self.mongo_db is not None else None
             owner_id = str(project.get("clientId") or project.get("createdBy") or "") if project else ""
 
             result = await self.pg_db.execute(

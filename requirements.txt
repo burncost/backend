@@ -110,3 +110,7 @@ upstash-redis
 sib-api-v3-sdk
 
 sendgrid
+
+# Document rendering for BOQ export & parsing (Word / PDF)
+reportlab
+python-docx

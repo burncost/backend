@@ -8,13 +8,20 @@ from fastapi import (
     File,
     Query,
     Request,
+    Response,
 )
 from typing import List, Optional, Dict, Any
+import asyncio
 import logging
+import os
 import re
+import shutil
+import tempfile
 from datetime import datetime
+from urllib.parse import urlparse
 
 from app.core.database import get_mongodb, get_db
+from app.config import settings
 from app.core.ratelimit import rate_limit
 from app.repositories.boq_repository import BOQRepository
 from app.services.boq_generator import BOQGenerator
@@ -23,6 +30,7 @@ from app.services.mitm_engine import MITMEngine
 from app.services.price_service import PriceService
 from app.services.token_service import TokenService
 from app.services.ai_service import AIService
+from app.services.upload_guard import inspect_upload
 from app.api.deps import get_current_user, get_optional_user
 
 from app.schemas.boq import (
@@ -56,7 +64,7 @@ _ACCEPTED_MIMES = {
 DRAWING_UPLOAD_GUIDANCE = (
     "For best BOQ accuracy, upload a complete PDF drawing set "
     "(architectural + structural). "
-    "CAD files (.dwg/.dxf) are NOT accepted — export to PDF first. "
+    "CAD files (.dwg/.dxf) are NOT accepted - export to PDF first. "
     "Images (JPG/PNG) are accepted but produce lower accuracy for structural items."
 )
 
@@ -64,6 +72,15 @@ DRAWING_UPLOAD_GUIDANCE = (
 # client IP. Signed-in callers are unaffected (their plans govern usage).
 _GUEST_BOQ_RATE_LIMIT = 5
 _GUEST_BOQ_RATE_WINDOW = 60
+
+# Uploads both verify endpoints accept. Kept in one place so the synchronous and
+# background paths cannot drift apart.
+_BOQ_UPLOAD_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.docx', '.pdf']
+
+# Background verify jobs (see app/tasks/boq_generation_tasks.py, which owns the
+# same collection name) and the path clients poll for their status.
+_BOQ_JOB_COLLECTION = "boq_jobs"
+_BOQ_JOB_STATUS_URL = "/api/v1/boqs/jobs/{job_id}"
 
 
 async def _enforce_guest_rate_limit(http_request: Request, bucket: str) -> None:
@@ -80,6 +97,64 @@ async def _enforce_guest_rate_limit(http_request: Request, bucket: str) -> None:
         )
 
 
+# BOQ bills can be large (full QS workbooks); enforce the platform cap while
+# streaming the body to a spooled temp file instead of reading it all at once.
+_UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+async def _stream_upload_to_spool(
+    file: UploadFile, max_bytes: int
+) -> tempfile.SpooledTemporaryFile:
+    """Copy an upload into a spooled temp file, enforcing `max_bytes` as we go.
+
+    Streaming keeps a big bill off the event-loop heap for the size check; the
+    spool rolls over to disk once it outgrows its in-memory threshold.
+    """
+    spool = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            spool.close()
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File size exceeds the {max_bytes // (1024 * 1024)}MB limit.",
+            )
+        spool.write(chunk)
+    spool.seek(0)
+    return spool
+
+
+async def _read_upload_checked(file: UploadFile, max_bytes: int) -> bytes:
+    """Stream an upload to a spool, verify its content, and return its bytes.
+
+    Shared by the two drawing endpoints, which need the whole file in memory for
+    the AI call anyway: the spool enforces `max_bytes` *while* the body arrives
+    (a raw `await file.read()` buffers whatever the client sends before the size
+    check runs - an unauthenticated caller could exhaust the heap), and
+    `inspect_upload` re-reads the same bytes to catch a mislabelled file.
+
+    Raises HTTPException for both a rejected content check and an oversize file.
+    """
+    spool = await _stream_upload_to_spool(file, max_bytes)
+    try:
+        spool.filename = file.filename
+        reason = inspect_upload(spool, file.filename)
+        if reason:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=reason,
+            )
+        return spool.read()
+    finally:
+        # The bytes are in hand; release the temp file immediately instead of
+        # waiting for the request to finish.
+        spool.close()
+
+
 ### Analyze uploaded drawing (no token cost, anonymous allowed)
 @router.post("/analyze-drawing", response_model=DrawingAnalysisResponse)
 async def analyze_drawing(
@@ -90,7 +165,7 @@ async def analyze_drawing(
     """
     Upload a drawing file (PDF or image) for AI analysis.
     Returns extracted geometry, drawing quality assessment, and confidence score.
-    No token cost — free to use.
+    No token cost - free to use.
     """
     # Validate MIME type
     if file.content_type not in _ACCEPTED_MIMES:
@@ -104,13 +179,7 @@ async def analyze_drawing(
         )
 
     # Read file content
-    content = await file.read()
-    if len(content) > 20 * 1024 * 1024:  # 20MB
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File size exceeds 20MB limit for drawing analysis."
-        )
-    await file.seek(0)
+    content = await _read_upload_checked(file, settings.MAX_UPLOAD_SIZE)
 
     # Run Gemini Vision analysis
     ai_service = AIService()
@@ -251,13 +320,7 @@ async def generate_boq_from_drawing(
                 f"CAD files (.dwg/.dxf) are NOT accepted."
             )
         )
-    content = await file.read()
-    if len(content) > 20 * 1024 * 1024:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File size exceeds 20MB limit for drawing analysis.",
-        )
-    await file.seek(0)
+    content = await _read_upload_checked(file, settings.MAX_UPLOAD_SIZE)
 
     # ── 1. Analyze drawing (free, matches /analyze-drawing behavior) ──
     ai_service = AIService()
@@ -378,7 +441,7 @@ async def generate_boq_from_drawing(
         "area_uplift_pct": mapped.get("area_uplift_pct"),
     }
 
-    # Anonymous callers stop here — truncated preview, nothing persisted.
+    # Anonymous callers stop here - truncated preview, nothing persisted.
     if current_user is None:
         return _truncate_boq_for_guest(boq)
 
@@ -447,7 +510,7 @@ async def generate_boq_from_params(
     )
     
     # Save to MongoDB if available (`is not None`: a pymongo Database is never
-    # safely truthiness-tested — it raises NotImplementedError.)
+    # safely truthiness-tested - it raises NotImplementedError.)
     if db is not None:
         now = datetime.utcnow()
         boq_doc = {
@@ -468,14 +531,14 @@ async def generate_boq_from_params(
     return boq
 
 
-### Public Preview (no auth required — truncated response)
+### Public Preview (no auth required - truncated response)
 @router.post("/public-preview")
 async def public_preview(
     request: BOQGenerationRequest,
     db = Depends(get_mongodb),
 ):
     """
-    Anonymous preview — generates a truncated BOQ with masked totals.
+    Anonymous preview - generates a truncated BOQ with masked totals.
     No auth required, no token cost, no save to DB.
     Returns enough data to convince users to sign up.
     """
@@ -488,7 +551,7 @@ async def public_preview(
 
 
 def _mask_amount(amount: float) -> float:
-    """Return a masked version — e.g. 5,234,000 → 5,000,000"""
+    """Return a masked version - e.g. 5,234,000 → 5,000,000"""
     if amount < 1000:
         return amount
     s = str(int(round(amount)))
@@ -598,7 +661,7 @@ def _truncate_boq_for_guest(full: Dict[str, Any]) -> Dict[str, Any]:
                 hidden = len(items) - _GUEST_ITEM_LIMIT
                 el["items"] = items[:_GUEST_ITEM_LIMIT] + [_locked_item_stub(hidden)]
             items_shown += min(len(items), _GUEST_ITEM_LIMIT)
-            # An element total is a real money figure too — mask it, otherwise
+            # An element total is a real money figure too - mask it, otherwise
             # the exact bill is readable straight from the response body.
             if el.get("element_total") is not None:
                 el["element_total"] = _mask_amount(float(el["element_total"] or 0))
@@ -611,7 +674,10 @@ def _truncate_boq_for_guest(full: Dict[str, Any]) -> Dict[str, Any]:
         for key in (
             "sub_total",
             "contingency",
+            "contingency_amount",
             "vat",
+            "vat_amount",
+            "overheads_profit",
             "total_contract_sum",
             "total_low",
             "total_expected",
@@ -682,7 +748,7 @@ def _mask_verification_for_guest(result: Dict[str, Any]) -> Dict[str, Any]:
 
     Keeps a couple of verified lines and discrepancies as a teaser, masks the
     quoted total and never returns a stored BOQ id. Every list that can carry
-    the full bill must be trimmed here — including the per-element breakdown,
+    the full bill must be trimmed here - including the per-element breakdown,
     which would otherwise hand a guest the whole verified BOQ.
     """
     parsed = result.get("parsed_boq") or {}
@@ -760,7 +826,7 @@ def _mask_verification_for_guest(result: Dict[str, Any]) -> Dict[str, Any]:
                 "expected": _mask_amount(float((arithmetic.get("contract_sum") or {}).get("expected") or 0)),
             },
             # Finding messages spell out the real element totals, and each summary
-            # entry carries the stated contract figures — neither may reach a guest.
+            # entry carries the stated contract figures - neither may reach a guest.
             "findings": [
                 {
                     "scope": finding.get("scope"),
@@ -812,7 +878,7 @@ async def upload_boq(
     db = Depends(get_mongodb),
     pg_db: AsyncSession = Depends(get_db),
 ):
-    """Upload an existing BOQ file (Excel/CSV) for verification and analysis.
+    """Upload an existing BOQ file (Excel/Word/PDF/CSV) for verification and analysis.
 
     Signed-in users get the full itemised analysis, stored under their account.
     Anonymous users get a masked teaser (a few lines, masked total, no storage).
@@ -820,7 +886,7 @@ async def upload_boq(
     if current_user is None:
         await _enforce_guest_rate_limit(http_request, "boq-verify")
 
-    allowed_extensions = ['.xlsx', '.xls', '.xlsm', '.csv']
+    allowed_extensions = _BOQ_UPLOAD_EXTENSIONS
     file_ext = '.' + file.filename.split('.')[-1].lower() if file.filename else ''
     
     if file_ext not in allowed_extensions:
@@ -829,13 +895,20 @@ async def upload_boq(
             detail=f"File type not supported. Allowed: {', '.join(allowed_extensions)}"
         )
     
-    content = await file.read()
-    if len(content) > 50 * 1024 * 1024:  # 50MB
+    # Stream straight to a spooled temp file (never hold the whole bill in memory
+    # just to size it) and hand that to the generator.
+    spool = await _stream_upload_to_spool(file, settings.MAX_UPLOAD_SIZE)
+    spool.filename = file.filename
+
+    # The extension and the declared MIME type are client-supplied; check the
+    # bytes themselves before a parser inflates them (zip bomb / mislabelled file).
+    rejection = inspect_upload(spool, file.filename)
+    if rejection:
+        spool.close()
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File size exceeds 50MB limit"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=rejection,
         )
-    await file.seek(0)
 
     # Rates vary by state (Nigerian material prices move by market and LGA), so
     # compare against the caller's own city when we know it.
@@ -846,7 +919,7 @@ async def upload_boq(
     if current_user is None:
         guest_generator = BOQGenerator(db=None, pg_db=pg_db)
         guest_result = await guest_generator.upload_and_verify(
-            file=file,
+            file=spool,
             uploaded_by="anonymous",
             city=rate_city,
         )
@@ -854,7 +927,7 @@ async def upload_boq(
 
     boq_generator = BOQGenerator(db)
     result = await boq_generator.upload_and_verify(
-        file=file,
+        file=spool,
         uploaded_by=str(current_user.id),
         city=rate_city,
     )
@@ -862,22 +935,192 @@ async def upload_boq(
     return result
 
 
-### Get BOQ by ID
-@router.get("/{boq_id}", response_model=BOQResponse)
+# ── Background (queued) verification ─────────────────────────────────────────
+
+async def _broker_reachable() -> bool:
+    """Cheap, bounded check that the Celery broker is accepting connections.
+
+    Without it a dead broker does not fail fast: `apply_async` blocks the request
+    while the transport retries the connection. A one-second TCP probe keeps the
+    inline fallback - and therefore the caller's latency - predictable.
+    """
+    broker = settings.CELERY_BROKER_URL or settings.REDIS_URL
+    host = urlparse(broker).hostname
+    port = urlparse(broker).port or 6379
+    if not host:
+        return False
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=1.0)
+        writer.close()
+        return True
+    except Exception:  # refused, timeout, bad host -> no queue available
+        return False
+
+
+async def _dispatch_verify_job(
+    job_id: str, path: str, filename: str, city: str, user_id: str
+) -> bool:
+    """Hand a verify job to the Celery `boq` queue; False when none is reachable.
+
+    `retry=False` keeps a rejected publish a fast, catchable error instead of a
+    long publish retry - the caller then runs the job inline, so a
+    single-process environment still works.
+    """
+    if not await _broker_reachable():
+        logger.info(f"No reachable Celery broker for BOQ job {job_id}; running inline")
+        return False
+    try:
+        from app.tasks.boq_generation_tasks import verify_boq_task
+
+        verify_boq_task.apply_async(
+            args=[job_id, path, filename, city, user_id], queue="boq", retry=False
+        )
+        return True
+    except Exception as exc:  # broker/worker down -> caller runs it here
+        logger.warning(f"Could not queue BOQ job {job_id}, running inline: {exc}")
+        return False
+
+
+def _boq_job_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Public shape of a background job (never leaks the uploaded temp path)."""
+    job_id = str(doc["_id"])
+    return {
+        "job_id": job_id,
+        "status": doc.get("status"),
+        "filename": doc.get("filename"),
+        "city": doc.get("city"),
+        "createdAt": doc.get("createdAt"),
+        "updatedAt": doc.get("updatedAt"),
+        "error": doc.get("error"),
+        "result": doc.get("result"),
+        "status_url": _BOQ_JOB_STATUS_URL.format(job_id=job_id),
+    }
+
+
+### Upload a bill for background verification (large files)
+@router.post("/verify/async")
+async def upload_boq_async(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db = Depends(get_mongodb),
+    pg_db: AsyncSession = Depends(get_db),
+):
+    """Queue a bill for verification and return a pollable job.
+
+    `POST /boqs/upload` stays the default (one round trip for a normal bill);
+    this path exists so a very large workbook does not hold a request - and its
+    client connection - open for minutes while it is parsed and re-priced. Poll
+    `GET /boqs/jobs/{job_id}` until `status` is `succeeded` or `failed`.
+    """
+    from bson import ObjectId
+
+    file_ext = '.' + file.filename.split('.')[-1].lower() if file.filename else ''
+    if file_ext not in _BOQ_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File type not supported. Allowed: {', '.join(_BOQ_UPLOAD_EXTENSIONS)}"
+        )
+
+    # Same 100 MB cap and streaming size check as the synchronous path, then the
+    # spool is copied into a named temp file because the worker runs in a
+    # separate process and cannot inherit the request's handle.
+    spool = await _stream_upload_to_spool(file, settings.MAX_UPLOAD_SIZE)
+    # Same content check as the synchronous path, before the (untrusted) bytes
+    # are written somewhere the worker will read them from.
+    rejection = inspect_upload(spool, file.filename)
+    if rejection:
+        spool.close()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=rejection,
+        )
+    handle, path = tempfile.mkstemp(prefix="boq-job-", suffix=file_ext)
+    try:
+        with os.fdopen(handle, "wb") as target:
+            shutil.copyfileobj(spool, target)
+    except Exception:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
+    finally:
+        spool.close()
+
+    city = await _resolve_rate_city(pg_db, current_user)
+    jobs = db[_BOQ_JOB_COLLECTION]
+    now = datetime.utcnow()
+    job_id = str((await jobs.insert_one({
+        "userId": str(current_user.id),
+        "filename": file.filename,
+        "city": city,
+        "status": "queued",
+        "createdAt": now,
+        "updatedAt": now,
+        "error": None,
+        "result": None,
+    })).inserted_id)
+
+    if not await _dispatch_verify_job(job_id, path, file.filename, city, str(current_user.id)):
+        # No worker/broker (single-process dev): run it here so the endpoint is
+        # never a dead end. Status still flows through the job document, so the
+        # client's polling code is identical either way.
+        from app.tasks.boq_generation_tasks import run_verify_job
+
+        await run_verify_job(db, job_id, path, file.filename, city, str(current_user.id))
+
+    return _boq_job_payload(await jobs.find_one({"_id": ObjectId(job_id)}))
+
+
+### Poll a background verification job
+@router.get("/jobs/{job_id}")
+async def get_boq_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db = Depends(get_mongodb),
+):
+    """Status (and result) of a job queued by `POST /boqs/verify/async`."""
+    from bson import ObjectId
+
+    if not ObjectId.is_valid(job_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    doc = await db[_BOQ_JOB_COLLECTION].find_one({"_id": ObjectId(job_id)})
+    if not doc or str(doc.get("userId")) != str(current_user.id):
+        # Somebody else's job is reported as missing, never as forbidden.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    return _boq_job_payload(doc)
+
+
+### Get BOQ by ID (falls back to an uploaded-for-verification bill)
+@router.get("/{boq_id}")
 async def get_boq(
     boq_id: str,
     current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
+    from bson import ObjectId
+
     boq_repo = BOQRepository(db)
     boq = await boq_repo.get_by_id(boq_id)
-    
+
+    if not boq and ObjectId.is_valid(boq_id):
+        # Bills uploaded for verification live in their own collection; return
+        # them raw so the preview/report can render the parsed items.
+        doc = await db["boq_verifications"].find_one({"_id": ObjectId(boq_id)})
+        if doc:
+            doc["_id"] = str(doc["_id"])
+            doc["title"] = doc.get("filename") or "Uploaded BOQ"
+            doc["source"] = "verification"
+            return doc
+
     if not boq:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="BOQ not found"
         )
-    
+
     return boq
 
 
@@ -961,7 +1204,13 @@ async def submit_decision(
     current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
-    """Submit a user decision on a BOQ: 'regenerate' or 'save_original'."""
+    """Submit a user decision on a BOQ: 'regenerate' or 'save_original'.
+
+    A generated bill only records the decision. An uploaded-for-verification
+    bill (see `/upload`) is regenerated for real: 'regenerate' rebuilds a priced
+    BOQ as a new version from the verified items and returns it as
+    `regenerated_boq`.
+    """
     decision_value = decision.get("decision")
     if decision_value not in ["regenerate", "save_original"]:
         raise HTTPException(
@@ -1031,7 +1280,7 @@ async def verify_quote(
     return result
 
 
-### Export BOQ to PDF, Excel, or CSV
+### Export BOQ to Word, Excel, PDF, or CSV (streamed file download)
 @router.post("/{boq_id}/export/{format}")
 async def export_boq(
     boq_id: str,
@@ -1040,32 +1289,49 @@ async def export_boq(
     db = Depends(get_mongodb),
     pg_db: AsyncSession = Depends(get_db),
 ):
-    if format not in ['pdf', 'excel', 'csv']:
+    """Export a BOQ as a downloadable Word / Excel / PDF / CSV file.
+
+    The file bytes are streamed straight back to the browser, so the download
+    works in every environment (no static ``/exports`` mount required).
+    """
+    # `word` is the user-facing name for the .docx format.
+    fmt = "docx" if format == "word" else format
+    if fmt not in ("pdf", "excel", "csv", "docx"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Format must be one of: pdf, excel, csv"
+            detail="Format must be one of: pdf, excel, csv, docx (word)."
         )
-    
-    # Deduct token for export
+
+    # Render the file FIRST so a missing BOQ / unsupported data never burns the
+    # user's token. Tokens are only deducted once we know there is a file to
+    # send back.
+    boq_generator = BOQGenerator(db)
+    export = await boq_generator.export_boq(boq_id=boq_id, format=fmt)
+    if export is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="BOQ not found.",
+        )
+
+    # Deduct the export token cost (export_pdf / export_excel / export_docx / export_csv).
     token_service = TokenService(pg_db)
     has_tokens = await token_service.deduct_tokens(
         user_id=str(current_user.id),
-        action_type=f"export_{format}",
-        description=f"Export BOQ {boq_id} to {format}"
+        action_type=f"export_{fmt}",
+        description=f"Export BOQ {boq_id} to {fmt}"
     )
     if not has_tokens:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail="Insufficient tokens for export."
         )
-    
-    boq_generator = BOQGenerator(db)
-    file_url = await boq_generator.export_boq(
-        boq_id=boq_id,
-        format=format
+
+    filename, media_type, content = export
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
-    
-    return {"file_url": file_url}
 
 
 ### Place order from BOQ items
@@ -1098,7 +1364,7 @@ async def place_boq_order(
 
     from sqlalchemy import text
 
-    # Phase 10: idempotency — order_number is derived from the BOQ + user so a
+    # Phase 10: idempotency - order_number is derived from the BOQ + user so a
     # retry returns the existing order instead of duplicating it.
     order_number = f"ORD-{boq_id[:8].upper()}-{str(current_user.id)[:8]}"
     existing = await pg_db.execute(
@@ -1119,7 +1385,7 @@ async def place_boq_order(
             success=True,
             order_id=str(row[0]),
             order_number=str(row[1]),
-            message="This BOQ has already been ordered — returning the existing order.",
+            message="This BOQ has already been ordered - returning the existing order.",
             items_ordered=len(order_request.items),
             total_amount=float(row[3] or 0),
         )
@@ -1261,15 +1527,29 @@ async def delete_boq(
     current_user: User = Depends(get_current_user),
     db = Depends(get_mongodb)
 ):
+    from bson import ObjectId
+
     boq_repo = BOQRepository(db)
     boq = await boq_repo.get_by_id(boq_id)
-    
+
     if not boq:
+        # Bills uploaded for verification live in their own collection but are
+        # listed alongside generated BOQs (see BOQRepository.list_by_user), so a
+        # delete must fall back to that collection the same way GET does - and
+        # only for the row's owner.
+        if ObjectId.is_valid(boq_id):
+            result = await db["boq_verifications"].delete_one({
+                "_id": ObjectId(boq_id),
+                "uploadedBy": str(current_user.id),
+            })
+            if result.deleted_count > 0:
+                return None
+
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="BOQ not found"
         )
-    
+
     await boq_repo.delete(boq_id)
     return None
 
@@ -1286,7 +1566,7 @@ async def preview_boq_cart(
 
     Read-only: nothing is written here. The client adds the lines it keeps through
     the existing `/cart/add` endpoint (see the frontend `cartStore`), so guests
-    fill their on-device cart and signed-in shoppers their account cart — the same
+    fill their on-device cart and signed-in shoppers their account cart - the same
     path the marketplace and chat already use.
 
     Vendors are gated on being active/verified with enough stock for the required

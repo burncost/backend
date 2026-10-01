@@ -37,6 +37,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Let the browser read the download filename off the BOQ export responses.
+    expose_headers=["Content-Disposition"],
 )
 
 # Middleware
