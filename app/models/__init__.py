@@ -18,6 +18,7 @@ from app.models.address import CustomerAddress
 from app.models.notification import Notification
 from app.models.material_rate import MaterialRate, MaterialRateHistory
 from app.models.token_usage import TokenUsage, TokenTransaction
+from app.models.token_purchase import TokenPurchase
 from app.models.promo import PromoCode
 from app.models.demand_alert import DemandAlert
 from app.models.shipping_zone import ShippingZone, ShippingZoneMapping
@@ -67,6 +68,7 @@ __all__ = [
     "MaterialRateHistory",
     "TokenUsage",
     "TokenTransaction",
+    "TokenPurchase",
     "PromoCode",
     "DemandAlert",
     "ShippingZone",

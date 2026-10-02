@@ -1338,6 +1338,15 @@ class BOQGenerator:
         original_sub_total = round(sum(el["original_total"] for el in elements), 2)
         regenerated_sub_total = round(totals["sub_total"], 2)
 
+        # Contract-level comparison (sub-total plus contingency/overheads/VAT) is
+        # derived from the same totals maths as everything else: the original
+        # sub-total is pushed through `recalculate_totals` rather than priced a
+        # second time, so the two figures can never diverge.
+        original_contract_sum = self.price_service.recalculate_totals(
+            [{"element_name": "Original", "items": [{"amount": original_sub_total}]}]
+        )["total_contract_sum"]
+        regenerated_contract_sum = totals["total_contract_sum"]
+
         now = datetime.utcnow()
         title = verification.get("filename") or "Uploaded BOQ"
         summary = {
@@ -1416,6 +1425,11 @@ class BOQGenerator:
                     "vat_amount": totals["vat_amount"],
                     "total_contract_sum": totals["total_contract_sum"],
                     "total_saving": round(original_sub_total - regenerated_sub_total, 2),
+                    "original_contract_sum": original_contract_sum,
+                    "regenerated_contract_sum": regenerated_contract_sum,
+                    "contract_saving": round(
+                        original_contract_sum - regenerated_contract_sum, 2
+                    ),
                 },
                 "items_revised": items_revised,
                 "revision_notes": revision_notes,

@@ -44,6 +44,19 @@ async def get_dashboard_stats(
     )
     vetted_suppliers = vendor_result.scalar() or 0
 
+    # Count delivered orders. avg_delivery_days is 0 both when there are no
+    # deliveries and when a delivery genuinely took ~0 days, so the UI needs
+    # this count to tell "no delivery data yet" apart from "Same Day".
+    delivered_result = await db.execute(
+        select(func.count(Order.id))
+        .where(
+            Order.user_id == user_id,
+            Order.status == "delivered",
+            Order.delivered_at.isnot(None),
+        )
+    )
+    delivered_orders = delivered_result.scalar() or 0
+
     # Average delivery days (from completed orders)
     delivery_result = await db.execute(
         select(func.avg(
@@ -144,6 +157,7 @@ async def get_dashboard_stats(
         "total_savings": total_savings,
         "potential_savings": potential_savings,
         "active_orders": active_orders,
+        "delivered_orders": delivered_orders,
         "vetted_suppliers": vetted_suppliers,
         "avg_delivery_days": avg_delivery_days,
         "savings_trend": savings_trend,

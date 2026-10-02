@@ -584,6 +584,20 @@ async def flutterwave_webhook(
 
     if event == "charge.completed" and data.get("status") == "successful":
         tx_ref = data.get("tx_ref", "")
+
+        # Token purchases are quoted in token_purchases; credit the stored quote
+        # (never a client-supplied quantity). Idempotent by reference.
+        if tx_ref.startswith("TKN-"):
+            from app.services.token_service import TokenService
+            outcome = await TokenService(db).credit_pending_purchase(
+                tx_ref,
+                provider="flutterwave",
+                paid_amount=float(data.get("amount") or 0) or None,
+                provider_reference=str(data.get("id") or ""),
+            )
+            logger.info(f"Flutterwave webhook: token purchase {tx_ref} -> {outcome.get('status')}")
+            return {"status": "ok", "token_purchase": outcome.get("status")}
+
         # Extract order reference from tx_ref (format: BURNCOST-{order_number}-{timestamp})
         if tx_ref.startswith("BURNCOST-"):
             parts = tx_ref.split("-")
@@ -745,6 +759,19 @@ async def paystack_webhook(
     if event == "charge.success":
         data = payload.get("data", {})
         reference = data.get("reference", "")
+
+        # Token purchases: credit the stored quote (idempotent by reference).
+        if reference.startswith("TKN-"):
+            from app.services.token_service import TokenService
+            outcome = await TokenService(db).credit_pending_purchase(
+                reference,
+                provider="paystack",
+                paid_amount=float(data.get("amount") or 0) / 100.0 or None,  # kobo -> naira
+                provider_reference=str(data.get("id") or ""),
+            )
+            logger.info(f"Paystack webhook: token purchase {reference} -> {outcome.get('status')}")
+            return {"status": "ok", "token_purchase": outcome.get("status")}
+
         if reference.startswith("BURNCOST-"):
             parts = reference.split("-")
             if len(parts) >= 2:

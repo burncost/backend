@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     PAYSTACK_PUBLIC_KEY: Optional[str] = None
     FLUTTERWAVE_SECRET_KEY: Optional[str] = None
     FLUTTERWAVE_PUBLIC_KEY: Optional[str] = None
+    # Webhook `verif-hash` value set in the Flutterwave dashboard. Required for
+    # the /payments/webhook/flutterwave endpoint (fail-closed when unset).
+    FLUTTERWAVE_SECRET_HASH: Optional[str] = None
     MOCK_PAYMENT_GATEWAY: Optional[bool] = None
     MONNIFY_SECRET_KEY: Optional[str] = None
     MONNIFY_PUBLIC_KEY: Optional[str] = None

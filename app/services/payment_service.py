@@ -31,6 +31,7 @@ class PaymentService:
         metadata: Optional[Dict[str, Any]] = None,
         payment_type: str = "card",
         provider: Optional[str] = None,
+        redirect_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Initialize a payment transaction.
 
@@ -38,6 +39,9 @@ class PaymentService:
         "flutterwave" | "paystack" | "monnify". When omitted the existing order is
         preserved: try Flutterwave, then Paystack, else mock. The server remains the
         amount authority regardless of any client-chosen provider.
+
+        `redirect_url` (optional): where the buyer lands after checkout. Defaults to
+        the orders page, so existing callers behave exactly as before.
         """
         logger.info(f"Initializing payment: {reference} for {email} - ₦{amount:,.2f} (type={payment_type})")
 
@@ -46,15 +50,15 @@ class PaymentService:
 
         # Monnify Standard Checkout (hosted redirect).
         if provider == "monnify" and self.monnify_secret_key and self.monnify_contract_code:
-            return await self._initialize_monnify(amount, email, reference, metadata)
+            return await self._initialize_monnify(amount, email, reference, metadata, redirect_url)
 
         # Flutterwave v3 first if key is configured (also the default when none chosen).
         if (provider in (None, "", "flutterwave")) and self.flutterwave_secret_key:
-            return await self._initialize_flutterwave(amount, email, reference, metadata, payment_type)
+            return await self._initialize_flutterwave(amount, email, reference, metadata, payment_type, redirect_url)
 
         # Fallback / explicit Paystack.
         if (provider in (None, "", "paystack")) and self.paystack_secret_key:
-            return await self._initialize_paystack(amount, email, reference, metadata)
+            return await self._initialize_paystack(amount, email, reference, metadata, redirect_url)
 
         if provider:
             logger.warning(f"Requested provider {provider} not configured; returning mock")
@@ -70,12 +74,14 @@ class PaymentService:
         email: str,
         reference: str,
         metadata: Optional[Dict[str, Any]] = None,
-        payment_type: str = "card"
+        payment_type: str = "card",
+        redirect_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Initialize payment via Flutterwave v3 API.
         
         Args:
             payment_type: "card" (redirect), "bank_transfer" (virtual account), or "ussd" (USSD code)
+            redirect_url: where the buyer returns after checkout (defaults to orders).
         """
         try:
             import httpx
@@ -103,7 +109,7 @@ class PaymentService:
                 payload["payment_options"] = "ussd"
             else:
                 # Default: card — redirect to Flutterwave checkout
-                payload["redirect_url"] = f"{settings.FRONTEND_URL}/dashboard/orders"
+                payload["redirect_url"] = redirect_url or f"{settings.FRONTEND_URL}/dashboard/orders"
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -160,7 +166,8 @@ class PaymentService:
         amount: float,
         email: str,
         reference: str,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        redirect_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Initialize payment via Paystack API."""
         try:
@@ -173,7 +180,7 @@ class PaymentService:
                         "email": email,
                         "reference": reference,
                         "metadata": metadata or {},
-                        "callback_url": f"{settings.FRONTEND_URL}/dashboard/orders",
+                        "callback_url": redirect_url or f"{settings.FRONTEND_URL}/dashboard/orders",
                     },
                     headers={
                         "Authorization": f"Bearer {self.paystack_secret_key}",
@@ -210,6 +217,7 @@ class PaymentService:
         email: str,
         reference: str,
         metadata: Optional[Dict[str, Any]] = None,
+        redirect_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Initialize Monnify Standard Checkout (hosted redirect).
 
@@ -249,7 +257,7 @@ class PaymentService:
                         "customerEmail": email,
                         "paymentReference": reference,
                         "contractCode": self.monnify_contract_code,
-                        "redirectUrl": f"{settings.FRONTEND_URL}/dashboard/orders",
+                        "redirectUrl": redirect_url or f"{settings.FRONTEND_URL}/dashboard/orders",
                         "paymentMethods": ["CARD", "ACCOUNT_TRANSFER", "USSD"],
                         "currencyCode": "NGN",
                         "paymentDescription": f"Burncost order payment - {reference}",

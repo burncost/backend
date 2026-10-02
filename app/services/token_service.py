@@ -12,6 +12,12 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app.models.token_usage import TokenUsage, TokenTransaction, TransactionType
+from app.models.token_purchase import (
+    TokenPurchase,
+    PURCHASE_PENDING,
+    PURCHASE_COMPLETED,
+    PURCHASE_FAILED,
+)
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -57,6 +63,40 @@ TOKEN_PACKS: List[Dict[str, Any]] = [
     {"tokens": 50, "price_ngn": 20_000, "price_per_token": 400},
     {"tokens": 200, "price_ngn": 60_000, "price_per_token": 300},
 ]
+
+# Smallest number of tokens a single purchase may cover. Anything below this is
+# not a purchase at all, so the API rejects it instead of quoting ₦0.
+MIN_PURCHASE_TOKENS = 1
+
+
+def compute_token_price(tokens: int) -> Optional[Dict[str, Any]]:
+    """Price an arbitrary token quantity from the published pack tiers.
+
+    The rate is the cheapest published tier the quantity qualifies for, i.e. the
+    largest pack whose size is <= the quantity. Quantities smaller than the
+    smallest pack pay that pack's rate. This is the single source of truth for
+    the quote: the same number is shown in the UI and charged by the gateway,
+    and the client never supplies the amount.
+    """
+    try:
+        tokens = int(tokens)
+    except (TypeError, ValueError):
+        return None
+    if tokens < MIN_PURCHASE_TOKENS:
+        return None
+
+    eligible = [p for p in TOKEN_PACKS if p["tokens"] <= tokens]
+    tier = (
+        max(eligible, key=lambda p: p["tokens"])
+        if eligible
+        else min(TOKEN_PACKS, key=lambda p: p["tokens"])
+    )
+    rate = int(tier["price_per_token"])
+    return {
+        "tokens": tokens,
+        "price_per_token": rate,
+        "price_ngn": tokens * rate,
+    }
 
 
 class TokenService:
@@ -180,52 +220,184 @@ class TokenService:
     # ── Purchase ─────────────────────────────────────────────────────────────
 
     async def initiate_purchase(
-        self, user_id: str, pack_tokens: int
+        self, user_id: str, pack_tokens: int, email: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Initiate a token purchase.
-        Returns payment details including amount and reference.
+        Initiate a purchase of an arbitrary number of tokens.
+
+        `pack_tokens` is the quantity the user wants to buy (historically a fixed
+        pack size; now any amount >= MIN_PURCHASE_TOKENS). The price is computed
+        server-side from the published tiers, so a tampered quantity can never
+        underpay. Returns None when the quantity is not purchasable, so the
+        caller can answer with a 400.
         """
-        pack = next((p for p in TOKEN_PACKS if p["tokens"] == pack_tokens), None)
-        if not pack:
+        quote = compute_token_price(pack_tokens)
+        if not quote:
             return None
 
         import uuid
         reference = f"TKN-{uuid.uuid4().hex[:12].upper()}"
 
-        # In production, create a payment via Paystack/Flutterwave here
-        # For now, return the payment details
+        # Hand the server-computed amount to the payment gateway (mock in dev).
+        from app.services.payment_service import PaymentService
+
+        payment = await PaymentService().initialize_payment(
+            amount=float(quote["price_ngn"]),
+            email=email or "",
+            reference=reference,
+            metadata={
+                "type": "token_purchase",
+                "user_id": user_id,
+                "tokens": quote["tokens"],
+            },
+            # Send the buyer back to the wallet, not the orders page.
+            redirect_url=f"{settings.FRONTEND_URL}/dashboard/tokens?tx_ref={reference}",
+        )
+
+        provider = str(payment.get("provider") or "")
+        if not payment.get("success"):
+            return {
+                "success": False,
+                "error": payment.get("error") or "Payment initialization failed",
+                "reference": reference,
+                "provider": provider,
+            }
+
+        # Persist the quote BEFORE returning the checkout link: this row is what a
+        # webhook / verification call credits later, so the quantity and amount can
+        # never be supplied by the client at credit time. The reference column is
+        # unique, which makes crediting idempotent by construction.
+        self.db.add(TokenPurchase(
+            user_id=user_id,
+            reference=reference,
+            tokens=int(quote["tokens"]),
+            amount_ngn=int(quote["price_ngn"]),
+            price_per_token=int(quote["price_per_token"]),
+            provider=provider or None,
+            status=PURCHASE_PENDING,
+        ))
+        try:
+            await self.db.commit()
+        except Exception as exc:  # never break the checkout for a bookkeeping row
+            await self.db.rollback()
+            logger.error("Could not persist pending token purchase %s: %s", reference, exc)
+
+        # Mock mode has no external checkout page to visit - return no URL and let
+        # the client confirm locally (dev/test only, as before).
+        payment_url = "" if provider == "mock" else (payment.get("authorization_url") or "")
+
         return {
+            "success": True,
+            # Always our own reference: it is the key of the pending purchase row,
+            # so the client (and the webhook) refer to the purchase by the same id.
             "reference": reference,
-            "amount_ngn": pack["price_ngn"],
-            "tokens": pack["tokens"],
+            "amount_ngn": quote["price_ngn"],
+            "tokens": quote["tokens"],
+            "price_per_token": quote["price_per_token"],
             "currency": "NGN",
-            "payment_url": f"/api/v1/tokens/pay/{reference}",  # Placeholder
-            "description": f"{pack['tokens']} BuildIQ Tokens",
+            "payment_url": payment_url,
+            "provider": provider,
+            "description": f"{quote['tokens']} BuildIQ Tokens",
         }
 
-    async def confirm_purchase(
-        self, user_id: str, reference: str, tokens: int
-    ) -> bool:
+    # ── Gateway-confirmed purchase (webhook / return verification) ───────────
+
+    async def credit_pending_purchase(
+        self,
+        reference: str,
+        *,
+        provider: Optional[str] = None,
+        paid_amount: Optional[float] = None,
+        provider_reference: Optional[str] = None,
+        user_id: Optional[str] = None,
+        expected_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Credit the tokens quoted for `reference` once its payment is confirmed.
+
+        Callers (the Flutterwave webhook, the return-trip verification endpoint) only
+        ever report that a payment succeeded — quantity, price and owning user come
+        from the pending row written by `initiate_purchase`, so a forged callback can
+        never mint tokens. Idempotent: the row is claimed with a conditional UPDATE in
+        the same transaction that adds the balance, so a repeated webhook (or a webhook
+        racing the buyer's return trip) credits exactly once.
+
+        Returns {"status": ...} — one of:
+          credited | already_credited | not_found | forbidden | tokens_mismatch | amount_mismatch
         """
-        Confirm a token purchase after payment verification.
-        Called by payment webhook.
-        """
-        usage = await self.get_or_create_usage(user_id)
+        purchase = (await self.db.execute(
+            select(TokenPurchase).where(TokenPurchase.reference == reference)
+        )).scalar_one_or_none()
+
+        if not purchase:
+            logger.warning("Token credit skipped: unknown reference %s", reference)
+            return {"status": "not_found", "reference": reference}
+
+        if user_id and str(purchase.user_id) != str(user_id):
+            logger.warning("Token credit refused: %s does not belong to user %s", reference, user_id)
+            return {"status": "forbidden", "reference": reference}
+
+        if expected_tokens is not None and int(expected_tokens) != int(purchase.tokens):
+            logger.warning(
+                "Token credit refused: %s quotes %s tokens but %s were requested",
+                reference, purchase.tokens, expected_tokens,
+            )
+            return {"status": "tokens_mismatch", "reference": reference}
+
+        if purchase.status == PURCHASE_COMPLETED:
+            return {"status": "already_credited", "reference": reference, "tokens": int(purchase.tokens)}
+
+        if paid_amount is not None and abs(float(paid_amount) - float(purchase.amount_ngn)) > 0.01:
+            logger.error(
+                "Token credit refused: gateway reported %.2f for %s but %.2f was quoted",
+                float(paid_amount), reference, float(purchase.amount_ngn),
+            )
+            return {"status": "amount_mismatch", "reference": reference}
+
+        tokens = int(purchase.tokens)
+        owner_id = str(purchase.user_id)
+
+        # May insert the usage row (commits internally); nothing else is pending yet.
+        usage = await self.get_or_create_usage(owner_id)
+
+        # Atomic claim — a second caller (webhook vs. return trip) gets rowcount 0.
+        claimed = await self.db.execute(
+            update(TokenPurchase)
+            .where(TokenPurchase.id == purchase.id, TokenPurchase.status != PURCHASE_COMPLETED)
+            .values(
+                status=PURCHASE_COMPLETED,
+                completed_at=datetime.utcnow(),
+                provider=provider or purchase.provider,
+                provider_reference=provider_reference or purchase.provider_reference,
+                paid_amount_ngn=(
+                    int(round(float(paid_amount))) if paid_amount is not None
+                    else purchase.paid_amount_ngn
+                ),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if claimed.rowcount != 1:
+            await self.db.rollback()
+            logger.info("Token credit: %s was already credited concurrently", reference)
+            return {"status": "already_credited", "reference": reference, "tokens": tokens}
+
         usage.balance += tokens
         usage.lifetime_purchased += tokens
-
-        transaction = TokenTransaction(
-            user_id=user_id,
+        self.db.add(TokenTransaction(
+            user_id=owner_id,
             transaction_type=TransactionType.PURCHASE.value,
             amount=tokens,
             balance_after=usage.balance,
             reference=reference,
             description=f"Purchased {tokens} tokens (ref: {reference})",
-        )
-        self.db.add(transaction)
+        ))
         await self.db.commit()
-        return True
+        logger.info("Token credit: %s tokens for user %s (ref %s)", tokens, owner_id, reference)
+        return {
+            "status": "credited",
+            "reference": reference,
+            "tokens": tokens,
+            "balance": usage.balance,
+        }
 
     # ── Signup bonus ─────────────────────────────────────────────────────────
 
