@@ -15,4 +15,8 @@ class Notification(Base):
     title = Column(String(255), nullable=False)
     message = Column(Text)
     read = Column(Boolean, default=False, index=True)
+    # Optional in-app deep-link target (e.g. "/verification/review/<vendor_id>").
+    # Nullable: rows created before this column existed simply read back NULL and
+    # the clients fall back to type-based navigation.
+    link = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

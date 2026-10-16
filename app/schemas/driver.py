@@ -32,6 +32,16 @@ class DriverProfileOut(BaseModel):
     rating: Optional[float] = None
     rating_count: Optional[int] = None
 
+    # Payout / settlement account — the single bank account earnings are paid
+    # into. Nullable until the driver supplies them.
+    bank_name: Optional[str] = None
+    bank_account_number: Optional[str] = None
+    bank_account_name: Optional[str] = None
+    bank_code: Optional[str] = None
+
+    # Convenience flag for the UI nudge (true once a complete account is saved).
+    has_bank_details: bool = False
+
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -52,6 +62,24 @@ class DriverOnboardingUpdate(BaseModel):
 
 class DriverAvailabilityUpdate(BaseModel):
     availability: bool
+
+
+class DriverBankDetailsUpdate(BaseModel):
+    """The single bank account a driver's marketplace earnings are settled into.
+
+    All three mandatory fields are supplied together (the same rule the vendor
+    payout-account upsert enforces in `vendors.py`): a half-filled account is
+    worse than none, because the payout runner would resolve it and only fail
+    later at the provider.
+
+    Rules: NG NUBAN account numbers are exactly 10 digits; the optional
+    `bank_code` feeds gateways that need it and is rejected if it isn't numeric.
+    """
+
+    bank_name: str = Field(..., min_length=2, max_length=100)
+    bank_account_number: str = Field(..., pattern=r"^\d{10}$")
+    bank_account_name: str = Field(..., min_length=2, max_length=255)
+    bank_code: Optional[str] = Field(None, pattern=r"^\d{1,10}$")
 
 
 class DriverDefaultLocationUpdate(BaseModel):

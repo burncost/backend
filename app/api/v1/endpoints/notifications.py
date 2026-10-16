@@ -23,6 +23,7 @@ async def create_notification(
     title: str,
     message: Optional[str] = None,
     type: Optional[str] = "system",
+    link: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -31,6 +32,7 @@ async def create_notification(
         title=title,
         message=message,
         type=type,
+        link=link,
     )
     db.add(notification)
     await db.commit()
@@ -44,6 +46,7 @@ async def create_notification(
         "message": notification.message,
         "created_at": notification.created_at.isoformat() if notification.created_at else None,
         "read": notification.read,
+        "link": notification.link,
     }
 
 
@@ -84,6 +87,7 @@ async def list_notifications(
                 "message": n.message,
                 "created_at": n.created_at.isoformat() if n.created_at else None,
                 "read": n.read,
+                "link": n.link,
             }
             for n in notifications
         ],
@@ -128,10 +132,6 @@ async def mark_all_read(
     db: AsyncSession = Depends(get_db)
 ):
     user_id = current_user.id
-    await db.execute(
-        select(Notification)
-        .where(Notification.user_id == user_id, Notification.read == False)
-    )
     await db.execute(
         Notification.__table__.update()
         .where(Notification.user_id == user_id)

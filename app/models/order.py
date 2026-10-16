@@ -14,6 +14,11 @@ class OrderStatus(str, enum.Enum):
     CONFIRMED = "confirmed"
     PROCESSING = "processing"
     READY_FOR_PICKUP = "ready_for_pickup"
+    # Canonical status once a driver has picked the parcel up (mirrors
+    # delivery_jobs.picked_up). Kept alongside SHIPPED: SHIPPED is the legacy
+    # value written before this step existed and still lives on historical rows,
+    # so both remain valid and are treated as the same stage everywhere.
+    PICKED_UP = "picked_up"
     SHIPPED = "shipped"
     IN_TRANSIT = "in_transit"
     DELIVERED = "delivered"
@@ -67,6 +72,13 @@ class Order(Base):
     )
     customer_notes = Column(Text)
     admin_notes = Column(Text)
+    # Promo code applied at creation (counter bumped at order time, not payment),
+    # so an abandoned draft can release the use when deleted/cancelled/expired.
+    promo_code = Column(String(50))
+    # Flat Naira promo amount actually applied to this order, persisted so the
+    # checkout summary can itemise it (and reverse it) without re-evaluating the
+    # code against the buyer's live order history.
+    promo_discount = Column(Numeric(15, 2), default=0.00, server_default="0")
     driver_name = Column(String(255))
     driver_phone = Column(String(20))
     estimated_delivery_date = Column(DateTime)

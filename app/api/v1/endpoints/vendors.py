@@ -113,6 +113,7 @@ async def _auto_verify_vendor_background(
                     title="You're verified!",
                     message="Congratulations! Your supplier account has been verified and is now live on the marketplace.",
                     read=False,
+                    link="/supplier-dashboard/settings",
                 ))
                 await db.commit()
             except Exception as e:
@@ -131,16 +132,19 @@ async def _auto_verify_vendor_background(
                 logger.error(f"[auto-verify] failed to email vendor {vendor_id}: {e}")
 
             admin_result = await db.execute(select(User).where(User.role.in_(["admin", "super_admin"])))
-            for admin in admin_result.scalars().all():
-                db.add(Notification(
-                    user_id=admin.id,
-                    type="verification",
-                    title="Supplier auto-verified",
-                    message=f"Supplier '{vendor.business_name}' was auto-verified via CAC.",
-                    read=False,
-                ))
-            await db.commit()
-
+            # Admin → Settings → Notifications → "New Supplier Registrations".
+            from app.services import alert_settings
+            if alert_settings.alert_enabled("verification"):
+                for admin in admin_result.scalars().all():
+                    db.add(Notification(
+                        user_id=admin.id,
+                        type="verification",
+                        title="Supplier auto-verified",
+                        message=f"Supplier '{vendor.business_name}' was auto-verified via CAC.",
+                        read=False,
+                        link=f"/verification/review/{vendor.id}",
+                    ))
+                await db.commit()
             logger.info(f"[auto-verify] vendor {vendor_id} auto-verified successfully")
     except Exception as e:
         logger.error(f"[auto-verify] unexpected error for vendor {vendor_id}: {e}")
@@ -307,16 +311,20 @@ async def onboard_vendor(
             admin_result = await db.execute(
                 select(User).where(User.role.in_(["admin", "super_admin"]))
             )
-            admins = admin_result.scalars().all()
-            for admin in admins:
-                db.add(Notification(
-                    user_id=admin.id,
-                    type="vendor_verification",
-                    title="New supplier application awaiting verification",
-                    message=f"New supplier '{vendor.business_name}' has submitted an application and needs verification.",
-                    read=False,
-                ))
-            await db.commit()
+            # Admin → Settings → Notifications → "New Supplier Registrations".
+            from app.services import alert_settings
+            if alert_settings.alert_enabled("verification"):
+                admins = admin_result.scalars().all()
+                for admin in admins:
+                    db.add(Notification(
+                        user_id=admin.id,
+                        type="vendor_verification",
+                        title="New supplier application awaiting verification",
+                        message=f"New supplier '{vendor.business_name}' has submitted an application and needs verification.",
+                        read=False,
+                        link=f"/verification/review/{vendor.id}",
+                    ))
+                await db.commit()
         except Exception as e:
             logger.error(f"Failed to notify admins of new vendor {vendor.id}: {e}")
     

@@ -8,8 +8,13 @@ from uuid import UUID
 from app.core.database import get_db
 from app.models.cart import CartItem
 from app.models.product import Product, ProductImage
+from app.models.vendor import Vendor
 from app.api.deps import get_current_user
 from app.schemas.cart import CartItemCreate, CartItemUpdate, CartResponse, CartItemResponse
+# Single source of truth for builder-scoped agreed prices, so the cart quotes
+# exactly what `orders.create` will charge. orders.py does not import this module,
+# so there is no import cycle.
+from app.api.v1.endpoints.orders import _agreed_prices_for_builder
 
 import logging
 from app.models.user import User
@@ -33,13 +38,45 @@ async def get_cart(
     )
     items = result.scalars().all()
 
+    # Builder-scoped agreed negotiation prices: the cart must quote the figure
+    # checkout will actually charge, never the bare catalogue price.
+    agreed_prices = await _agreed_prices_for_builder(
+        db, user_id, [item.product_id for item in items]
+    )
+
+    # Vendor of each line, in ONE query (never per-item): the cart shows the real
+    # supplier name and only offers "Negotiate" for vendors that opted in.
+    vendor_by_product = {}
+    product_ids = [item.product_id for item in items]
+    if product_ids:
+        vendor_result = await db.execute(
+            select(
+                Product.id,
+                Vendor.id,
+                Vendor.business_name,
+                Vendor.open_to_negotiate,
+            )
+            .join(Vendor, Vendor.id == Product.vendor_id)
+            .where(Product.id.in_(product_ids))
+        )
+        for product_id, vendor_id, business_name, open_to_negotiate in vendor_result.all():
+            vendor_by_product[product_id] = (vendor_id, business_name, bool(open_to_negotiate))
+
     cart_items = []
     for item in items:
-        # Fetch product details
+        # Fetch product details (eager-load category so the response can carry a
+        # category name for the storefront's image fallback mapping).
         product_result = await db.execute(
-            select(Product).where(Product.id == item.product_id)
+            select(Product)
+            .options(selectinload(Product.category))
+            .where(Product.id == item.product_id)
         )
         product = product_result.scalar_one_or_none()
+
+        # Vendor (name + negotiation opt-in) resolved from the batch above.
+        vendor_id, vendor_name, open_to_negotiate = vendor_by_product.get(
+            item.product_id, (None, None, False)
+        )
 
         # Fetch primary image
         image_url = None
@@ -67,14 +104,36 @@ async def get_cart(
             "id": str(item.id),
             "product_id": str(item.product_id),
             "product_name": product.name if product else "Unknown Product",
-            "supplier_name": "Verified Supplier",
+            # Real vendor business name when known, else the historical placeholder.
+            "supplier_name": vendor_name or "Verified Supplier",
+            # Vendor identity + negotiation opt-in, so the line can offer
+            # "Negotiate" only where the supplier accepts it.
+            "vendor_id": str(vendor_id) if vendor_id else None,
+            "vendor_open_to_negotiate": open_to_negotiate,
             "unit_price": float(item.price_at_addition),
             "base_price": float(product.base_price) if product else 0,
+            # Agreed private price for this buyer (None when there is no deal):
+            # `orders.create` applies the same override, so the cart can show it.
+            "negotiation_price": agreed_prices.get(item.product_id),
             "quantity": item.quantity,
             "minimum_order_quantity": product.minimum_order_quantity if product else 1,
             "stock": product.quantity if product else 0,
             "unit_of_measure": product.unit_of_measure if product else "unit",
-            "image_url": image_url or "/placeholder.png",
+            # Empty string (not a fake path) so the storefront can fall back to
+            # the category image mapping instead of a broken /placeholder.png.
+            "image_url": image_url or "",
+            "category_name": (
+                product.category.name
+                if product and product.category
+                else None
+            ),
+            # Category id as well as the name: lets the cart verify a
+            # category-scoped promo code before checkout.
+            "category_id": (
+                str(product.category_id)
+                if product and product.category_id
+                else None
+            ),
             "is_verified": product.is_verified if product else False,
         })
 

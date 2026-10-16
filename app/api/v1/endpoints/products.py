@@ -148,6 +148,7 @@ async def get_product(
         "vendor_name": vendor_name,
         "vendor_email": vendor_email,
         "vendor_location": vendor_location,
+        "vendor_open_to_negotiate": bool(vendor.open_to_negotiate),
     })
 
 
@@ -215,7 +216,14 @@ async def update_product(
                 detail="You don't have permission to update this product"
             )
         
+        product_service = ProductService(db)
         update_data = product_in.model_dump(exclude_unset=True)
+
+        # brand_name is write-only (Product has no brand_name column): resolve it to
+        # brand_id so an edit can actually change the product's brand.
+        brand_name = update_data.pop("brand_name", None)
+        if brand_name and not update_data.get("brand_id"):
+            update_data["brand_id"] = await product_service.resolve_brand_id(brand_name)
         
         if not update_data:
             raise HTTPException(

@@ -53,6 +53,7 @@ class VendorUpdate(BaseModel):
     total_reviews: Optional[int] = None
     total_sales: Optional[Decimal] = None
     is_featured: Optional[bool] = False
+    open_to_negotiate: Optional[bool] = None
     business_image: Optional[str] = None
     delivery_time: Optional[str] = Field(None, max_length=100)
     response_time: Optional[str] = Field(None, max_length=100)
@@ -75,6 +76,7 @@ class VendorResponse(VendorBase):
     total_reviews: int
     total_sales: Decimal
     is_featured: bool
+    open_to_negotiate: bool = False
     business_image: Optional[str] = None
     delivery_time: Optional[str] = "1-3 Days"
     response_time: Optional[str] = "< 1 hour"

@@ -46,6 +46,9 @@ class Product(Base):
     width = Column(Numeric(10, 2))
     height = Column(Numeric(10, 2))
     unit_of_measure = Column(String(50), default="piece")
+    # Optional, free-form build quality tier (e.g. "Standard", "Premium").
+    # Nullable + additive so existing rows simply read back NULL.
+    quality = Column(String(50), nullable=True)
     minimum_order_quantity = Column(Integer, default=1)
     shipping_fee = Column(Numeric(15, 2), default=0.00)
     estimated_delivery_days = Column(Integer, default=5)

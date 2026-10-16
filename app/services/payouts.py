@@ -17,18 +17,53 @@ from sqlalchemy.orm import selectinload
 from app.models.payment_capture import PaymentCapture
 from app.models.settlement_ledger import VendorSettlementLedger
 from app.models.vendor_bank_account import VendorBankAccount
-from app.services.settlement_service import is_enabled
+from app.services.settlement_service import is_enabled, refresh_from_db
+from app.services import runtime_settings
 from app.config import settings
 
-VALID_GATEWAYS = ("flutterwave", "monnify")
+VALID_GATEWAYS = ("paystack", "flutterwave", "monnify")
+DEFAULT_PRIMARY_GATEWAY = "paystack"
+DEFAULT_BACKUP_GATEWAY = "monnify"
 
 
 def configured(gateway: str) -> bool:
+    if gateway == "paystack":
+        return bool(getattr(settings, "PAYSTACK_SECRET_KEY", None))
     if gateway == "flutterwave":
         return bool(settings.FLUTTERWAVE_SECRET_KEY and settings.FLUTTERWAVE_PUBLIC_KEY)
     if gateway == "monnify":
         return bool(settings.MONNIFY_SECRET_KEY and settings.MONNIFY_PUBLIC_KEY)
     return False
+
+
+def gateway_preference() -> tuple[str, str]:
+    """(primary, backup) payout providers from admin settings, with safe fallbacks."""
+    primary = (runtime_settings.get_str("payout_primary_gateway", DEFAULT_PRIMARY_GATEWAY) or "").strip().lower()
+    backup = (runtime_settings.get_str("payout_backup_gateway", DEFAULT_BACKUP_GATEWAY) or "").strip().lower()
+    if primary not in VALID_GATEWAYS:
+        primary = DEFAULT_PRIMARY_GATEWAY
+    if backup not in VALID_GATEWAYS:
+        backup = DEFAULT_BACKUP_GATEWAY
+    return primary, backup
+
+
+def resolve_gateway(gateway: str | None) -> tuple[str, str]:
+    """Pick the gateway to use, falling back to the backup when the primary is
+    unconfigured. Returns ``(selected_gateway, reason)`` where reason is
+    ``requested`` | ``primary`` | ``backup`` | ``unconfigured``.
+    """
+    primary, backup = gateway_preference()
+    if gateway:
+        wanted = gateway.strip().lower()
+        if wanted in VALID_GATEWAYS and configured(wanted):
+            return wanted, "requested"
+        # An explicitly requested gateway that is not usable still gets a chance
+        # to fall back, so a payout run is never silently skipped.
+    if configured(primary):
+        return primary, "primary"
+    if configured(backup):
+        return backup, "backup"
+    return (primary if gateway is None else (gateway or primary).lower()), "unconfigured"
 
 
 class PayoutService:
@@ -74,21 +109,32 @@ class PayoutService:
             .limit(1)
         )).scalar_one_or_none()
 
-    async def run(self, db: AsyncSession, gateway: str, vendor_id: str | None = None):
+    async def run(self, db: AsyncSession, gateway: str | None = None, vendor_id: str | None = None):
         """Execute pending payouts for one gateway.
 
         Never fires unless the feature flag is on and the gateway is configured.
-        When enabled/configured, this resolves each vendor's payout account and —
+        When `gateway` is omitted (or unusable), the admin-configured primary is
+        used and the backup (Monnify) is tried before giving up. When
+        enabled/configured, this resolves each vendor's payout account and —
         only with account data present — would submit a real provider request.
-        The concrete Flutterwave/Monnify request bodies must be confirmed against
-        your provider's test docs/payloads on staging before enabling real money.
+        The concrete request bodies must be confirmed against each provider's test
+        docs/payloads on staging before enabling real money.
         """
+        await refresh_from_db(db)
         if not is_enabled():
             return {"status": "disabled", "message": "SETTLEMENT_ENABLED is off"}
-        if gateway not in VALID_GATEWAYS:
+        selected, reason = resolve_gateway(gateway)
+        if selected not in VALID_GATEWAYS:
             return {"status": "invalid_gateway", "message": f"Use {list(VALID_GATEWAYS)}"}
-        if not configured(gateway):
-            return {"status": "not_configured", "message": f"{gateway} keys are not configured"}
+        if not configured(selected):
+            primary, backup = gateway_preference()
+            return {
+                "status": "not_configured",
+                "gateway": selected,
+                "message": f"{selected} keys are not configured",
+                "primary_gateway": primary,
+                "backup_gateway": backup,
+            }
 
         pending = (await db.execute(
             select(VendorSettlementLedger).where(VendorSettlementLedger.status == "pending")
@@ -114,15 +160,19 @@ class PayoutService:
                 "net_amount": float(ledger.net_amount),
             })
 
+        primary, backup = gateway_preference()
         return {
             "status": "staging_required",
-            "gateway": gateway,
+            "gateway": selected,
+            "gateway_reason": reason,
+            "primary_gateway": primary,
+            "backup_gateway": backup,
             "pending_entries": len(pending),
             "ready_for_payout": len(readiness),
             "vendors_missing_account": len(missing_account_vendors),
             "message": (
                 "Disbursement is staged: accounts resolved. Submit the provider transfer "
-                "bodies (confirmed against Monnify/Flutterwave test docs) to complete the run."
+                "bodies (confirmed against Paystack/Monnify test docs) to complete the run."
             ),
             "readiness": readiness[:200],
         }

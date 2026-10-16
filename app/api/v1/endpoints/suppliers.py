@@ -40,6 +40,8 @@ class SupplierListItem(BaseModel):
     specializations: list[str] = []
     categories: list[str] = []
     platform_margin: float = 5.0
+    # When true the vendor is open to price negotiation (buyer-facing badge).
+    open_to_negotiate: bool = False
 
     class Config:
         from_attributes = True
@@ -101,6 +103,7 @@ async def list_suppliers(
             specializations=s.specializations or [],
             categories=cat_names,
             platform_margin=avg_margin,
+            open_to_negotiate=bool(s.open_to_negotiate),
         ))
 
     return result_list

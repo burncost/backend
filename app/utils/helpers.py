@@ -81,8 +81,22 @@ def paginate_results(
     }
 
 
-def calculate_vat(amount: float, vat_rate: float = 0.075) -> float:
-    """Calculate VAT for a given amount (Nigeria: 7.5%)."""
+def calculate_vat(amount: float, vat_rate: Optional[float] = None) -> float:
+    """Calculate VAT for a given amount.
+
+    The rate now comes from the admin-configurable pricing config (Nigeria's
+    statutory rate is 7.5%); the argument stays for backwards compatibility.
+    """
+    if vat_rate is None:
+        try:
+            from app.services import pricing_service
+
+            cfg = pricing_service.load_pricing_config()
+            if not cfg.vat_enabled:
+                return 0.0
+            vat_rate = float(cfg.vat_rate) / 100.0
+        except Exception:
+            vat_rate = 0.075
     return round(amount * vat_rate, 2)
 
 

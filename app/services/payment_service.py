@@ -61,10 +61,12 @@ class PaymentService:
             return await self._initialize_paystack(amount, email, reference, metadata, redirect_url)
 
         if provider:
-            logger.warning(f"Requested provider {provider} not configured; returning mock")
-            return self._mock_initialize(amount, email, reference, metadata)
+            # A specific gateway was requested but it has no credentials: fail
+            # loudly instead of silently faking a successful payment.
+            logger.error(f"Requested provider {provider} is not configured")
+            return {"success": False, "error": f"{provider} is not configured", "reference": reference, "provider": provider}
 
-        # No provider configured, use mock
+        # No provider configured at all, use mock
         logger.warning("No payment provider configured, using mock payment")
         return self._mock_initialize(amount, email, reference, metadata)
 
@@ -190,7 +192,7 @@ class PaymentService:
 
                 if response.status_code != 200:
                     logger.error(f"Paystack error: {response.status_code} {response.text}")
-                    return self._mock_initialize(amount, email, reference, metadata)
+                    return {"success": False, "error": f"Paystack returned status {response.status_code}", "reference": reference, "provider": "paystack"}
 
                 data = response.json()
                 if data.get("status"):
@@ -202,14 +204,15 @@ class PaymentService:
                         "provider": "paystack",
                     }
 
-                return self._mock_initialize(amount, email, reference, metadata)
+                logger.error(f"Paystack init failed: {data}")
+                return {"success": False, "error": "Paystack payment initialization failed", "reference": reference, "provider": "paystack"}
 
         except ImportError:
-            logger.warning("httpx not installed, using mock payment")
-            return self._mock_initialize(amount, email, reference, metadata)
+            logger.warning("httpx not installed for Paystack")
+            return {"success": False, "error": "HTTP client not available", "reference": reference, "provider": "paystack"}
         except Exception as e:
             logger.error(f"Paystack init failed: {str(e)}")
-            return self._mock_initialize(amount, email, reference, metadata)
+            return {"success": False, "error": str(e), "reference": reference, "provider": "paystack"}
 
     async def _initialize_monnify(
         self,
@@ -289,13 +292,31 @@ class PaymentService:
             return {"success": False, "error": str(e), "reference": reference, "provider": "monnify"}
 
     async def verify_payment(self, reference: str, provider: str = "flutterwave") -> Dict[str, Any]:
-        """Verify a payment transaction via Flutterwave v3 or Paystack."""
-        logger.info(f"Verifying payment: {reference} via {provider}")
+        """Verify a payment transaction via the gateway that took the payment.
+
+        `provider` selects the gateway: paystack | flutterwave | monnify. When it
+        is omitted/blank we keep the legacy behaviour (Flutterwave, then Paystack).
+        """
+        provider = (provider or "").strip().lower()
+        logger.info(f"Verifying payment: {reference} via {provider or 'default'}")
 
         if self.mock_mode:
             return self._mock_verify(reference)
 
-        if provider == "flutterwave" and self.flutterwave_secret_key:
+        if provider == "monnify":
+            if self.monnify_secret_key:
+                return await self._verify_monnify(reference)
+            logger.warning("Monnify verify requested but Monnify is not configured")
+            return {"success": False, "error": "Monnify is not configured", "reference": reference, "provider": "monnify"}
+
+        if provider == "paystack":
+            if self.paystack_secret_key:
+                return await self._verify_paystack(reference)
+            logger.warning("Paystack verify requested but Paystack is not configured")
+            return {"success": False, "error": "Paystack is not configured", "reference": reference, "provider": "paystack"}
+
+        # Legacy default (provider omitted or "flutterwave"): Flutterwave, then Paystack.
+        if self.flutterwave_secret_key:
             return await self._verify_flutterwave(reference)
 
         if self.paystack_secret_key:
@@ -359,7 +380,8 @@ class PaymentService:
                 )
 
                 if response.status_code != 200:
-                    return self._mock_verify(reference)
+                    logger.error(f"Paystack verify error: {response.status_code} {response.text}")
+                    return {"success": False, "error": f"Paystack verify returned status {response.status_code}", "reference": reference, "provider": "paystack"}
 
                 data = response.json()
                 if data.get("status") and data["data"].get("status") == "success":
@@ -382,10 +404,89 @@ class PaymentService:
                 }
 
         except ImportError:
-            return self._mock_verify(reference)
+            logger.warning("httpx not installed for Paystack verify")
+            return {"success": False, "error": "HTTP client not available", "reference": reference, "provider": "paystack"}
         except Exception as e:
             logger.error(f"Paystack verify failed: {str(e)}")
-            return self._mock_verify(reference)
+            return {"success": False, "error": str(e), "reference": reference, "provider": "paystack"}
+
+    async def _verify_monnify(self, reference: str) -> Dict[str, Any]:
+        """Verify a Monnify transaction by reference (Standard Checkout).
+
+        Queries by the merchant `paymentReference` first
+        (`/api/v2/merchant/transactions/query`), then falls back to the
+        transaction-reference lookup (`/api/v2/transactions/{ref}`).
+        """
+        try:
+            import base64
+            import httpx
+
+            base_url = self.monnify_base_url or "https://sandbox.monnify.com"
+            auth_header = "Basic " + base64.b64encode(
+                f"{self.monnify_api_key}:{self.monnify_secret_key}".encode("utf-8")
+            ).decode("utf-8")
+
+            async with httpx.AsyncClient() as client:
+                token_resp = await client.post(
+                    f"{base_url}/api/v1/auth/login",
+                    headers={"Authorization": auth_header},
+                )
+                token_data = token_resp.json() if token_resp.headers.get("content-type", "").startswith("application/json") else {}
+                token_body = token_data.get("responseBody") or {}
+                token = token_body.get("accessToken") or token_data.get("accessToken") or ""
+                if not token:
+                    logger.error(f"Monnify verify auth failed: {token_resp.status_code}")
+                    return {"success": False, "error": "Monnify authentication failed", "reference": reference, "provider": "monnify"}
+
+                # Monnify offers a payment-reference query and a transaction-
+                # reference lookup. Our `reference` is the merchant
+                # paymentReference, so try that endpoint first, then fall back.
+                tx: Dict[str, Any] = {}
+                for url, params in (
+                    (f"{base_url}/api/v2/merchant/transactions/query", {"paymentReference": reference}),
+                    (f"{base_url}/api/v2/transactions/{reference}", None),
+                ):
+                    verify_resp = await client.get(
+                        url, params=params, headers={"Authorization": f"Bearer {token}"}
+                    )
+                    if verify_resp.status_code != 200:
+                        logger.error(f"Monnify verify error: {verify_resp.status_code} {verify_resp.text}")
+                        continue
+                    candidate = (verify_resp.json().get("responseBody") or {})
+                    if candidate:
+                        tx = candidate
+                        break
+
+                if not tx:
+                    return {"success": False, "error": "Monnify transaction not found", "reference": reference, "provider": "monnify"}
+
+                payment_status = str(tx.get("paymentStatus") or "").upper()
+                if payment_status in ("PAID", "OVERPAID"):
+                    return {
+                        "success": True,
+                        "amount": float(tx.get("amountPaid") or tx.get("amount") or 0),
+                        "currency": tx.get("currencyCode", "NGN"),
+                        "status": "success",
+                        "paid_at": tx.get("paidOn") or tx.get("createdOn"),
+                        "channel": tx.get("paymentMethod", "card"),
+                        "reference": reference,
+                        "provider": "monnify",
+                        "id": tx.get("transactionReference"),
+                    }
+
+                return {
+                    "success": False,
+                    "status": payment_status.lower() or "failed",
+                    "reference": reference,
+                    "provider": "monnify",
+                }
+
+        except ImportError:
+            logger.warning("httpx not installed for Monnify verify")
+            return {"success": False, "error": "HTTP client not available", "reference": reference, "provider": "monnify"}
+        except Exception as e:
+            logger.error(f"Monnify verify failed: {str(e)}")
+            return {"success": False, "error": str(e), "reference": reference, "provider": "monnify"}
 
     async def create_transfer(
         self,

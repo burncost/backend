@@ -5,8 +5,8 @@
 -- =============================================================
 
 -- user_role must include all roles in Backend/app/models/user.py (UserRole):
--- customer, vendor, admin, super_admin, manager, support, marketing
-CREATE TYPE user_role AS ENUM ('customer', 'vendor', 'admin', 'super_admin', 'manager', 'support', 'marketing');
+-- customer, vendor, admin, super_admin, manager, support, marketing, driver
+CREATE TYPE user_role AS ENUM ('customer', 'vendor', 'admin', 'super_admin', 'manager', 'support', 'marketing', 'driver');
 -- wait for success, then:
 CREATE TYPE user_status AS ENUM ('active', 'suspended', 'pending_verification', 'deactivated');
 -- wait for success, then:
@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     location VARCHAR(100),
     avatar_url TEXT,
     date_of_birth DATE,
+    -- Mono NIN lookup cache + per-user notification opt-ins (migration-backed)
+    nin_verification_data JSONB,
+    notification_preferences JSONB,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -106,9 +109,12 @@ CREATE TABLE IF NOT EXISTS vendors (
     state VARCHAR(255) NOT NULL,
     business_address VARCHAR(255) NOT NULL,
     cac_business_registration_number VARCHAR(100) UNIQUE,
+    tax_identification_number VARCHAR(50),
     nin VARCHAR(50),
     verification_status VARCHAR(20) DEFAULT 'pending',
     verification_tier VARCHAR(20) NOT NULL DEFAULT 'cac_only',
+    -- Cached Mono CAC lookup response (avoids repeat API calls)
+    cac_verification_data JSONB,
     transaction_volume NUMERIC(15,2) DEFAULT 0.00,
     verification_date TIMESTAMP,
     verified_by UUID REFERENCES users(id),
@@ -117,6 +123,7 @@ CREATE TABLE IF NOT EXISTS vendors (
     total_reviews INTEGER DEFAULT 0,
     total_sales NUMERIC(15,2) DEFAULT 0.00,
     is_featured BOOLEAN DEFAULT FALSE,
+    open_to_negotiate BOOLEAN NOT NULL DEFAULT FALSE,
     business_image VARCHAR(500),
     delivery_time VARCHAR(100) DEFAULT '1-3 Days',
     response_time VARCHAR(100) DEFAULT '< 1 hour',
@@ -203,6 +210,8 @@ CREATE TABLE IF NOT EXISTS vendor_drafts (
     current_step VARCHAR(50) DEFAULT 'business-info',
     business_info JSONB DEFAULT '{}',
     banking_info JSONB DEFAULT '{}',
+    -- Extra onboarding data captured during a tier upgrade (migration-backed)
+    upgrade_data JSONB,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -233,6 +242,7 @@ CREATE TABLE IF NOT EXISTS products (
     width NUMERIC(10,2),
     height NUMERIC(10,2),
     unit_of_measure VARCHAR(50) DEFAULT 'piece',
+    quality VARCHAR(50),
     minimum_order_quantity INTEGER DEFAULT 1,
     shipping_fee NUMERIC(15,2) DEFAULT 0.00,
     estimated_delivery_days INTEGER DEFAULT 5,
@@ -362,6 +372,11 @@ CREATE TABLE IF NOT EXISTS orders (
     total_amount NUMERIC(15,2) NOT NULL,
     payment_status VARCHAR(25) DEFAULT 'pending',
     payment_method VARCHAR(20),
+    -- Promo code consumed at creation (counter bumped then, not on payment), so
+    -- an abandoned draft can release the use when deleted/cancelled/expired.
+    promo_code VARCHAR(50),
+    -- Flat Naira promo amount applied at checkout (persisted with promo_code).
+    promo_discount NUMERIC(15,2) DEFAULT 0.00,
     customer_notes TEXT,
     admin_notes TEXT,
     driver_name VARCHAR(255),
@@ -423,6 +438,9 @@ CREATE TABLE IF NOT EXISTS notifications (
     title VARCHAR(255) NOT NULL,
     message TEXT,
     read BOOLEAN DEFAULT FALSE,
+    -- Optional in-app deep-link target (e.g. "/verification/review/<vendor_id>").
+    -- Nullable: clients fall back to type-based navigation when NULL.
+    link VARCHAR(500),
     created_at TIMESTAMP DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_notifications_user_id ON notifications (user_id);
@@ -512,6 +530,7 @@ CREATE TABLE IF NOT EXISTS promo_codes (
     discount_percent NUMERIC(5,2) NOT NULL,
     max_uses INTEGER DEFAULT 0,
     current_uses INTEGER DEFAULT 0,
+    max_uses_per_user INTEGER DEFAULT 0,
     min_order_amount NUMERIC(15,2) DEFAULT 0,
     is_active BOOLEAN DEFAULT TRUE,
     vendor_id UUID REFERENCES vendors(id) ON DELETE CASCADE,
@@ -670,11 +689,13 @@ ALTER TABLE products
     )
   );
 
+-- `picked_up` is the canonical order status once a driver collects the parcel;
+-- `shipped` is kept as a legacy value still present on historical rows.
 ALTER TABLE orders
   ADD CONSTRAINT chk_orders_status CHECK (
     status IS NULL OR (
       status IN ('pending_payment','payment_failed','confirmed','processing',
-                 'ready_for_pickup','shipped','in_transit','delivered',
+                 'ready_for_pickup','picked_up','shipped','in_transit','delivered',
                  'cancelled','refunded')
       AND status = LOWER(status)
     )
@@ -700,7 +721,7 @@ ALTER TABLE order_items
   ADD CONSTRAINT chk_order_items_vendor_status CHECK (
     vendor_status IS NULL OR (
       vendor_status IN ('pending_payment','payment_failed','confirmed','processing',
-                        'ready_for_pickup','shipped','in_transit','delivered',
+                        'ready_for_pickup','picked_up','shipped','in_transit','delivered',
                         'cancelled','refunded')
       AND vendor_status = LOWER(vendor_status)
     )
@@ -815,6 +836,8 @@ CREATE TABLE IF NOT EXISTS negotiations (
     counter_offer NUMERIC(5,2),
     final_discount NUMERIC(5,2),
     value NUMERIC(15,2) DEFAULT 0,
+    demand_alert_id UUID REFERENCES demand_alerts(id) ON DELETE SET NULL,
+    bid_price NUMERIC(15,2),
     status VARCHAR(50) DEFAULT 'pending',
     admin_note TEXT,
     flagged BOOLEAN DEFAULT FALSE,
@@ -825,6 +848,7 @@ CREATE TABLE IF NOT EXISTS negotiations (
 CREATE INDEX IF NOT EXISTS ix_negotiations_negotiation_number ON negotiations (negotiation_number);
 CREATE INDEX IF NOT EXISTS ix_negotiations_builder_id ON negotiations (builder_id);
 CREATE INDEX IF NOT EXISTS ix_negotiations_supplier_id ON negotiations (supplier_id);
+CREATE INDEX IF NOT EXISTS ix_negotiations_demand_alert_id ON negotiations (demand_alert_id);
 CREATE INDEX IF NOT EXISTS ix_negotiations_status ON negotiations (status);
 CREATE INDEX IF NOT EXISTS ix_negotiations_created_at ON negotiations (created_at);
 CREATE INDEX IF NOT EXISTS ix_negotiations_status_created ON negotiations (status, created_at);
@@ -1214,6 +1238,325 @@ CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_intent ON ai_agent_logs (intent);
 CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_tool_name ON ai_agent_logs (tool_name);
 CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_created_at ON ai_agent_logs (created_at);
 CREATE INDEX IF NOT EXISTS ix_ai_agent_logs_user_created ON ai_agent_logs (user_id, created_at);
+
+-- =============================================================
+-- 49. DRIVER & DELIVERY (driver & delivery feature)
+-- =============================================================
+-- Backs the driver portal + live delivery tracking. Previously applied only
+-- through Alembic migrations; this section brings a fresh install created from
+-- this file to the same schema. Additive only.
+
+-- 49.1 driver_profiles
+CREATE TABLE IF NOT EXISTS driver_profiles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    vendor_id UUID REFERENCES vendors(id) ON DELETE SET NULL,
+    source VARCHAR(20) NOT NULL DEFAULT 'self',      -- self | vendor
+    status VARCHAR(20) NOT NULL DEFAULT 'active',    -- pending | active | suspended
+    rating NUMERIC(3,2),
+    rating_count INTEGER NOT NULL DEFAULT 0,
+    full_name VARCHAR(255),
+    phone VARCHAR(20),
+    availability BOOLEAN NOT NULL DEFAULT FALSE,
+    vehicle_type VARCHAR(100),
+    vehicle_plate VARCHAR(50),
+    vehicle_capacity VARCHAR(100),
+    license_no VARCHAR(100),
+    default_address VARCHAR(500),
+    default_city VARCHAR(100),
+    default_state VARCHAR(100),
+    default_lat NUMERIC(11,8),
+    default_lng NUMERIC(11,8),
+    current_lat NUMERIC(11,8),
+    current_lng NUMERIC(11,8),
+    current_location_updated_at TIMESTAMP,
+    -- Payout / settlement account (single account per driver).
+    bank_name VARCHAR(100),
+    bank_account_number VARCHAR(20),
+    bank_account_name VARCHAR(255),
+    bank_code VARCHAR(10),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_driver_profiles_user_id ON driver_profiles (user_id);
+CREATE INDEX IF NOT EXISTS ix_driver_profiles_vendor_id ON driver_profiles (vendor_id);
+
+-- 49.2 delivery_jobs
+CREATE TABLE IF NOT EXISTS delivery_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_number VARCHAR(50) UNIQUE NOT NULL,
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+    driver_profile_id UUID REFERENCES driver_profiles(id) ON DELETE SET NULL,
+    assignment_type VARCHAR(20) NOT NULL DEFAULT 'offer',  -- direct | offer
+    status VARCHAR(20) NOT NULL DEFAULT 'available',       -- available|accepted|picked_up|in_transit|delivered|cancelled|expired
+    pickup_address VARCHAR(500),
+    pickup_city VARCHAR(100),
+    pickup_state VARCHAR(100),
+    pickup_lat NUMERIC(11,8),
+    pickup_lng NUMERIC(11,8),
+    dropoff_address VARCHAR(500),
+    dropoff_city VARCHAR(100),
+    dropoff_state VARCHAR(100),
+    dropoff_lat NUMERIC(11,8),
+    dropoff_lng NUMERIC(11,8),
+    driver_name VARCHAR(255),
+    driver_phone VARCHAR(20),
+    delivery_fee NUMERIC(15,2) DEFAULT 0,
+    accepted_at TIMESTAMP,
+    picked_up_at TIMESTAMP,
+    in_transit_at TIMESTAMP,
+    delivered_at TIMESTAMP,
+    cancelled_at TIMESTAMP,
+    expires_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_delivery_jobs_job_number ON delivery_jobs (job_number);
+CREATE INDEX IF NOT EXISTS ix_delivery_jobs_order_id ON delivery_jobs (order_id);
+CREATE INDEX IF NOT EXISTS ix_delivery_jobs_vendor_id ON delivery_jobs (vendor_id);
+CREATE INDEX IF NOT EXISTS ix_delivery_jobs_driver_profile_id ON delivery_jobs (driver_profile_id);
+CREATE INDEX IF NOT EXISTS ix_delivery_jobs_status ON delivery_jobs (status);
+CREATE INDEX IF NOT EXISTS ix_delivery_jobs_created_at ON delivery_jobs (created_at);
+
+-- 49.3 driver_location_updates (live-location time series)
+CREATE TABLE IF NOT EXISTS driver_location_updates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    driver_profile_id UUID NOT NULL REFERENCES driver_profiles(id) ON DELETE CASCADE,
+    delivery_job_id UUID REFERENCES delivery_jobs(id) ON DELETE SET NULL,
+    lat NUMERIC(11,8) NOT NULL,
+    lng NUMERIC(11,8) NOT NULL,
+    accuracy NUMERIC(11,2),
+    speed NUMERIC(11,2),
+    heading NUMERIC(11,2),
+    recorded_at TIMESTAMP DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_driver_location_updates_driver_profile_id ON driver_location_updates (driver_profile_id);
+CREATE INDEX IF NOT EXISTS ix_driver_location_updates_delivery_job_id ON driver_location_updates (delivery_job_id);
+CREATE INDEX IF NOT EXISTS ix_driver_location_updates_recorded_at ON driver_location_updates (recorded_at);
+
+-- 49.4 delivery_proofs (Phase 1A - one row per job)
+CREATE TABLE IF NOT EXISTS delivery_proofs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    delivery_job_id UUID NOT NULL UNIQUE REFERENCES delivery_jobs(id) ON DELETE CASCADE,
+    pod_type VARCHAR(20) NOT NULL DEFAULT 'photo',   -- photo | signature | note
+    file_url TEXT,
+    note TEXT,
+    captured_lat NUMERIC(11,8),
+    captured_lng NUMERIC(11,8),
+    submitted_by VARCHAR(20) NOT NULL DEFAULT 'driver',  -- driver | vendor | admin | buyer
+    captured_at TIMESTAMP DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    -- Geotag / freshness verification (additive; null until a photo is scored)
+    exif_taken_at TIMESTAMP,
+    exif_lat NUMERIC(11,8),
+    exif_lng NUMERIC(11,8),
+    gps_source VARCHAR(20),                -- exif | device | none
+    geofence_distance_m NUMERIC(12,2),
+    geofence_radius_m NUMERIC(12,2),
+    within_geofence BOOLEAN,
+    is_live BOOLEAN DEFAULT FALSE,
+    needs_review BOOLEAN NOT NULL DEFAULT FALSE,
+    verification_status VARCHAR(20),       -- verified | unverified | out_of_range | awaiting_buyer | buyer_confirmed
+    verification_note TEXT,
+    raw_exif JSONB,
+    -- Human review of a flagged proof (additive; null until reviewed)
+    review_status VARCHAR(20),             -- pending | cleared | rejected
+    reviewed_by VARCHAR(64),
+    reviewed_at TIMESTAMP,
+    review_note VARCHAR(500),
+    -- Buyer receipt confirmation for a no-GPS proof (additive)
+    buyer_confirmation_required BOOLEAN NOT NULL DEFAULT FALSE,
+    buyer_confirmed_at TIMESTAMP,
+    buyer_confirmed_by UUID
+);
+CREATE INDEX IF NOT EXISTS ix_delivery_proofs_delivery_job_id ON delivery_proofs (delivery_job_id);
+
+-- 49.5 delivery_ratings (Phase 1B - one rating per job)
+CREATE TABLE IF NOT EXISTS delivery_ratings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    delivery_job_id UUID NOT NULL UNIQUE REFERENCES delivery_jobs(id) ON DELETE CASCADE,
+    driver_profile_id UUID NOT NULL REFERENCES driver_profiles(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    reviewer_name VARCHAR(100),
+    rating INTEGER NOT NULL,
+    comment TEXT,
+    is_verified_purchase BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_delivery_ratings_driver_profile_id ON delivery_ratings (driver_profile_id);
+CREATE INDEX IF NOT EXISTS ix_delivery_ratings_delivery_job_id ON delivery_ratings (delivery_job_id);
+CREATE INDEX IF NOT EXISTS ix_delivery_ratings_user_id ON delivery_ratings (user_id);
+
+-- 49.6 driver_earnings (Phase 1C - one row per delivered job)
+CREATE TABLE IF NOT EXISTS driver_earnings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    driver_profile_id UUID NOT NULL REFERENCES driver_profiles(id) ON DELETE CASCADE,
+    delivery_job_id UUID NOT NULL UNIQUE REFERENCES delivery_jobs(id) ON DELETE CASCADE,
+    gross_amount NUMERIC(15,2) NOT NULL,
+    commission_amount NUMERIC(15,2) NOT NULL DEFAULT 0,
+    net_amount NUMERIC(15,2) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending | paid | cancelled
+    paid_at TIMESTAMP,
+    payout_reference VARCHAR(100),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_driver_earnings_driver_profile_id ON driver_earnings (driver_profile_id);
+CREATE INDEX IF NOT EXISTS ix_driver_earnings_delivery_job_id ON driver_earnings (delivery_job_id);
+
+-- 49.7 delivery_job_events (manual driver/vendor updates shown to the buyer)
+CREATE TABLE IF NOT EXISTS delivery_job_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    delivery_job_id UUID REFERENCES delivery_jobs(id) ON DELETE CASCADE,
+    order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
+    actor_type VARCHAR(20) NOT NULL DEFAULT 'driver',  -- driver | vendor | admin
+    actor_name VARCHAR(255),
+    event_type VARCHAR(20) NOT NULL DEFAULT 'status',  -- location | status | note
+    status VARCHAR(20),
+    lat NUMERIC(11,8),
+    lng NUMERIC(11,8),
+    note TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_delivery_job_events_delivery_job_id ON delivery_job_events (delivery_job_id);
+CREATE INDEX IF NOT EXISTS ix_delivery_job_events_order_id ON delivery_job_events (order_id);
+CREATE INDEX IF NOT EXISTS ix_delivery_job_events_created_at ON delivery_job_events (created_at);
+
+-- 49.8 ENUM CHECK CONSTRAINTS (delivery tables)
+ALTER TABLE delivery_jobs
+  ADD CONSTRAINT chk_delivery_jobs_status CHECK (status IS NULL OR status IN ('available','accepted','picked_up','in_transit','delivered','cancelled','expired'));
+ALTER TABLE delivery_jobs
+  ADD CONSTRAINT chk_delivery_jobs_assignment_type CHECK (assignment_type IS NULL OR assignment_type IN ('direct','offer'));
+ALTER TABLE driver_profiles
+  ADD CONSTRAINT chk_driver_profiles_status CHECK (status IS NULL OR status IN ('pending','active','suspended'));
+ALTER TABLE driver_profiles
+  ADD CONSTRAINT chk_driver_profiles_source CHECK (source IS NULL OR source IN ('self','vendor'));
+ALTER TABLE driver_location_updates
+  ADD CONSTRAINT chk_driver_location_updates_lat CHECK (lat BETWEEN -90 AND 90);
+ALTER TABLE driver_location_updates
+  ADD CONSTRAINT chk_driver_location_updates_lng CHECK (lng BETWEEN -180 AND 180);
+ALTER TABLE delivery_job_events
+  ADD CONSTRAINT chk_delivery_job_events_actor_type CHECK (actor_type IS NULL OR actor_type IN ('driver','vendor','admin'));
+ALTER TABLE delivery_job_events
+  ADD CONSTRAINT chk_delivery_job_events_event_type CHECK (event_type IS NULL OR event_type IN ('location','status','note'));
+
+-- =============================================================
+-- 50. MESSAGING / PAYMENT CAPTURE / SETTLEMENT / EMAIL PREFS / TOKEN PURCHASES
+-- =============================================================
+-- Additive only: these tables were previously applied only through Alembic
+-- migrations; this section brings a fresh install created from this file to the
+-- same schema as `alembic upgrade head`. No existing table is altered here.
+
+-- 50.1 order_messages (buyer <-> vendor messaging per order)
+CREATE TABLE IF NOT EXISTS order_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    sender_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    sender_role VARCHAR(20) NOT NULL,
+    body TEXT NOT NULL,
+    read BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_order_messages_order_id ON order_messages (order_id);
+CREATE INDEX IF NOT EXISTS ix_order_messages_sender_user_id ON order_messages (sender_user_id);
+CREATE INDEX IF NOT EXISTS ix_order_messages_read ON order_messages (read);
+CREATE INDEX IF NOT EXISTS ix_order_messages_created_at ON order_messages (created_at);
+
+-- 50.2 payment_captures (gateway capture persistence, one row per order)
+CREATE TABLE IF NOT EXISTS payment_captures (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    gateway VARCHAR(20) NOT NULL,
+    provider_reference VARCHAR(255),
+    amount NUMERIC(15,2) NOT NULL,
+    gateway_fee NUMERIC(15,2) NOT NULL,
+    currency VARCHAR(10) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    captured_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_payment_captures_order_id ON payment_captures (order_id);
+CREATE INDEX IF NOT EXISTS ix_payment_captures_gateway ON payment_captures (gateway);
+
+-- 50.3 vendor_settlement_ledger (settlement & disbursement accounting)
+CREATE TABLE IF NOT EXISTS vendor_settlement_ledger (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    period VARCHAR(7) NOT NULL,
+    gross_amount NUMERIC(15,2) NOT NULL,
+    gateway_fee NUMERIC(15,2) NOT NULL,
+    commission_amount NUMERIC(15,2) NOT NULL,
+    net_amount NUMERIC(15,2) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    paid_at TIMESTAMP,
+    payout_reference VARCHAR(100),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_vendor_settlement_ledger_vendor_id ON vendor_settlement_ledger (vendor_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_vendor_settlement_ledger_order_id ON vendor_settlement_ledger (order_id);
+CREATE INDEX IF NOT EXISTS ix_vendor_settlement_ledger_period ON vendor_settlement_ledger (period);
+
+-- 50.4 user_email_preferences (email opt-in / unsubscribe token)
+CREATE TABLE IF NOT EXISTS user_email_preferences (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    email VARCHAR(255) NOT NULL,
+    marketing_opt_in BOOLEAN NOT NULL DEFAULT FALSE,
+    opted_in_at TIMESTAMP,
+    opted_out_at TIMESTAMP,
+    unsubscribe_token VARCHAR(64),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_user_email_preferences_user_id ON user_email_preferences (user_id);
+CREATE INDEX IF NOT EXISTS ix_user_email_preferences_email ON user_email_preferences (email);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_user_email_preferences_unsubscribe_token ON user_email_preferences (unsubscribe_token);
+
+-- 50.5 token_purchases (server-computed quote + payment idempotency guard)
+CREATE TABLE IF NOT EXISTS token_purchases (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    reference VARCHAR(100) NOT NULL,
+    tokens INTEGER NOT NULL,
+    amount_ngn INTEGER NOT NULL,
+    price_per_token INTEGER NOT NULL,
+    provider VARCHAR(20),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    provider_reference VARCHAR(100),
+    paid_amount_ngn INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_token_purchases_reference ON token_purchases (reference);
+CREATE INDEX IF NOT EXISTS ix_token_purchases_user_id ON token_purchases (user_id);
+CREATE INDEX IF NOT EXISTS ix_token_purchases_status ON token_purchases (status);
+
+-- 50.6 driver_profiles payout/bank details (driver settlement account)
+-- Additive only: four NULLABLE columns on the existing table, so a fresh install
+-- that already ran an earlier copy of this file (where driver_profiles was
+-- created without them) converges on the same schema as
+-- `alembic upgrade 20261015_driver_bank_details`. No column is altered or dropped.
+ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100);
+ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS bank_account_number VARCHAR(20);
+ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS bank_account_name VARCHAR(255);
+ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS bank_code VARCHAR(10);
+
+-- =============================================================
+-- 51. ORDERS promo_discount (flat Naira promo amount)
+-- =============================================================
+-- Additive only: one NOT NULL column with a default on the existing `orders`
+-- table, so a fresh install that already ran an earlier copy of this file
+-- (where orders was created without it) converges on the same schema as
+-- `alembic upgrade 20261017_order_promo_discount`. No column is altered or dropped.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_discount NUMERIC(15,2) NOT NULL DEFAULT 0;
 
 -- =============================================================
 -- DONE

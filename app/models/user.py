@@ -66,6 +66,19 @@ class User(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_login = Column(DateTime, nullable=True)
 
+    # ── Password policy (Admin → Settings → Security) ──────────────────────
+    # Set on every password write; drives the `password_expiration` toggle.
+    password_changed_at = Column(DateTime, nullable=True)
+
+    # ── Two-factor authentication (Admin → Settings → Security) ────────────
+    # `two_factor_method` doubles as the enrolment flag: NULL == not enrolled.
+    two_factor_method = Column(String(10), nullable=True)          # 'email' | 'totp'
+    two_factor_enabled_at = Column(DateTime, nullable=True)
+    # Fernet-encrypted base32 TOTP seed (key derived from SECRET_KEY).
+    totp_secret = Column(Text, nullable=True)
+    # JSON list of single-use recovery-code hashes (only for the 'totp' method).
+    totp_recovery_codes = Column(Text, nullable=True)
+
     # Relationships
     profile = relationship(
         "UserProfile",

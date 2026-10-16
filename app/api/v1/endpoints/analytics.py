@@ -576,7 +576,7 @@ async def get_vendor_stats(
         .join(OrderItem, OrderItem.order_id == Order.id)
         .where(
             OrderItem.vendor_id == vendor_id,
-            Order.status.in_(["processing", "shipped", "in_transit"])
+            Order.status.in_(["processing", "picked_up", "shipped", "in_transit"])
         )
     )
     active_orders = active_result.scalar() or 0

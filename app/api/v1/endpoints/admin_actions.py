@@ -17,6 +17,7 @@ from app.models.order import Order, OrderItem
 from app.models.notification import Notification
 from app.models.user import User, UserProfile
 from app.services.risk_service import risk_from_vendor
+from app.services.vendor_tier_service import normalize_tier, tier_index
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -197,16 +198,23 @@ async def admin_review_vendor_action(
 
     now = datetime.utcnow()
     if action == "approve":
+        # Honour the tier the vendor actually applied for: prefer the explicit
+        # `tier` sent by the admin UI, otherwise fall back to the highest tier
+        # among the vendor's pending documents.
         if target not in _TIER_RANK:
             docs = (await db.execute(select(VendorDocument).where(
                 VendorDocument.vendor_id == v.id, VendorDocument.review_status == "pending"))).scalars().all()
-            target = max([d.tier for d in docs], key=lambda t: _TIER_RANK.get(t, 0), default="starter")
-        v.verification_tier = target
+            target = max([d.tier for d in docs if d.tier in _TIER_RANK],
+                         key=lambda t: _TIER_RANK.get(t, 0), default="starter")
+        target = normalize_tier(target)
+        # Raise-only: apply the requested upgrade, never silently downgrade.
+        # Deliberately NOT calling assign_tier_by_volume() here - it recomputes
+        # the tier from transaction_volume and would revert the requested
+        # upgrade (e.g. a starter with ₦0 volume applying for verified_vendor).
+        if tier_index(target) >= tier_index(v.verification_tier):
+            v.verification_tier = target
         v.verification_status = VendorVerificationStatus.VERIFIED
         v.verification_date = now
-        # Phase 13: on admin approval, assign the tier that matches volume.
-        from app.api.v1.endpoints.tiers import assign_tier_by_volume
-        await assign_tier_by_volume(db, v)
         pending = (await db.execute(select(VendorDocument).where(
             VendorDocument.vendor_id == v.id, VendorDocument.tier == target,
             VendorDocument.review_status == "pending"))).scalars().all()
@@ -225,7 +233,8 @@ async def admin_review_vendor_action(
         return {"message": "Held orders released", "released": len(held)}
 
     db.add(Notification(user_id=v.user_id, title="Verification update",
-                        message=f"Your {target} verification was {action}d.", type="verification", read=False))
+                        message=f"Your {target} verification was {action}d.", type="verification", read=False,
+                        link="/supplier-dashboard/settings"))
     await db.commit()
 
     # Send email to the vendor when approved/rejected

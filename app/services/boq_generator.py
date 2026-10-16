@@ -17,6 +17,7 @@ from app.schemas.boq import BOQGenerationRequest
 from app.services.boq_file_parser import group_items_by_element, parse_boq_file
 from app.services.mitm_engine import MITMEngine
 from app.services.price_service import DB_SOURCES, PriceService, PriceTruthService
+from app.services.demand_broadcast_service import broadcast_boq_demand
 from app.services.gemini_client import get_gemini_client
 from app.config import settings
 
@@ -669,6 +670,44 @@ class BOQGenerator:
         self.mitm = MITMEngine(PriceService(mongo_db=db, pg_db=pg_db))
         self.price_service = PriceService(mongo_db=db, pg_db=pg_db)
 
+    async def _broadcast_demand(
+        self,
+        lines: List[Dict[str, Any]],
+        *,
+        project_title: str,
+        city: str,
+        requested_by: Optional[str],
+    ) -> Dict[str, Any]:
+        """Broadcast BOQ lines as vendor demand, owning a PG session if needed.
+
+        `self.pg_db` is only injected on the parameter-generation path; the
+        upload path runs without it, so a short-lived session is created just
+        for the broadcast. Best-effort: any failure is logged and reported as an
+        empty summary so a BOQ run never fails over demand broadcasting.
+        """
+        empty = {"alerts_created": 0, "bids_opened": 0, "notified": 0}
+        if not lines or not requested_by:
+            return empty
+        if self.pg_db is not None:
+            return await broadcast_boq_demand(
+                self.pg_db, lines,
+                project_title=project_title, city=city, requested_by=requested_by,
+            )
+        session = None
+        try:
+            from app.core.database import AsyncSessionLocal
+            session = AsyncSessionLocal()
+            return await broadcast_boq_demand(
+                session, lines,
+                project_title=project_title, city=city, requested_by=requested_by,
+            )
+        except Exception as e:
+            logger.warning(f"Demand broadcast skipped: {e}")
+            return empty
+        finally:
+            if session is not None:
+                await session.close()
+
     async def create_boq(
         self,
         project_id: str,
@@ -1182,6 +1221,30 @@ class BOQGenerator:
                 )
             analysis.update(_verification_summary(analysis))
 
+            # Close the gap the upload path used to have: unpriced lines are
+            # broadcast to vendors so they can bid with real prices. Only for a
+            # signed-in uploader (a bid thread needs a builder to negotiate with).
+            if self.db is not None and uploaded_by:
+                demand_lines = [
+                    {
+                        "description": v.get("description") or "",
+                        "quantity": v.get("quantity") or 0,
+                        "unit": v.get("unit") or "",
+                        "city": city,
+                    }
+                    for v in analysis["verified_items"]
+                    if v.get("status") == "unverified"
+                ]
+                if demand_lines:
+                    demand_summary = await self._broadcast_demand(
+                        demand_lines,
+                        project_title=f"BOQ {filename}",
+                        city=city,
+                        requested_by=uploaded_by,
+                    )
+                    analysis["demand_alerts_created"] = demand_summary["alerts_created"]
+                    analysis["bid_threads_opened"] = demand_summary["bids_opened"]
+
             boq_id = ""
             if self.db is not None:
                 doc = {
@@ -1601,13 +1664,15 @@ Return ONLY valid JSON with this structure:
 
             # Raise demand alerts for estimate/unverified items so suppliers
             # can respond with real prices (final total still computable).
-            if estimated_items and self.pg_db:
-                created = await self.price_service.notify_vendors(
+            if estimated_items:
+                demand_summary = await self._broadcast_demand(
                     estimated_items,
                     project_title="Quote verification",
-                    user_id=user_id,
+                    city="Abuja",
+                    requested_by=user_id,
                 )
-                result["demand_alerts_created"] = created
+                result["demand_alerts_created"] = demand_summary["alerts_created"]
+                result["bid_threads_opened"] = demand_summary["bids_opened"]
 
             return result
 
@@ -1706,14 +1771,16 @@ Return ONLY valid JSON with this structure:
             project_title = enriched["project_info"]["project_title"]
             demand_items = out_of_stock + estimated_items
             if demand_items:
-                notified_count = await self.price_service.notify_vendors(
-                    out_of_stock_items=demand_items,
+                demand_summary = await self._broadcast_demand(
+                    demand_items,
                     project_title=project_title,
-                    user_id=user_id,
+                    city=city,
+                    requested_by=user_id,
                 )
                 for item in boq["out_of_stock_items"]:
                     item["vendor_notified"] = True
-                boq["demand_alerts_created"] = notified_count
+                boq["demand_alerts_created"] = demand_summary["alerts_created"]
+                boq["bid_threads_opened"] = demand_summary["bids_opened"]
 
         totals = self.price_service.recalculate_totals(boq["elements"])
         total = totals["total_contract_sum"]

@@ -32,6 +32,7 @@ from app.api.v1.endpoints import (
     admin_price_boq,
     admin_dispute,
     admin_settings,
+    admin_pricing,
     negotiations,
     disputes,
     demand_alerts,
@@ -39,12 +40,16 @@ from app.api.v1.endpoints import (
     admin_shipping,
     admin_drivers,
     admin_settlements,
+    admin_delivery_proofs,
+    admin_demand,
+    admin_promos,
     reports,
     ai,
     projects,
     public,
     email_prefs,
     messaging,
+    favorites,
 )
 
 api_router = APIRouter()
@@ -80,9 +85,13 @@ api_router.include_router(admin_fraud.router, prefix="/admin", tags=["Admin Frau
 api_router.include_router(admin_price_boq.router, prefix="/admin", tags=["Admin Price/BOQ"])
 api_router.include_router(admin_dispute.router, prefix="/admin", tags=["Admin Dispute"])
 api_router.include_router(admin_settings.router, prefix="/admin", tags=["Admin Settings"])
+api_router.include_router(admin_pricing.router, prefix="/admin", tags=["Admin Pricing"])
 api_router.include_router(admin_shipping.router, prefix="/admin", tags=["Admin Shipping"])
 api_router.include_router(admin_drivers.router, prefix="/admin", tags=["Admin Drivers"])
 api_router.include_router(admin_settlements.router, prefix="/admin", tags=["Admin Settlements"])
+api_router.include_router(admin_delivery_proofs.router, prefix="/admin", tags=["Admin Delivery Proofs"])
+api_router.include_router(admin_demand.router, prefix="/admin", tags=["Admin Demand Broadcasts"])
+api_router.include_router(admin_promos.router, prefix="/admin", tags=["Admin Promotions"])
 api_router.include_router(negotiations.router, prefix="/negotiations", tags=["Negotiations"])
 api_router.include_router(disputes.router, prefix="/disputes", tags=["Disputes"])
 api_router.include_router(demand_alerts.router, prefix="/demand-alerts", tags=["Demand Alerts"])
@@ -93,3 +102,4 @@ api_router.include_router(projects.router, prefix="/projects", tags=["Projects"]
 api_router.include_router(public.router, prefix="/public", tags=["Public"])
 api_router.include_router(email_prefs.router, prefix="/email", tags=["Email"])
 api_router.include_router(messaging.router, prefix="/messages", tags=["Order Messages"])
+api_router.include_router(favorites.router, prefix="/favorites", tags=["Favorites"])

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import os
 
 from app.core.database import get_db
-from app.models.order import Order, OrderItem, PaymentStatus
+from app.models.order import Order, OrderItem, PaymentMethod, PaymentStatus
 from app.models.product import Product
 from app.models.vendor import Vendor
 from app.models.notification import Notification
@@ -41,6 +41,11 @@ _SETTLEMENT_GATEWAYS = {"flutterwave", "paystack", "monnify"}
 
 async def _maybe_record_capture(db, *, order_id, gateway, amount, provider_reference=None, gateway_fee=0.0):
     """Persist a gateway capture record when settlement is enabled. No-op otherwise."""
+    try:
+        from app.services import runtime_settings
+        await runtime_settings.refresh(db)
+    except Exception:  # never break the payment flow for a settings read
+        pass
     if not _settlement_enabled() or gateway not in _SETTLEMENT_GATEWAYS:
         return
     try:
@@ -50,6 +55,93 @@ async def _maybe_record_capture(db, *, order_id, gateway, amount, provider_refer
         )
     except Exception as exc:  # never break the payment flow for a ledger write
         logger.warning("settlement capture skipped for order %s: %s", order_id, exc)
+
+
+def _order_number_from_reference(reference: Optional[str]) -> Optional[str]:
+    """Extract the order number embedded in a Burncost gateway reference.
+
+    References are built as ``BURNCOST-{order_number}-{YYYYMMDDHHMMSS}`` but the
+    order number itself contains hyphens (e.g. ``BC-20261014-JCEX8G``), so we
+    strip the fixed prefix and the trailing 14-digit timestamp instead of
+    splitting on "-" (which yields just "BC" and never matches an order).
+    """
+    if not reference or not reference.startswith("BURNCOST-"):
+        return None
+    body = reference[len("BURNCOST-"):]
+    prefix, sep, stamp = body.rpartition("-")
+    if sep and len(stamp) == 14 and stamp.isdigit():
+        body = prefix
+    return body or None
+
+
+def _order_number_from_metadata(data) -> Optional[str]:
+    """Fallback order lookup for webhooks carrying our initialize metadata."""
+    if not isinstance(data, dict):
+        return None
+    for key in ("metadata", "meta", "metaData"):
+        meta = data.get(key)
+        if isinstance(meta, dict) and meta.get("order_number"):
+            return str(meta["order_number"])
+    return None
+
+
+def _payment_method_from_channel(channel: Optional[str]) -> PaymentMethod:
+    """Map a gateway channel onto our PaymentMethod enum (default: card)."""
+    aliases = {"bank": "bank_transfer", "bank_transfer": "bank_transfer",
+               "ussd": "ussd", "card": "card", "wallet": "wallet"}
+    value = aliases.get(str(channel or "").strip().lower(), "card")
+    try:
+        return PaymentMethod(value)
+    except ValueError:
+        return PaymentMethod.CARD
+
+
+async def _apply_payment_side_effects(db, order) -> None:
+    """Apply the stock/vendor effects of a confirmed payment.
+
+    Shared by ``/process`` (mock or immediate success), ``/verify`` and every
+    gateway webhook so a redirected payment settles exactly like an inline one.
+    Items are queried explicitly (never via ``order.items``) because the webhook
+    handlers load the order without eager-loading its items. Callers must invoke
+    this inside their "not already COMPLETED" guard so a retried webhook or a
+    webhook/verify race cannot deduct stock twice.
+    """
+    items = (await db.execute(
+        select(OrderItem).where(OrderItem.order_id == order.id)
+    )).scalars().all()
+
+    # Deduct stock for each item in the order
+    for item in items:
+        product = (await db.execute(
+            select(Product).where(Product.id == item.product_id)
+        )).scalar_one_or_none()
+        if product:
+            product.quantity -= item.quantity
+            product.sales_count = (product.sales_count or 0) + item.quantity
+            if product.quantity <= 0:
+                product.status = "out_of_stock"
+
+    # Phase 13: grow each vendor's transaction volume and re-check tier.
+    from app.api.v1.endpoints.tiers import assign_tier_by_volume
+    for item in items:
+        vend = (await db.execute(select(Vendor).where(Vendor.id == item.vendor_id))).scalar_one_or_none()
+        if vend:
+            vend.transaction_volume = (vend.transaction_volume or 0) + item.total_price
+            await assign_tier_by_volume(db, vend)
+
+    # Admin → Settings → Notifications → "Escrow Payment Updates". The alert is
+    # created here because every confirmation path (verify + each webhook) funnels
+    # through this helper; the money is now held in escrow until release.
+    from app.services import alert_settings
+    await alert_settings.notify_admins(
+        db,
+        kind="escrow",
+        type_name="escrow",
+        title="Escrow funds held",
+        message=(f"Order {order.order_number} is paid (₦{float(order.total_amount or 0):,.2f}) "
+                 f"and its funds are held in escrow."),
+        link="/escrow",
+    )
 
 
 ### List payments for the current user
@@ -399,25 +491,9 @@ async def process_payment(
         order.payment_method = payment_method
         order.status = "confirmed"
 
-        # Deduct stock for each item in the order
-        for item in order.items:
-            product_result = await db.execute(
-                select(Product).where(Product.id == item.product_id)
-            )
-            product = product_result.scalar_one_or_none()
-            if product:
-                product.quantity -= item.quantity
-                product.sales_count = (product.sales_count or 0) + item.quantity
-                if product.quantity <= 0:
-                    product.status = "out_of_stock"
-
-        # Phase 13: grow each vendor's transaction volume and re-check tier.
-        from app.api.v1.endpoints.tiers import assign_tier_by_volume
-        for item in order.items:
-            vend = (await db.execute(select(Vendor).where(Vendor.id == item.vendor_id))).scalar_one_or_none()
-            if vend:
-                vend.transaction_volume = (vend.transaction_volume or 0) + item.total_price
-                await assign_tier_by_volume(db, vend)
+        # Deduct stock + grow vendor volume (shared with /verify and the webhooks
+        # so an inline success settles exactly like a redirected payment).
+        await _apply_payment_side_effects(db, order)
 
         # Create payment notification
         notification = Notification(
@@ -425,6 +501,7 @@ async def process_payment(
             type="payment",
             title="Payment Received",
             message=f"Payment of ₦{float(order.total_amount):,.2f} for order {order.order_number} was successful.",
+            link="/dashboard/orders",
         )
         db.add(notification)
         await db.commit()
@@ -507,40 +584,45 @@ async def get_payment_status(
 @router.get("/verify/{reference}")
 async def verify_payment(
     reference: str,
+    provider: Optional[str] = Query(None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Verify a payment transaction by reference.
-    Called after the user is redirected back from Flutterwave/Paystack.
+    Called after the user is redirected back from Paystack/Monnify/Flutterwave.
+    `provider` selects the gateway that took the payment; when omitted we keep
+    the legacy Flutterwave-then-Paystack default.
     """
-    result = await payment_service.verify_payment(reference)
+    gateway = (provider or "flutterwave").strip().lower()
+    result = await payment_service.verify_payment(reference, provider=gateway)
 
     if result.get("success"):
-        # Update order status if found
+        # Update order status if found. `order` stays None when the reference
+        # cannot be mapped, so the response below reports the truth instead of
+        # echoing the gateway's "paid" for an order we never settled.
+        order = None
         if reference.startswith("BURNCOST-"):
-            parts = reference.split("-")
-            if len(parts) >= 2:
-                order_number = parts[1]
+            order_number = _order_number_from_reference(reference)
+            if order_number:
                 order_result = await db.execute(
-                    select(Order).where(Order.order_number == order_number)
+                    select(Order).options(selectinload(Order.items)).where(Order.order_number == order_number)
                 )
                 order = order_result.scalar_one_or_none()
                 if order and order.payment_status != PaymentStatus.COMPLETED:
                     order.payment_status = PaymentStatus.COMPLETED
                     order.status = "confirmed"
-                    # Phase 13: grow each vendor's transaction volume and re-check tier.
-                    from app.api.v1.endpoints.tiers import assign_tier_by_volume
-                    for item in order.items:
-                        vend = (await db.execute(select(Vendor).where(Vendor.id == item.vendor_id))).scalar_one_or_none()
-                        if vend:
-                            vend.transaction_volume = (vend.transaction_volume or 0) + item.total_price
-                            await assign_tier_by_volume(db, vend)
+                    if not order.payment_method:
+                        order.payment_method = _payment_method_from_channel(result.get("channel"))
+                    # Phase 13: grow vendor volume + deduct stock. Shared with the
+                    # webhooks so a redirect settles exactly like an inline payment.
+                    await _apply_payment_side_effects(db, order)
                     notification = Notification(
                         user_id=order.user_id,
                         type="payment",
                         title="Payment Received",
                         message=f"Payment of ₦{float(order.total_amount):,.2f} for order {order.order_number} was successful.",
+                        link="/dashboard/orders",
                     )
                     db.add(notification)
                     await db.commit()
@@ -550,6 +632,23 @@ async def verify_payment(
                         amount=float(order.total_amount),
                         provider_reference=str(result.get("id") or reference),
                     )
+                    # Audit the client-return verification (mirrors the webhook's
+                    # `webhook_verify`) so a "gateway paid but order stuck" case
+                    # leaves a trail instead of failing silently.
+                    await audit_payment_event(
+                        db, user_id=str(order.user_id), action="verify",
+                        reference=reference, amount=float(order.total_amount),
+                    )
+
+        # Surface the order's real state so the client can tell a settled payment
+        # apart from "the gateway was paid but nothing was applied to an order".
+        return {
+            **result,
+            "applied": bool(order and order.payment_status == PaymentStatus.COMPLETED),
+            "order_number": order.order_number if order else None,
+            "order_status": order.status.value if order is not None and order.status else None,
+            "payment_status": order.payment_status.value if order is not None and order.payment_status else None,
+        }
 
     return result
 
@@ -598,11 +697,12 @@ async def flutterwave_webhook(
             logger.info(f"Flutterwave webhook: token purchase {tx_ref} -> {outcome.get('status')}")
             return {"status": "ok", "token_purchase": outcome.get("status")}
 
-        # Extract order reference from tx_ref (format: BURNCOST-{order_number}-{timestamp})
+        # Extract order reference from tx_ref
+        # (format: BURNCOST-{order_number}-{timestamp}; the order number itself
+        # contains hyphens, so it must never be recovered by splitting on "-").
         if tx_ref.startswith("BURNCOST-"):
-            parts = tx_ref.split("-")
-            if len(parts) >= 2:
-                order_number = parts[1]
+            order_number = _order_number_from_reference(tx_ref) or _order_number_from_metadata(data)
+            if order_number:
                 # Find order by order_number
                 result = await db.execute(
                     select(Order).where(Order.order_number == order_number)
@@ -628,12 +728,19 @@ async def flutterwave_webhook(
                 if order.payment_status != PaymentStatus.COMPLETED:
                     order.payment_status = PaymentStatus.COMPLETED
                     order.status = "confirmed"
+                    if not order.payment_method:
+                        order.payment_method = _payment_method_from_channel(
+                            data.get("payment_type") or data.get("channel")
+                        )
+                    # Deduct stock + grow vendor volume (shared settlement path).
+                    await _apply_payment_side_effects(db, order)
                     # Create notification
                     notification = Notification(
                         user_id=order.user_id,
                         type="payment",
                         title="Payment Received",
                         message=f"Payment of ₦{order_amount:,.2f} for order {order.order_number} was successful.",
+                        link="/dashboard/orders",
                     )
                     db.add(notification)
                     await db.commit()
@@ -701,10 +808,10 @@ async def monnify_webhook(
         tx_ref = (data.get("paymentReference") or data.get("transactionReference")
                   or data.get("tx_ref") or data.get("paymentReference") or "")
         if str(tx_ref).startswith("BURNCOST-"):
-            parts = str(tx_ref).split("-")
-            if len(parts) >= 2:
+            order_number = _order_number_from_reference(str(tx_ref)) or _order_number_from_metadata(data)
+            if order_number:
                 order = (await db.execute(
-                    select(Order).where(Order.order_number == parts[1])
+                    select(Order).where(Order.order_number == order_number)
                 )).scalar_one_or_none()
                 if order:
                     gateway_amount = float(data.get("amount") or data.get("amountPaid") or 0)
@@ -715,12 +822,21 @@ async def monnify_webhook(
                     if order.payment_status != PaymentStatus.COMPLETED:
                         order.payment_status = PaymentStatus.COMPLETED
                         order.status = "confirmed"
+                        if not order.payment_method:
+                            order.payment_method = _payment_method_from_channel(
+                                data.get("paymentMethod") or data.get("channel")
+                            )
+                        # Deduct stock + grow vendor volume (shared settlement path).
+                        await _apply_payment_side_effects(db, order)
                         db.add(Notification(
                             user_id=order.user_id, type="payment",
                             title="Payment Received",
                             message=f"Payment of ₦{order_amount:,.2f} for order {order.order_number} was successful.",
+                            link="/dashboard/orders",
                         ))
                         await db.commit()
+                        await audit_payment_event(db, user_id=str(order.user_id), action="webhook_verify",
+                                                  reference=str(tx_ref), amount=order_amount)
                         await _maybe_record_capture(
                             db, order_id=order.id, gateway="monnify", amount=order_amount,
                             provider_reference=str(data.get("transactionReference") or tx_ref),
@@ -773,9 +889,8 @@ async def paystack_webhook(
             return {"status": "ok", "token_purchase": outcome.get("status")}
 
         if reference.startswith("BURNCOST-"):
-            parts = reference.split("-")
-            if len(parts) >= 2:
-                order_number = parts[1]
+            order_number = _order_number_from_reference(reference) or _order_number_from_metadata(data)
+            if order_number:
                 result = await db.execute(
                     select(Order).where(Order.order_number == order_number)
                 )
@@ -800,16 +915,28 @@ async def paystack_webhook(
                 if order.payment_status != PaymentStatus.COMPLETED:
                     order.payment_status = PaymentStatus.COMPLETED
                     order.status = "confirmed"
+                    if not order.payment_method:
+                        order.payment_method = _payment_method_from_channel(data.get("channel"))
+                    # Deduct stock + grow vendor volume (shared settlement path).
+                    await _apply_payment_side_effects(db, order)
                     notification = Notification(
                         user_id=order.user_id,
                         type="payment",
                         title="Payment Received",
                         message=f"Payment of ₦{order_amount:,.2f} for order {order.order_number} was successful.",
+                        link="/dashboard/orders",
                     )
                     db.add(notification)
                     await db.commit()
                     await audit_payment_event(db, user_id=str(order.user_id), action="webhook_verify",
                                               reference=reference, amount=order_amount)
+                    # Phase 5: record the capture so settlement pays out on the
+                    # gateway that actually captured the funds (flag-gated).
+                    await _maybe_record_capture(
+                        db, order_id=order.id, gateway="paystack", amount=gateway_amount,
+                        provider_reference=str(data.get("id") or reference),
+                        gateway_fee=float(data.get("fees") or 0) / 100.0,  # kobo -> naira
+                    )
                     logger.info(f"Webhook: Payment confirmed for order {order_number}")
 
     return {"status": "ok"}

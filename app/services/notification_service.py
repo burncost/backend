@@ -92,7 +92,10 @@ class NotificationService:
 
     async def send_welcome_email(self, email: str, full_name: str, role: str = "customer") -> bool:
         """Send welcome email after successful registration."""
-        dashboard_link = f"{settings.FRONTEND_URL}/dashboard"
+        # Vendors get the supplier dashboard: sending them the builder one was the
+        # same role-blind deep-link bug the promo notifications had.
+        dashboard_path = "supplier-dashboard" if role == "vendor" else "dashboard"
+        dashboard_link = f"{settings.FRONTEND_URL}/{dashboard_path}"
         html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
         <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
         <div style="text-align:center;margin-bottom:20px;">
@@ -282,6 +285,45 @@ class NotificationService:
         <p style="color:#888;font-size:12px;">© 2026 Burncost. All rights reserved.</p>
         </div></body></html>"""
         return await self.send_email(email, f"Payment Receipt - {reference}", html)
+
+    async def send_promo_email(
+        self,
+        email: str,
+        code: str,
+        discount_amount: float,
+        description: Optional[str] = None,
+        min_order_amount: float = 0,
+        expires_at: Optional[Any] = None,
+        scope_label: Optional[str] = None,
+    ) -> bool:
+        """Send a promo-code announcement. Marketing email — callers must have
+        verified the recipient opted in (see promo_notification_service)."""
+        amount = float(discount_amount or 0)
+        target = f" {scope_label}" if scope_label else " your order"
+        detail = f"<p>{description}</p>" if description else ""
+        min_order = float(min_order_amount or 0)
+        min_line = f"<p>Minimum order: ₦{min_order:,.0f}</p>" if min_order > 0 else ""
+        expiry_line = ""
+        if expires_at:
+            try:
+                expiry_line = f"<p>Offer ends {expires_at.strftime('%d %b %Y')}.</p>"
+            except Exception:
+                expiry_line = ""
+        shop_url = settings.FRONTEND_URL or "#"
+        html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+        <div style="max-width:600px;margin:auto;background:white;border-radius:8px;padding:30px;">
+        <div style="text-align:center;margin-bottom:20px;">
+            <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
+        </div>
+        <h2 style="color:#FF6B00;">Get ₦{amount:,.0f} off</h2>
+        {detail}
+        <p>Use promo code <strong style="font-size:18px;">{code}</strong> for ₦{amount:,.0f} off{target}.</p>
+        {min_line}
+        {expiry_line}
+        <p style="margin-top:16px;"><a href="{shop_url}" style="background:#FF6B00;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;">Shop now</a></p>
+        <p style="color:#888;font-size:12px;">© 2026 Burncost. All rights reserved.</p>
+        </div></body></html>"""
+        return await self.send_email(email, f"New promo: ₦{amount:,.0f} off with code {code}", html)
 
     async def _send_via_brevo(self, to: str, subject: str, html_content: str, cc: Optional[List[str]] = None) -> bool:
         try:

@@ -148,8 +148,24 @@ class ProductService:
         a relaxed (token-OR) category filter is what made "Roofing Systems" list
         plumbing products.
         """
+        # The supplier line under a product title needs the vendor's business name.
+        # It is a correlated scalar subquery (not a joined Vendor) so this stays
+        # valid alongside the optional verified-vendor join below, which would
+        # otherwise collide on the same table.
+        vendor_name_subq = (
+            select(Vendor.business_name)
+            .where(Vendor.id == Product.vendor_id)
+            .limit(1)
+            # Correlate on Product only: without this, SQLAlchemy auto-correlates the
+            # subquery against the outer Vendor join (only_verified) and compiles a
+            # subquery with no FROM clause.
+            .correlate(Product)
+            .scalar_subquery()
+            .label("vendor_name")
+        )
+
         query = select(
-            Product, Category.name, Category.division, Category.material_type, Brand.name
+            Product, Category.name, Category.division, Category.material_type, Brand.name, vendor_name_subq
         ).join(
             Category, Product.category_id == Category.id
         ).outerjoin(
@@ -245,13 +261,14 @@ class ProductService:
 
         products = []
         for row in rows:
-            product, category_name, category_division, category_material_type, brand_name = row
+            product, category_name, category_division, category_material_type, brand_name, vendor_name = row
             product_dict = {
                 **product.__dict__,
                 "category": category_name,
                 "category_division": category_division,
                 "category_material_type": category_material_type,
                 "brand_name": brand_name,
+                "vendor_name": vendor_name,
             }
             products.append(self._coerce_product_dict(product_dict))
 
@@ -284,30 +301,42 @@ class ProductService:
             "brand_name": brand_name,
         })
 
+    @staticmethod
+    def _brand_slug(name: str) -> str:
+        """URL-safe brand slug, matching how catalogue brands are keyed."""
+        return re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+
+    async def resolve_brand_id(self, brand_name: str) -> UUID:
+        """Map a brand display name to a brand row, creating one only if unknown.
+
+        Shared by the create and update paths: Product has no brand_name column,
+        so an edit that changes the brand has to resolve the name to the FK here.
+        """
+        result = await self.db.execute(
+            select(Brand).where(Brand.name.ilike(brand_name.strip())).limit(1)
+        )
+        brand = result.scalar_one_or_none()
+        if brand:
+            return brand.id
+
+        logger.warning(f"Brand '{brand_name}' not found, creating new brand")
+        brand = Brand(name=brand_name.strip(), slug=self._brand_slug(brand_name))
+        self.db.add(brand)
+        await self.db.flush()
+        return brand.id
+
     async def create_product(self, product_in: ProductCreate, vendor_id: UUID) -> Product:
         """Create a new product listing in the database."""
         product_data = product_in.model_dump(exclude_unset=True)
         product_data["vendor_id"] = vendor_id
         product_data["slug"] = self._generate_slug(product_data["name"])
 
-        # Resolve brand_name to brand_id if provided
+        # Resolve brand_name to brand_id if provided: the supplier forms send a
+        # brand_id whenever the catalogue holds the brand, so this only covers a
+        # brand that is genuinely new (or a client that still sends a name).
         brand_name = product_data.pop("brand_name", None)
         if brand_name and not product_data.get("brand_id"):
-            result = await self.db.execute(
-                select(Brand).where(Brand.name.ilike(brand_name))
-            )
-            brand = result.scalar_one_or_none()
-            if brand:
-                product_data["brand_id"] = brand.id
-            else:
-                logger.warning(f"Brand '{brand_name}' not found, creating new brand")
-                brand = Brand(
-                    name=brand_name,
-                    slug=brand_name.lower().replace(" ", "-"),
-                )
-                self.db.add(brand)
-                await self.db.flush()
-                product_data["brand_id"] = brand.id
+            product_data["brand_id"] = await self.resolve_brand_id(brand_name)
 
         # Resolve category_id if a category name string was passed
         category_id = product_data.get("category_id")

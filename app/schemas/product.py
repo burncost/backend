@@ -17,6 +17,7 @@ class ProductBase(BaseModel):
     discount_price: Optional[Decimal] = Field(None, gt=0)
     quantity: int = Field(default=0, ge=0)
     unit_of_measure: str = Field(default="piece")
+    quality: Optional[str] = Field(None, max_length=50)
     minimum_order_quantity: int = Field(default=1, ge=1)
     shipping_fee: Optional[Decimal] = Field(default=0.00)
     estimated_delivery_days: Optional[int] = Field(default=5)
@@ -39,9 +40,13 @@ class ProductUpdate(BaseModel):
     short_description: Optional[str] = None
     category_id: Optional[UUID] = None
     brand_id: Optional[UUID] = None
+    # Write-only convenience: Product has no brand_name column, the endpoint
+    # resolves this to brand_id so an edit can change a product's brand.
+    brand_name: Optional[str] = None
     base_price: Optional[Decimal] = None
     discount_price: Optional[Decimal] = None
     quantity: Optional[int] = None
+    quality: Optional[str] = Field(None, max_length=50)
     status: Optional[str] = None
     is_featured: Optional[bool] = None
 
@@ -58,6 +63,8 @@ class ProductResponse(ProductBase):
     vendor_name: Optional[str] = None
     vendor_email: Optional[str] = None
     vendor_location: Optional[str] = None
+    # Vendor opt-in: surfaced to buyers so they know negotiation is allowed.
+    vendor_open_to_negotiate: Optional[bool] = None
     rating: Decimal
     view_count: int
     sales_count: int

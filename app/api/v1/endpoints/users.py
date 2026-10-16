@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from sqlalchemy import select
 from typing import Optional
+from uuid import UUID
 
 from app.core.database import get_db
 from app.schemas.user import UserResponse, UserUpdate
@@ -10,7 +11,7 @@ from app.crud import user as user_crud
 from app.api.deps import get_current_user
 from app.models.user import User, UserProfile
 from app.models.address import CustomerAddress
-from app.schemas.addresses import AddressUpdate
+from app.schemas.addresses import AddressUpdate, AddressCreate
 
 router = APIRouter()
 
@@ -64,6 +65,99 @@ async def read_client_me(
             "landmark": address.landmark if address else None,
     }
 
+### Saved delivery addresses (checkout / settings)
+def _address_dict(a: CustomerAddress) -> dict:
+    return {
+        "id": str(a.id),
+        "address_type": a.address_type.value if hasattr(a.address_type, "value") else a.address_type,
+        "contact_name": a.contact_name,
+        "contact_phone": a.contact_phone,
+        "address_line1": a.address_line1,
+        "address_line2": a.address_line2,
+        "city": a.city,
+        "state": a.state,
+        "lga": a.lga,
+        "postal_code": a.postal_code,
+        "landmark": a.landmark,
+        "latitude": float(a.latitude) if a.latitude is not None else None,
+        "longitude": float(a.longitude) if a.longitude is not None else None,
+        "is_default": bool(a.is_default),
+        "delivery_instructions": a.delivery_instructions,
+    }
+
+
+@router.get("/me/addresses")
+async def list_user_addresses(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """All saved delivery addresses for the current user (newest / default first)."""
+    result = await db.execute(
+        select(CustomerAddress)
+        .where(CustomerAddress.user_id == current_user.id)
+        .order_by(CustomerAddress.is_default.desc(), CustomerAddress.created_at.desc())
+    )
+    return {"addresses": [_address_dict(a) for a in result.scalars().all()]}
+
+
+@router.post("/me/addresses", status_code=status.HTTP_201_CREATED)
+async def create_user_address(
+    address_in: AddressCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save a new delivery address (used by checkout and the settings page)."""
+    address = CustomerAddress(user_id=current_user.id, **address_in.dict())
+    db.add(address)
+    if address_in.is_default:
+        # Only one default address per user.
+        others = (await db.execute(
+            select(CustomerAddress).where(CustomerAddress.user_id == current_user.id)
+        )).scalars().all()
+        for o in others:
+            o.is_default = False
+    await db.commit()
+    await db.refresh(address)
+    return {"success": True, "address": _address_dict(address)}
+
+
+@router.put("/me/addresses/{address_id}")
+async def update_user_address_by_id(
+    address_id: str,
+    address_in: AddressUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update one saved address (ownership enforced)."""
+    try:
+        aid = UUID(address_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid address ID")
+
+    address = (await db.execute(
+        select(CustomerAddress).where(CustomerAddress.id == aid, CustomerAddress.user_id == current_user.id)
+    )).scalar_one_or_none()
+    if not address:
+        raise HTTPException(status_code=404, detail="Address not found")
+
+    update_data = address_in.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(address, field, value)
+
+    if update_data.get("is_default"):
+        others = (await db.execute(
+            select(CustomerAddress).where(
+                CustomerAddress.user_id == current_user.id, CustomerAddress.id != address.id
+            )
+        )).scalars().all()
+        for o in others:
+            o.is_default = False
+
+    await db.commit()
+    await db.refresh(address)
+    return {"success": True, "address": _address_dict(address)}
+
+
 ### Update current user profile
 @router.put("/me", response_model=UserResponse)
 async def update_user_me(
@@ -100,8 +194,10 @@ async def update_user_me(
     
     # Update User model if there are user fields
     if user_fields:
-        ### Check for duplicate email/phone if being updated
-        if 'email' in user_fields:
+        ### Check for duplicate email/phone, but only when the value actually
+        ### changes: re-saving a profile must never be rejected because of a
+        ### number/address that is already on this very account.
+        if 'email' in user_fields and user_fields['email'].strip().lower() != (user.email or "").strip().lower():
             existing = await user_crud.get_by_email(db, email=user_fields['email'])
             if existing and existing.id != user.id:
                 raise HTTPException(
@@ -109,12 +205,12 @@ async def update_user_me(
                     detail="Email already in use"
                 )
         
-        if 'phone_number' in user_fields:
+        if 'phone_number' in user_fields and user_fields['phone_number'] != user.phone_number:
             existing = await user_crud.get_by_phone(db, phone=user_fields['phone_number'])
             if existing and existing.id != user.id:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Phone number already in use"
+                    detail="This phone number is already registered to another account. Please use a different phone number."
                 )
         
         # Update user fields

@@ -322,6 +322,8 @@ async def seed_categories():
                 division=cat_data.get("division", "General"),
                 default_unit=cat_data.get("default_unit", "piece"),
                 platform_margin=cat_data["platform_margin"],
+                fee_model=cat_data.get("fee_model", "percentage"),
+                fee_fixed=cat_data.get("fee_fixed"),
                 is_active=True,
                 description=f"{cat_data['name']} — {cat_data.get('quality_metric', 'N/A') or 'N/A'}, Fee model: {cat_data['fee_model']}",
             )
@@ -338,6 +340,8 @@ async def seed_categories():
                     division=cat_data.get("division", "General"),
                     default_unit=cat_data.get("default_unit", "piece"),
                     platform_margin=cat_data["platform_margin"],
+                    fee_model=cat_data.get("fee_model", "percentage"),
+                    fee_fixed=cat_data.get("fee_fixed"),
                     is_active=True,
                 )
                 db.add(sub)

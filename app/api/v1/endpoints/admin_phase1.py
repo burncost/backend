@@ -164,22 +164,80 @@ async def admin_order_detail(order_id: UUID, current_user: dict = Depends(admin_
     }
 
 
+# Roles that use the admin console (require_roles also always allows admin/super_admin).
+ADMIN_INBOX_ROLES = ("admin", "super_admin", "manager", "support", "marketing")
+
+
+def _admin_notification_scope():
+    """Only notifications addressed to console/staff users belong in the admin inbox.
+
+    Keeps the unread badge and `read-all` meaningful: buyer/vendor notifications
+    never get flipped by an admin action.
+    """
+    return Notification.user_id.in_(select(User.id).where(User.role.in_(ADMIN_INBOX_ROLES)))
+
+
 @router.get("/notifications")
 async def admin_list_notifications(limit: int = Query(50, ge=1, le=200),
                                    current_user: dict = Depends(admin_guard),
                                    db: AsyncSession = Depends(get_db)):
-    """Admin-facing notifications stream (all platform notifications)."""
-    result = await db.execute(select(Notification).order_by(Notification.created_at.desc()).limit(limit))
+    """Admin-facing notifications stream (only notifications addressed to staff)."""
+    from app.services import alert_settings
+
+    query = select(Notification).where(_admin_notification_scope())
+    # Admin → Settings → Notifications: a kind whose toggle is OFF is hidden here.
+    hidden = alert_settings.hidden_types()
+    if hidden:
+        query = query.where(~Notification.type.in_(hidden))
+    result = await db.execute(
+        query.order_by(Notification.created_at.desc()).limit(limit)
+    )
     notifications = result.scalars().all()
     unread = sum(1 for n in notifications if not n.read)
     high_priority = sum(1 for n in notifications if n.type == "alert")
     return {
         "notifications": [{"id": str(n.id), "type": n.type or "system", "title": n.title,
-                           "message": n.message, "read": n.read,
+                           "message": n.message, "read": n.read, "link": n.link,
                            "created_at": n.created_at.isoformat() if n.created_at else None}
                           for n in notifications],
         "unread_count": unread, "high_priority_count": high_priority, "total": len(notifications),
     }
+
+
+@router.put("/notifications/read-all")
+async def admin_mark_all_notifications_read(current_user: dict = Depends(admin_guard),
+                                            db: AsyncSession = Depends(get_db)):
+    """Mark every admin-addressed notification as read.
+
+    Declared BEFORE /notifications/{notification_id}/read so the static path
+    cannot ever be shadowed by the parameterised one.
+    """
+    from app.services import alert_settings
+
+    stmt = Notification.__table__.update().where(_admin_notification_scope())
+    hidden = alert_settings.hidden_types()
+    if hidden:
+        # Never flip rows the inbox is currently hiding.
+        stmt = stmt.where(~Notification.type.in_(hidden))
+    await db.execute(stmt.values(read=True))
+    await db.commit()
+    return {"message": "All notifications marked as read"}
+
+
+@router.put("/notifications/{notification_id}/read")
+async def admin_mark_notification_read(notification_id: UUID,
+                                       current_user: dict = Depends(admin_guard),
+                                       db: AsyncSession = Depends(get_db)):
+    """Mark a single admin-addressed notification as read."""
+    notification = (await db.execute(
+        select(Notification).where(Notification.id == notification_id,
+                                   _admin_notification_scope())
+    )).scalar_one_or_none()
+    if not notification:
+        raise HTTPException(404, "Notification not found")
+    notification.read = True
+    await db.commit()
+    return {"message": "Notification marked as read"}
 
 
 @router.get("/risk/entities")

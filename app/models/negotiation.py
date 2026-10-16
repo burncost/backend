@@ -27,10 +27,25 @@ class Negotiation(Base):
     quantity = Column(Numeric(15, 2), default=1)
     unit = Column(String(50), default="piece")
     requested_discount = Column(Numeric(5, 2), nullable=False)
+    # The buyer's opening bid as an absolute per-unit amount, when they bid a
+    # naira figure instead of a percentage. Additive + nullable: existing rows
+    # read back NULL and `requested_discount` is derived from the product's
+    # catalogue price on the way in (see `create_negotiation`).
+    requested_price = Column(Numeric(15, 2), nullable=True)
     counter_offer = Column(Numeric(5, 2), nullable=True)
     final_discount = Column(Numeric(5, 2), nullable=True)
     value = Column(Numeric(15, 2), default=0)
-    status = Column(String(50), default="pending", index=True)  # pending/approved/rejected/auto_approved/auto_rejected/counter_offered/counter_accepted/counter_declined/expired
+    # BOQ-triggered demand broadcast linkage (additive + nullable: manual
+    # negotiations leave this NULL) and the vendor's per-unit bid price.
+    demand_alert_id = Column(UUID(as_uuid=True), ForeignKey("demand_alerts.id", ondelete="SET NULL"), nullable=True, index=True)
+    bid_price = Column(Numeric(15, 2), nullable=True)
+    status = Column(String(50), default="pending", index=True)  # pending/approved/rejected/auto_approved/auto_rejected/counter_offered/counter_accepted/counter_declined/expired/price_proposed/price_agreed
+    # Two-party agreed final price (absolute per-unit amount, not a %). Additive
+    # and nullable: existing rows read back NULL. When set, checkout auto-applies
+    # `agreed_price` as the unit price for the agreeing builder only.
+    agreed_price = Column(Numeric(15, 2), nullable=True)
+    agreed_at = Column(DateTime, nullable=True)
+    agreed_by = Column(String(20), nullable=True)  # builder / supplier (who accepted)
     admin_note = Column(Text)
     flagged = Column(Boolean, default=False)
     suspended = Column(Boolean, default=False)
@@ -69,6 +84,9 @@ class NegotiationCounterOffer(Base):
     negotiation_id = Column(UUID(as_uuid=True), ForeignKey("negotiations.id", ondelete="CASCADE"), nullable=False, index=True)
     offered_by = Column(String(20), nullable=False)  # builder / supplier / admin
     discount_percent = Column(Numeric(5, 2), nullable=False)
+    # Optional absolute per-unit final price offered alongside the discount (%).
+    # Additive + nullable: existing rows read back NULL.
+    final_price = Column(Numeric(15, 2), nullable=True)
     note = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 

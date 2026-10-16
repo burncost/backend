@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 from app.models.order import Order
 from app.models.payment_capture import PaymentCapture
 from app.models.settlement_ledger import VendorSettlementLedger
-from app.services.settlement_service import SettlementService, is_enabled
+from app.services.settlement_service import SettlementService, is_enabled, refresh_from_db
 
 
 async def record_capture(
@@ -50,6 +50,7 @@ async def record_capture(
 
 async def accrue_order(db: AsyncSession, order_id: UUID):
     """Flag-gated: accrue a pending ledger row for an order that has a capture."""
+    await refresh_from_db(db)
     if not is_enabled():
         return {"ok": False, "reason": "SETTLEMENT_ENABLED is off", "order_id": str(order_id)}
     cap = (await db.execute(select(PaymentCapture).where(PaymentCapture.order_id == order_id))).scalar_one_or_none()
@@ -61,14 +62,25 @@ async def accrue_order(db: AsyncSession, order_id: UUID):
     if not order or not order.items:
         return {"ok": False, "reason": "Order/vendor not found", "order_id": str(order_id)}
     vendor_id = order.items[0].vendor_id
+
+    # The buyer was only charged the client share of the platform margin at
+    # checkout; the vendor bears the remainder, deducted here from the payout.
+    from app.services import pricing_service
+    vendor_margin = await pricing_service.vendor_margin_for_items(db, order.items)
+
     entry = await SettlementService().accrue_order(
         db, vendor_id=vendor_id, order_id=order_id,
         gross_amount=cap.amount, gateway_fee=cap.gateway_fee,
+        vendor_margin=vendor_margin,
     )
     await db.commit()
     if not entry:
         return {"ok": False, "reason": "Not accrued (duplicate or disabled)", "order_id": str(order_id)}
-    return {"ok": True, "order_id": str(order_id), "net_amount": float(entry.net_amount)}
+    return {
+        "ok": True, "order_id": str(order_id),
+        "net_amount": float(entry.net_amount),
+        "vendor_margin": float(vendor_margin),
+    }
 
 
 async def pending_summary(db: AsyncSession):

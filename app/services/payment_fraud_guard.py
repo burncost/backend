@@ -68,7 +68,13 @@ async def record_fraud_flag(
     amount: float = 0,
     user_id: str = None,
 ) -> None:
-    """Persist a fraud/risk alert to the `fraud_alerts` table (best-effort)."""
+    """Persist a fraud/risk alert to the `fraud_alerts` table (best-effort).
+
+    Also queues the matching admin-inbox notification, gated by the
+    Admin → Settings → Notifications switches ("Fraud Detection Alerts" or,
+    for price-integrity alerts, "Price Integrity Violations"). The audit row
+    itself is always written — a toggle silences the inbox, never the evidence.
+    """
     try:
         import uuid
         from app.models.fraud import FraudAlert
@@ -84,6 +90,17 @@ async def record_fraud_flag(
             detected_at=datetime.utcnow(),
         ))
         await db.commit()
+
+        from app.services import alert_settings
+        kind = "price" if "price" in (alert_type or "").lower() else "fraud"
+        await alert_settings.notify_admins(
+            db,
+            kind=kind,
+            type_name=kind,
+            title=f"{alert_type} alert",
+            message=description,
+            link="/fraud",
+        )
     except Exception as e:
         logger.warning(f"Failed to record fraud flag: {e}")
         try:
@@ -135,8 +152,12 @@ async def payment_attempt_limit(limit: int = 10, window_seconds: int = 60, *key_
         return True  # fail-open for rate limit to not block payments on Redis outage
 
 
-async def record_failed_login(db: AsyncSession, email: str, ip: str = "") -> int:
-    """Increment failed-login counter in Redis. Returns new count."""
+async def record_failed_login(db: AsyncSession, email: str, ip: str = "", window_seconds: int = 900) -> int:
+    """Increment failed-login counter in Redis. Returns new count.
+
+    `window_seconds` is driven by Admin → Settings → Security →
+    "Login Attempt Limit" so the counter lifetime matches the configured window.
+    """
     try:
         import redis.asyncio as airedis
         from app.config import settings
@@ -145,7 +166,7 @@ async def record_failed_login(db: AsyncSession, email: str, ip: str = "") -> int
                  else airedis.from_url(settings.REDIS_URL, ssl_cert_reqs=None, decode_responses=True)
         key = f"login_fail:{email.lower()}:{ip}"
         n = await client.incr(key)
-        await client.expire(key, 900)  # 15 min window
+        await client.expire(key, max(60, int(window_seconds)))
         return int(n)
     except Exception:
         return 0

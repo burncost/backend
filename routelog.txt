@@ -1,0 +1,11 @@
+C:\Users\bingham-tv\Desktop\Projects\burncost\work\Backend\app\api\v1\endpoints\products.py:52: FastAPIDeprecationWarning: `regex` has been deprecated, please use `pattern` instead
+  sort_by: str = Query("created_at", regex="^(created_at|price|rating|sales_count|name)$"),
+C:\Users\bingham-tv\Desktop\Projects\burncost\work\Backend\app\api\v1\endpoints\products.py:53: FastAPIDeprecationWarning: `regex` has been deprecated, please use `pattern` instead
+  sort_order: str = Query("desc", regex="^(asc|desc)$"),
+C:\Users\bingham-tv\Desktop\Projects\burncost\work\Backend\app\api\v1\endpoints\material_rates.py:70: FastAPIDeprecationWarning: `regex` has been deprecated, please use `pattern` instead
+  sort_by: str = Query("material_name", regex="^(material_name|current_price|state|created_at)$"),
+C:\Users\bingham-tv\Desktop\Projects\burncost\work\Backend\app\api\v1\endpoints\material_rates.py:71: FastAPIDeprecationWarning: `regex` has been deprecated, please use `pattern` instead
+  sort_order: str = Query("asc", regex="^(asc|desc)$"),
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+AttributeError: '_IncludedRouter' object has no attribute 'path'

@@ -69,6 +69,10 @@ def _admin_user_dict(u: User) -> dict:
         "location": u.profile.location if u.profile else None,
         "created_at": u.created_at.isoformat() if u.created_at else None,
         "last_login": u.last_login.isoformat() if u.last_login else None,
+        # So super admins can see which console users still need to enrol 2FA.
+        "two_factor_method": getattr(u, "two_factor_method", None),
+        "two_factor_enabled_at": (u.two_factor_enabled_at.isoformat()
+                                  if getattr(u, "two_factor_enabled_at", None) else None),
     }
 
 
@@ -164,7 +168,7 @@ async def admin_overview_stats(
     held_orders = (
         await db.execute(
             select(func.count(Order.id)).where(
-                Order.status.in_(["confirmed", "processing", "ready_for_pickup", "shipped", "in_transit"])
+                Order.status.in_(["confirmed", "processing", "ready_for_pickup", "picked_up", "shipped", "in_transit"])
             )
         )
     ).scalar() or 0
@@ -237,8 +241,15 @@ async def admin_list_users(
     count_query = select(func.count(User.id))
 
     if role:
-        query = query.where(User.role == role)
-        count_query = count_query.where(User.role == role)
+        # Accept a comma-separated list so the Admin → Users → Admins tab can show
+        # every console tier in one request (admin,super_admin,manager,…).
+        role_list = [r.strip() for r in role.split(",") if r.strip()]
+        if len(role_list) == 1:
+            query = query.where(User.role == role_list[0])
+            count_query = count_query.where(User.role == role_list[0])
+        elif role_list:
+            query = query.where(User.role.in_(role_list))
+            count_query = count_query.where(User.role.in_(role_list))
     if status_filter:
         query = query.where(User.status == status_filter)
         count_query = count_query.where(User.status == status_filter)
@@ -282,6 +293,7 @@ async def admin_list_users(
                 "location": u.profile.location if u.profile else None,
                 "created_at": u.created_at.isoformat() if u.created_at else None,
                 "last_login": u.last_login.isoformat() if u.last_login else None,
+                "two_factor_method": getattr(u, "two_factor_method", None),
             }
             for u in users
         ],
@@ -510,6 +522,7 @@ async def admin_list_products(
 async def admin_list_audit_logs(
     user_id: Optional[str] = Query(None),
     action: Optional[str] = Query(None),
+    status_code: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     current_user: dict = Depends(admin_guard),
@@ -526,6 +539,12 @@ async def admin_list_audit_logs(
         like = f"%{action}%"
         query = query.where(AuditLog.action.ilike(like))
         count_query = count_query.where(AuditLog.action.ilike(like))
+    if status_code:
+        # Exact match: the middleware persists `str(response.status_code)`, so the
+        # stored value is a discrete code ("200", "404"), never a prefix. Rows
+        # without a code (NULL) simply don't match a specific filter.
+        query = query.where(AuditLog.status_code == status_code)
+        count_query = count_query.where(AuditLog.status_code == status_code)
 
     total = (await db.execute(count_query)).scalar() or 0
 

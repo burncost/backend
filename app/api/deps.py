@@ -1,16 +1,17 @@
 from typing import Annotated, Generator, Optional
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.core.security import get_current_user_id, get_current_user_id_optional
+from app.core.security import get_current_user_id, get_current_user_id_optional, decode_token
 
 from app.crud import user as user_crud
 from app.crud import vendor as vendor_crud
 from app.models.vendor import Vendor
 from app.models.user import User
 from app.models.driver import DriverProfile
+from app.services import security_settings
 
 ### Get current authenticated user (raises 401 if not authenticated)
 async def get_current_user(
@@ -35,6 +36,78 @@ async def get_optional_user(
         return None
     user = await user_crud.get(db, id=user_id)
     return user
+
+
+def _bearer_token(request: Request) -> Optional[str]:
+    """Access token from the httpOnly cookie, else the Authorization header."""
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    return token
+
+
+async def enforce_admin_access(
+    request: Request,
+    current_user = Depends(get_current_user),
+):
+    """Apply the Admin → Settings → Security switches to admin-tier sessions.
+
+    Wired underneath every guard in this module (and therefore every /admin/*
+    route), so each switch actually has teeth:
+      * IP allowlist          -> 403 code="ip_not_allowed"
+      * 2FA requirement       -> 403 code="two_factor_required"
+      * password expiry       -> 403 code="password_expired"
+      * idle session timeout  -> 401 code="session_idle_timeout"
+
+    Non-admin roles return immediately, so buyer/vendor/driver flows are
+    completely unaffected. `/auth/2fa/*` and `/auth/logout` do not use these
+    guards, which is what keeps enrolment reachable for an un-enrolled admin.
+    """
+    role_value = getattr(current_user.role, "value", current_user.role)
+    if str(role_value) not in security_settings.ADMIN_ROLES:
+        return current_user
+
+    if not security_settings.ip_allowed(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ip_not_allowed",
+                "message": "Your network is not permitted to access the admin console.",
+            },
+        )
+
+    if security_settings.two_factor_enabled():
+        payload: dict = {}
+        token = _bearer_token(request)
+        if token:
+            try:
+                payload = decode_token(token)
+            except HTTPException:
+                payload = {}
+        # Both halves matter: an un-enrolled admin must never be waved through,
+        # and a token minted before the toggle was switched on carries no claim.
+        if not payload.get("tfa", False) or not getattr(current_user, "two_factor_method", None):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "two_factor_required",
+                    "message": "Two-factor authentication is required. Please sign in again and enrol a factor.",
+                },
+            )
+
+    if security_settings.is_password_expired(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "password_expired",
+                "message": "Your password has expired. Please change it to continue.",
+            },
+        )
+
+    await security_settings.enforce_session_idle(str(current_user.id))
+    return current_user
 
 ### Get current active user
 async def get_current_active_user(
@@ -115,7 +188,7 @@ async def get_current_verified_vendor(
 
 ### Get current admin user
 async def get_current_admin(
-    current_user = Depends(get_current_user)
+    current_user = Depends(enforce_admin_access)
 ):
     if current_user.role not in ["admin", "super_admin"]:
         raise HTTPException(
@@ -130,7 +203,7 @@ def require_roles(*roles: str):
     allowed = set(roles) | {"admin", "super_admin"}
 
     async def role_checker(
-        current_user = Depends(get_current_user)
+        current_user = Depends(enforce_admin_access)
     ):
         if current_user.role not in allowed:
             raise HTTPException(

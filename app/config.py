@@ -158,6 +158,24 @@ class Settings(BaseSettings):
     # How long a fetched online price may be reused (in-process + MongoDB).
     ONLINE_PRICE_SEARCH_CACHE_HOURS: int = 168
 
+    # ── Proof of delivery (geotagged live-photo gate) ──────────────────────
+    # A driver's photo proof must be fresh (captured within this many minutes)
+    # to unlock "mark delivered". Distance to the dropoff is recorded and
+    # flagged for review but never blocks (advisory only).
+    POD_GEOFENCE_RADIUS_M: int = 300
+    POD_MAX_PHOTO_AGE_MIN: int = 60
+    # A photo without GPS still carries the capture time; rather than dead-ending
+    # the proof in the review queue the buyer is asked to confirm receipt. The
+    # confirm action is only allowed while the capture calendar-day matches
+    # "today" in this timezone (the drop-off locale for the primary market).
+    POD_BUYER_CONFIRM_TZ: str = "Africa/Lagos"
+
+    # ── Maps / geocoding (delivery map pickers) ────────────────────────────
+    # Search + reverse-geocoding run key-less (Nominatim/Photon + OSRM) by
+    # default. Set a Google Maps Platform key to switch those lookups to
+    # Places/Geocoding instead — see `app/services/geo_providers.py`.
+    GOOGLE_MAPS_API_KEY: Optional[str] = None
+
     # OAuth (Phase 12)
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None
@@ -224,6 +242,40 @@ class Settings(BaseSettings):
         {"tokens": 50, "price_ngn": 20_000, "price_per_token": 400},
         {"tokens": 200, "price_ngn": 60_000, "price_per_token": 300},
     ]
+
+    # ── Pricing: platform-margin infusion + VAT ─────────────────────────────
+    # Margin is charged on the EFFECTIVE selling price (the discounted price when
+    # one exists) per category, using the category's `fee_model`:
+    #   percentage -> total_price x platform_margin%        (platform_margin = %)
+    #   fixed      -> fee_fixed x quantity                  (fee_fixed    = NGN)
+    #   service    -> treated as `percentage`
+    # The margin is shared between the buyer (added on top of the item subtotal)
+    # and the vendor (deducted from the settlement payout). The two shares must
+    # sum to 1.0. These are the config-level fallbacks; admins can override them
+    # at runtime through the `system_settings` table (see app.services.runtime_settings).
+    CLIENT_MARGIN_SHARE: str = "0.40"
+    VENDOR_MARGIN_SHARE: str = "0.60"
+
+    # VAT is admin-switchable. `VAT_RATE` is a percentage (7.5 = 7.5%).
+    # `VAT_BASE` selects what VAT is charged on:
+    #   "subtotal_plus_margin" -> (subtotal + platform_fee)   [default]
+    #   "subtotal"             -> subtotal only
+    VAT_ENABLED: bool = True
+    VAT_RATE: str = "7.5"
+    VAT_BASE: str = "subtotal_plus_margin"
+
+    # ── Settlement & disbursement (Phase 5) ─────────────────────────────────
+    # Master switch for settlement accrual + vendor payouts. OFF by default so
+    # nothing moves money until an admin explicitly enables it. Admin-flippable
+    # at runtime via /admin/settlements/config (writes `system_settings`).
+    SETTLEMENT_ENABLED: bool = False
+    # Extra platform commission taken at settlement as a FRACTION (0.05 = 5%).
+    # Defaults to 0 because the platform margin is already infused into the
+    # selling price at checkout.
+    SETTLEMENT_COMMISSION_RATE: str = "0.0"
+    # Payout provider preference: Paystack primary, Monnify backup.
+    PAYOUT_PRIMARY_GATEWAY: str = "paystack"
+    PAYOUT_BACKUP_GATEWAY: str = "monnify"
 
     class Config:
         env_file = ".env"

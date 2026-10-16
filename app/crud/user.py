@@ -1,5 +1,5 @@
 from typing import Optional, Any
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from datetime import datetime
@@ -19,23 +19,32 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         )
         return result.scalar_one_or_none()
 
-    ###Get user by email
+    ###Get user by email (case-insensitive, so `A@x.com` == `a@x.com`)
     async def get_by_email(self, db: AsyncSession, *, email: str) -> Optional[User]:
         result = await db.execute(
             select(User)
             .options(selectinload(User.profile))
-            .where(User.email == email)
+            .where(func.lower(User.email) == (email or "").strip().lower())
+            .order_by(User.created_at.asc())
+            .limit(1)
         )
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
-    ### Get user by phone number
+    ### Get user by phone number (format-insensitive: compares last 10 digits,
+    ### so `0803…` and `+234803…` are treated as the same number)
     async def get_by_phone(self, db: AsyncSession, *, phone: str) -> Optional[User]:
+        digits = "".join(ch for ch in (phone or "") if ch.isdigit())[-10:]
+        if not digits:
+            return None
+        phone_digits = func.regexp_replace(func.coalesce(User.phone_number, ""), r"[^0-9]", "", "g")
         result = await db.execute(
             select(User)
             .options(selectinload(User.profile))
-            .where(User.phone_number == phone)
+            .where(func.right(phone_digits, 10) == digits)
+            .order_by(User.created_at.asc())
+            .limit(1)
         )
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     ### Create new user with hashed password and profile
     async def create(self, db: AsyncSession, *, obj_in: UserCreate) -> User:
@@ -61,6 +70,7 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
             password_hash=get_password_hash(obj_in.password),
             role=role_value,
             status="active",
+            password_changed_at=datetime.utcnow(),
         )
         db.add(db_obj)
         try:
@@ -138,6 +148,8 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         user = await self.get(db, id=user_id)
         if user:
             user.password_hash = get_password_hash(new_password)
+            # Reset the password age so `password_expiration` starts counting again.
+            user.password_changed_at = datetime.utcnow()
             db.add(user)
             await db.commit()
             await db.refresh(user)

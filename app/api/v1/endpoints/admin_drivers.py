@@ -18,10 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_roles
 from app.core.database import get_db
 from app.models.delivery import DeliveryJob
+from app.models.delivery_proof import DeliveryProof
 from app.models.driver import DriverProfile
 from app.models.order import Order
 from app.models.user import User
 from app.models.vendor import Vendor
+# Reuse the compact POD verdict serializer from the delivery engine.
+from app.api.v1.endpoints.deliveries import _pod_summary
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -140,6 +143,13 @@ async def list_driver_dispatches(
         .order_by(DeliveryJob.created_at.desc())
     )
     rows = result.all()
+    jobs = [job for job, _order in rows]
+    proof_rows = (
+        await db.execute(
+            select(DeliveryProof).where(DeliveryProof.delivery_job_id.in_([j.id for j in jobs] or [None]))
+        )
+    ).scalars().all()
+    proofs = {p.delivery_job_id: p for p in proof_rows}
     dispatches = []
     for job, order in rows:
         dispatches.append({
@@ -158,5 +168,7 @@ async def list_driver_dispatches(
             "delivered_at": job.delivered_at,
             "cancelled_at": job.cancelled_at,
             "created_at": job.created_at,
+            # Compact POD verdict + review state (None when no proof captured).
+            "pod": _pod_summary(proofs.get(job.id)),
         })
     return {"dispatches": dispatches}

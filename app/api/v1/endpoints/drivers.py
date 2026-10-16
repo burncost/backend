@@ -19,6 +19,7 @@ from app.api.deps import get_current_driver_profile
 from app.models.driver import DriverProfile
 from app.schemas.driver import (
     DriverAvailabilityUpdate,
+    DriverBankDetailsUpdate,
     DriverDefaultLocationUpdate,
     DriverOnboardingUpdate,
     DriverProfileOut,
@@ -59,6 +60,32 @@ async def set_driver_availability(
 ):
     """Toggle the driver online/offline to receive & accept delivery offers."""
     profile.availability = payload.availability
+    profile.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(profile)
+    return profile
+
+
+@router.patch("/me/bank-details", response_model=DriverProfileOut)
+async def set_driver_bank_details(
+    payload: DriverBankDetailsUpdate,
+    profile: DriverProfile = Depends(get_current_driver_profile),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create or update the driver's payout / settlement account.
+
+    Drives the earnings surface: marketplace earnings accrue against the ledger
+    and are disbursed to this account. The three mandatory fields are required
+    together (enforced by the schema), so this is always a full upsert — there is
+    no way to leave a half-filled account behind for the payout runner to trip on.
+    """
+    profile.bank_name = payload.bank_name.strip()
+    profile.bank_account_number = payload.bank_account_number.strip()
+    profile.bank_account_name = payload.bank_account_name.strip()
+    # Optional: only overwrite when supplied, so a driver editing an existing
+    # account is not silently stripped of a bank code they saved earlier.
+    if payload.bank_code is not None:
+        profile.bank_code = payload.bank_code.strip() or None
     profile.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(profile)

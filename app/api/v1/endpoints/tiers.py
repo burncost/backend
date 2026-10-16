@@ -192,7 +192,7 @@ async def upgrade_vendor_tier(
         if dup_phone:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                detail="This phone number is already registered to another account.",
+                detail="This phone number is already registered to another account. Please use a different phone number.",
             )
 
     # Persist NIN / CAC on the vendor record (kept for manual admin review).

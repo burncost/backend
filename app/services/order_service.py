@@ -36,7 +36,12 @@ class OrderService:
             for item in items
         )
         shipping_fee = self._calculate_shipping(items)
-        tax_amount = subtotal * 0.075  # 7.5% VAT
+        # VAT: single source of truth is pricing_service so the configurable rate /
+        # base and the admin VAT switch are honoured everywhere.
+        from app.services import pricing_service
+
+        _cfg = pricing_service.load_pricing_config()
+        tax_amount = float(pricing_service.q2(subtotal * (_cfg.vat_rate / pricing_service.HUNDRED))) if _cfg.vat_enabled else 0.0
         total_amount = subtotal + shipping_fee + tax_amount
 
         order = {

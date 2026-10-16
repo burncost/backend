@@ -49,6 +49,8 @@ class OrderResponse(BaseModel):
     shipping_fee: Decimal
     tax_amount: Decimal
     discount_amount: Decimal
+    promo_code: Optional[str] = None
+    promo_discount: Decimal = Decimal("0")
     total_amount: Decimal
     payment_status: str
     payment_method: Optional[str] = None

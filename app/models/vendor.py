@@ -51,6 +51,9 @@ class Vendor(Base):
     total_reviews = Column(Integer, default=0)
     total_sales = Column(Numeric(15, 2), default=0.00)
     is_featured = Column(Boolean, default=False)
+    # Vendor-controlled flag: when true the vendor is open to price negotiation
+    # with buyers. Surfaced to buyers as an "Open to negotiate" badge.
+    open_to_negotiate = Column(Boolean, default=False, nullable=False, server_default="false")
     business_image = Column(String(500), nullable=True)
     delivery_time = Column(String(100), default="1-3 Days")
     response_time = Column(String(100), default="< 1 hour")

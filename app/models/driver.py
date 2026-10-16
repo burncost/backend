@@ -11,6 +11,8 @@ Design notes (location-forward):
 - `source` = how the driver joined: `self` (self-onboarded / marketplace) or
   `vendor` (onboarded by a vendor; those drivers auto-accept direct assignments).
 - `status` = pending | active | suspended   (`availability` is the online/offline toggle).
+- `bank_*` hold the driver's single payout/settlement account so earnings can be
+  disbursed without introducing another table.
 """
 from sqlalchemy import Column, String, DateTime, Numeric, Boolean, Integer, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
@@ -71,6 +73,16 @@ class DriverProfile(Base):
     current_lng = Column(Numeric(11, 8))
     current_location_updated_at = Column(DateTime)
 
+    # Payout / settlement account (Phase 5 companion). A driver is settled into a
+    # single bank account, so these live on the profile row rather than in a
+    # separate table (mirrors the column types on VendorBankAccount so the payout
+    # layer can treat both identically). All nullable: a driver can onboard and
+    # drive before adding payout details; the earnings surface nudges them.
+    bank_name = Column(String(100))
+    bank_account_number = Column(String(20))
+    bank_account_name = Column(String(255))
+    bank_code = Column(String(10))
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -78,6 +90,20 @@ class DriverProfile(Base):
     vendor = relationship("Vendor")
     location_updates = relationship("DriverLocationUpdate", back_populates="driver")
     delivery_jobs = relationship("DeliveryJob", back_populates="driver")
+
+    @property
+    def has_bank_details(self) -> bool:
+        """True once a complete payout account is on file (UI nudge / payout gate).
+
+        Computed rather than stored so it can never drift from the columns it
+        describes. The three mandatory fields are required together, so all three
+        must be present for the account to be usable.
+        """
+        return bool(
+            self.bank_name
+            and self.bank_account_number
+            and self.bank_account_name
+        )
 
     def __repr__(self) -> str:
         return f"<DriverProfile id={self.id} status={self.status}>"

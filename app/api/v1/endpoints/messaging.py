@@ -51,8 +51,8 @@ async def _participant(db: AsyncSession, order: Order, user: User):
     return None, None
 
 
-def _notify(db: AsyncSession, user_id, title: str, message: str) -> None:
-    db.add(Notification(user_id=user_id, type="order", title=title, message=message, read=False))
+def _notify(db: AsyncSession, user_id, title: str, message: str, link: str | None = None) -> None:
+    db.add(Notification(user_id=user_id, type="order", title=title, message=message, read=False, link=link))
 
 
 async def _mark_read(db: AsyncSession, order_id: UUID, reader_user_id: UUID) -> int:
@@ -99,11 +99,16 @@ async def send_order_message(
         if vendor_ids:
             vs = (await db.execute(select(Vendor.user_id).where(Vendor.id.in_(vendor_ids)))).scalars().all()
             counterpart_user_ids.update(v for v in vs if v is not None)
+    # Order threads are read in the chat panel's "Messages" tab for both roles
+    # (buyer dashboard Chat and the supplier assistant), so the link deep-links
+    # into that order's thread rather than the orders list. `routeNotification`
+    # turns it into the same "burncost:chat-open" event negotiations use.
     for uid in counterpart_user_ids:
         if str(uid) == str(current_user.id):
             continue
         _notify(db, uid, "New message on your order",
-                f"New message on order {order.order_number}: {payload.body.strip()[:120]}")
+                f"New message on order {order.order_number}: {payload.body.strip()[:120]}",
+                f"/chat/messages/{order.id}")
 
     await db.commit()
     await db.refresh(msg)

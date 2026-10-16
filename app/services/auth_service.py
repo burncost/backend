@@ -221,11 +221,10 @@ class AuthService:
             user = result.scalar_one_or_none()
 
         # 2. Existing user by email — link the provider if not already.
+        #    Case-insensitive (reuses CRUDUser.get_by_email) so a provider email
+        #    in a different case doesn't create a duplicate account.
         if not user and email:
-            result = await db.execute(
-                select(User).options(selectinload(User.profile)).where(User.email == email)
-            )
-            existing = result.scalar_one_or_none()
+            existing = await user_crud.get_by_email(db, email=email)
             if existing:
                 user = existing
                 if oauth_id:

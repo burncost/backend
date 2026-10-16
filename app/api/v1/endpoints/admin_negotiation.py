@@ -35,6 +35,18 @@ def _status_label(s: str) -> str:
     return s.replace("_", " ").title()
 
 
+def _final_discount_pct(n: Negotiation) -> float | None:
+    """Agreed discount % for a row — never NULL once the deal is settled.
+
+    Mirrors `negotiations._final_discount_pct`; the catalogue list price is not
+    loaded here, so a `price_agreed` row uses `counter_offer`, which
+    `accept_price` stores as the % the agreed naira implies.
+    """
+    if n.final_discount is not None:
+        return float(n.final_discount)
+    return float(n.counter_offer) if n.counter_offer is not None else None
+
+
 def _neg_dict(n: Negotiation) -> dict:
     builder_name = n.builder.email if n.builder else "Unknown"
     if n.builder and n.builder.profile:
@@ -43,19 +55,28 @@ def _neg_dict(n: Negotiation) -> dict:
         "id": str(n.id),
         "negotiation_number": n.negotiation_number,
         "builder": builder_name,
+        "builder_email": n.builder.email if n.builder else None,
         "supplier": n.supplier.business_name if n.supplier else "Unknown",
         "product": n.product_name,
         "category": n.category,
         "quantity": float(n.quantity or 0),
         "unit": n.unit,
         "requested_discount": float(n.requested_discount or 0),
+        # The buyer's absolute per-unit bid, when they bid a naira figure.
+        "requested_price": float(n.requested_price) if n.requested_price is not None else None,
         "counter_offer": float(n.counter_offer) if n.counter_offer is not None else None,
-        "final_discount": float(n.final_discount) if n.final_discount is not None else None,
+        # Never NULL once the deal is settled: derived for a `price_agreed` row.
+        "final_discount": _final_discount_pct(n),
+        # Two-party agreed final price (absolute per-unit). NULL until agreed.
+        "agreed_price": float(n.agreed_price) if n.agreed_price is not None else None,
+        "agreed_at": n.agreed_at.isoformat() if n.agreed_at else None,
+        "agreed_by": n.agreed_by,
         "value": float(n.value or 0),
         "status": _status_label(n.status),
         "flagged": bool(n.flagged),
         "suspended": bool(n.suspended),
         "request_date": n.created_at.strftime("%Y-%m-%d") if n.created_at else "—",
+        "request_time": n.created_at.strftime("%H:%M") if n.created_at else "—",
         "created_at": n.created_at.isoformat() if n.created_at else None,
         "counter_offers": [
             {"id": str(c.id), "offered_by": c.offered_by,
@@ -76,11 +97,14 @@ async def admin_list_negotiations(
     db: AsyncSession = Depends(get_db),
 ):
     """All negotiations for the center, with optional status/search filtering."""
+    # Demand-broadcast bid threads reuse the Negotiation table but are not
+    # discount negotiations — keep them out of the discount tooling.
     query = (select(Negotiation)
+             .where(Negotiation.demand_alert_id.is_(None))
              .options(selectinload(Negotiation.builder).selectinload(User.profile),
                       selectinload(Negotiation.supplier),
                       selectinload(Negotiation.counter_offers)))
-    count_query = select(func.count(Negotiation.id))
+    count_query = select(func.count(Negotiation.id)).where(Negotiation.demand_alert_id.is_(None))
 
     if status and status != "All":
         q = status.lower()
@@ -121,15 +145,17 @@ class _Summary:
 
     @staticmethod
     async def compute(db) -> dict:
+        # Demand-broadcast bid threads are excluded (see admin_list_negotiations).
+        d = Negotiation.demand_alert_id.is_(None)
         active = (await db.execute(select(func.count(Negotiation.id)).where(
-            Negotiation.status.in_(["pending", "counter_offered"])))).scalar() or 0
+            d, Negotiation.status.in_(["pending", "counter_offered"])))).scalar() or 0
         pending = (await db.execute(select(func.count(Negotiation.id)).where(
-            Negotiation.status == "pending"))).scalar() or 0
-        total = (await db.execute(select(func.count(Negotiation.id)))).scalar() or 0
+            d, Negotiation.status == "pending"))).scalar() or 0
+        total = (await db.execute(select(func.count(Negotiation.id)).where(d))).scalar() or 0
         approved = (await db.execute(select(func.count(Negotiation.id)).where(
-            Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
+            d, Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
         rejected = (await db.execute(select(func.count(Negotiation.id)).where(
-            Negotiation.status.in_(["rejected", "auto_rejected", "counter_declined"])))).scalar() or 0
+            d, Negotiation.status.in_(["rejected", "auto_rejected", "counter_declined"])))).scalar() or 0
         success_rate = round((approved / total) * 100, 1) if total else 0
         return {
             "total_requests": str(total),
@@ -162,7 +188,8 @@ async def admin_negotiation_detail(
                                    selectinload(Negotiation.supplier),
                                    selectinload(Negotiation.counter_offers),
                                    selectinload(Negotiation.audit_entries))
-                          .where(Negotiation.id == negotiation_id))).scalar_one_or_none()
+                          .where(Negotiation.id == negotiation_id,
+                                 Negotiation.demand_alert_id.is_(None)))).scalar_one_or_none()
     if not n:
         raise HTTPException(404, "Negotiation not found")
     return _neg_dict(n)
@@ -181,7 +208,11 @@ async def admin_negotiation_review(
     if not action:
         raise HTTPException(400, "action is required")
 
-    n = (await db.execute(select(Negotiation).where(Negotiation.id == negotiation_id))).scalar_one_or_none()
+    # Bid threads (demand_alert_id set) are not discount negotiations — an admin
+    # must not approve/reject them through the discount review path.
+    n = (await db.execute(select(Negotiation).where(
+        Negotiation.id == negotiation_id,
+        Negotiation.demand_alert_id.is_(None)))).scalar_one_or_none()
     if not n:
         raise HTTPException(404, "Negotiation not found")
 
@@ -258,11 +289,13 @@ async def admin_update_discount_config(config_id: UUID, payload: dict, current_u
 @router.get("/negotiation/analytics")
 async def admin_negotiation_analytics(current_user=Depends(admin_guard), db=Depends(get_db)):
     """Aggregated analytics for negotiation performance."""
-    total = (await db.execute(select(func.count(Negotiation.id)))).scalar() or 0
-    approved = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
-    rejected = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.status.in_(["rejected", "auto_rejected", "counter_declined"])))).scalar() or 0
-    pending = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.status == "pending"))).scalar() or 0
-    counter = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.status == "counter_offered"))).scalar() or 0
+    # Bid threads are excluded so demand broadcasts cannot skew discount metrics.
+    d = Negotiation.demand_alert_id.is_(None)
+    total = (await db.execute(select(func.count(Negotiation.id)).where(d))).scalar() or 0
+    approved = (await db.execute(select(func.count(Negotiation.id)).where(d, Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
+    rejected = (await db.execute(select(func.count(Negotiation.id)).where(d, Negotiation.status.in_(["rejected", "auto_rejected", "counter_declined"])))).scalar() or 0
+    pending = (await db.execute(select(func.count(Negotiation.id)).where(d, Negotiation.status == "pending"))).scalar() or 0
+    counter = (await db.execute(select(func.count(Negotiation.id)).where(d, Negotiation.status == "counter_offered"))).scalar() or 0
     savings = (await db.execute(select(func.coalesce(func.sum(Order.discount_amount), 0)))).scalar() or 0
     success_rate = round((approved / total) * 100, 1) if total else 0
 
@@ -271,13 +304,13 @@ async def admin_negotiation_analytics(current_user=Depends(admin_guard), db=Depe
     for i in range(5, -1, -1):
         start = (now - timedelta(days=i * 31)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         end = (now - timedelta(days=(i - 1) * 31)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        reqs = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.created_at >= start, Negotiation.created_at < end))).scalar() or 0
-        app = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.created_at >= start, Negotiation.created_at < end, Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
-        rej = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.created_at >= start, Negotiation.created_at < end, Negotiation.status.in_(["rejected", "auto_rejected", "counter_declined"])))).scalar() or 0
-        co = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.created_at >= start, Negotiation.created_at < end, Negotiation.status == "counter_offered"))).scalar() or 0
+        reqs = (await db.execute(select(func.count(Negotiation.id)).where(d, Negotiation.created_at >= start, Negotiation.created_at < end))).scalar() or 0
+        app = (await db.execute(select(func.count(Negotiation.id)).where(d, Negotiation.created_at >= start, Negotiation.created_at < end, Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
+        rej = (await db.execute(select(func.count(Negotiation.id)).where(d, Negotiation.created_at >= start, Negotiation.created_at < end, Negotiation.status.in_(["rejected", "auto_rejected", "counter_declined"])))).scalar() or 0
+        co = (await db.execute(select(func.count(Negotiation.id)).where(d, Negotiation.created_at >= start, Negotiation.created_at < end, Negotiation.status == "counter_offered"))).scalar() or 0
         monthly.append({"month": start.strftime("%b"), "requests": reqs, "approved": app, "rejected": rej, "counterOffers": co})
 
-    cats = (await db.execute(select(Negotiation.category, func.count(Negotiation.id)).group_by(Negotiation.category).order_by(func.count(Negotiation.id).desc()).limit(6))).all()
+    cats = (await db.execute(select(Negotiation.category, func.count(Negotiation.id)).where(d).group_by(Negotiation.category).order_by(func.count(Negotiation.id).desc()).limit(6))).all()
     total_cat = sum(r[1] for r in cats) or 1
 
     return {
@@ -298,12 +331,12 @@ async def admin_negotiation_analytics(current_user=Depends(admin_guard), db=Depe
 @router.get("/negotiation/supplier-performance")
 async def admin_supplier_performance(current_user=Depends(admin_guard), db=Depends(get_db)):
     """Per-supplier negotiation performance scorecards."""
-    rows = (await db.execute(select(Negotiation.supplier_id, func.count(Negotiation.id)).group_by(Negotiation.supplier_id))).all()
+    rows = (await db.execute(select(Negotiation.supplier_id, func.count(Negotiation.id)).where(Negotiation.demand_alert_id.is_(None)).group_by(Negotiation.supplier_id))).all()
     vendors_map = {str(v.id): v for v in (await db.execute(select(Vendor))).scalars().all()}
     scores = []
     for sid, count in rows:
         v = vendors_map.get(str(sid))
-        approved = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.supplier_id == sid, Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
+        approved = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.demand_alert_id.is_(None), Negotiation.supplier_id == sid, Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
         success_rate = round((approved / count) * 100) if count else 0
         scores.append({
             "supplier": v.business_name if v else str(sid), "total_requests": count,
@@ -319,7 +352,7 @@ async def admin_supplier_performance(current_user=Depends(admin_guard), db=Depen
 @router.get("/negotiation/builder-activity")
 async def admin_builder_activity(current_user=Depends(admin_guard), db=Depends(get_db)):
     """Per-builder negotiation activity / risk flags."""
-    rows = (await db.execute(select(Negotiation.builder_id, func.count(Negotiation.id), func.coalesce(func.avg(Negotiation.requested_discount), 0)).group_by(Negotiation.builder_id))).all()
+    rows = (await db.execute(select(Negotiation.builder_id, func.count(Negotiation.id), func.coalesce(func.avg(Negotiation.requested_discount), 0)).where(Negotiation.demand_alert_id.is_(None)).group_by(Negotiation.builder_id))).all()
     users_map = {str(u.id): u for u in (await db.execute(select(User).options(selectinload(User.profile)))).scalars().all()}
     builders = []
     for bid, count, avg_req in rows:
@@ -327,8 +360,8 @@ async def admin_builder_activity(current_user=Depends(admin_guard), db=Depends(g
         name = u.email if u else str(bid)
         if u and u.profile:
             name = f"{u.profile.first_name} {u.profile.last_name}".strip() or name
-        approved = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.builder_id == bid, Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
-        declined = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.builder_id == bid, Negotiation.status.in_(["rejected", "auto_rejected", "counter_declined"])))).scalar() or 0
+        approved = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.demand_alert_id.is_(None), Negotiation.builder_id == bid, Negotiation.status.in_(["approved", "auto_approved", "counter_accepted"])))).scalar() or 0
+        declined = (await db.execute(select(func.count(Negotiation.id)).where(Negotiation.demand_alert_id.is_(None), Negotiation.builder_id == bid, Negotiation.status.in_(["rejected", "auto_rejected", "counter_declined"])))).scalar() or 0
         success_rate = round((approved / count) * 100) if count else 0
         risk = "Normal"
         flags = []

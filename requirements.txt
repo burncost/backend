@@ -33,6 +33,11 @@ pwdlib[argon2]
 bcrypt
 cryptography
 
+# Two-factor authentication (Admin console): TOTP + server-rendered QR codes.
+# qrcode also uses Pillow, which is already required below for image processing.
+pyotp
+qrcode
+
 # Cloud Storage
 google-cloud-storage
 boto3

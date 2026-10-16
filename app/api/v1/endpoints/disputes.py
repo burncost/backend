@@ -60,6 +60,19 @@ async def create_dispute(
     db.add(dispute)
     await db.commit()
     await db.refresh(dispute)
+
+    # Admin → Settings → Notifications → "Dispute Escalations".
+    from app.services import alert_settings
+    await alert_settings.notify_admins(
+        db,
+        kind="dispute",
+        type_name="dispute",
+        title="New dispute filed",
+        message=(f"{dispute.dispute_number}: {dispute_type} reported on order "
+                 f"{order.order_number} (₦{float(dispute.amount or 0):,.2f})."),
+        link=f"/disputes/{dispute.id}",
+    )
+
     return {
         "id": str(dispute.id),
         "dispute_number": dispute.dispute_number,
