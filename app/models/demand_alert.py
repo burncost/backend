@@ -8,7 +8,7 @@ from app.core.database import Base
 
 # Demand alerts are time-boxed: an alert is only listed for this many hours after it
 # was raised, then it disappears from every listing (vendor + public).
-# Single source of truth — the listing endpoints must not hard-code the window.
+# Single source of truth - the listing endpoints must not hard-code the window.
 DEMAND_ALERT_TTL_HOURS = 48
 
 

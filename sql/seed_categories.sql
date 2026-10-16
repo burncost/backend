@@ -1,5 +1,5 @@
 -- =============================================================
--- BURNCOST — SEED CATEGORIES (20 strategic parents + subcategories)
+-- BURNCOST - SEED CATEGORIES (20 strategic parents + subcategories)
 --
 -- This is the CANONICAL fixed-UUID seed used by the other SQL
 -- seed files (seed_20_vendors_with_rates.sql references parent
@@ -8,7 +8,7 @@
 -- NOTE: Backend/app/seed_categories.py seeds the same 20 parents
 -- but generates RANDOM uuid.uuid4() IDs on every run (and deletes
 -- existing rows). Use one source of truth: either this SQL file
--- or that Python script — not both on the same database, or the
+-- or that Python script - not both on the same database, or the
 -- fixed IDs referenced by the vendor/product seed will not resolve.
 --
 -- Idempotent: safe to re-run (ON CONFLICT (slug) DO NOTHING).
@@ -21,26 +21,26 @@ BEGIN;
 -- =============================================================
 INSERT INTO categories (id, name, slug, parent_id, description, is_active, display_order, division, material_type, default_unit, waste_factor, platform_margin, fee_model, fee_fixed, created_at, updated_at)
 SELECT * FROM (VALUES
-  ('a0000001-0000-0000-0000-000000000001'::uuid, 'Cement',                    'cement',                    NULL::uuid, 'Cement — CQI, Fee model: fixed',                true, 1,  'Structure',        'material', 'bag',     0.00, 1.50,  'fixed',      200.00,   NOW(), NOW()),
-  ('a0000002-0000-0000-0000-000000000002'::uuid, 'Reinforcement Steel',       'reinforcement-steel',       NULL,        'Reinforcement Steel — SQI, Fee model: percentage', true, 2,  'Structure',        'material', 'tonne',   0.00, 1.25,  'percentage', NULL,     NOW(), NOW()),
-  ('a0000003-0000-0000-0000-000000000003'::uuid, 'Fine Aggregates',          'fine-aggregates',          NULL,        'Fine Aggregates — N/A, Fee model: fixed',       true, 3,  'Structure',        'material', 'trip',    0.00, 5.00,  'fixed',      10000.00, NOW(), NOW()),
-  ('a0000004-0000-0000-0000-000000000004'::uuid, 'Coarse Aggregates',        'coarse-aggregates',        NULL,        'Coarse Aggregates — N/A, Fee model: fixed',     true, 4,  'Structure',        'material', 'trip',    0.00, 5.00,  'fixed',      19000.00, NOW(), NOW()),
-  ('a0000005-0000-0000-0000-000000000005'::uuid, 'Masonry Products',         'masonry-products',         NULL,        'Masonry Products — BQI, Fee model: fixed',      true, 5,  'Structure',        'material', 'piece',   0.00, 3.00,  'fixed',      55.00,    NOW(), NOW()),
-  ('a0000006-0000-0000-0000-000000000006'::uuid, 'Burnt Bricks',             'burnt-bricks',             NULL,        'Burnt Bricks — N/A, Fee model: percentage',     true, 6,  'Structure',        'material', 'piece',   0.00, 5.00,  'percentage', NULL,     NOW(), NOW()),
-  ('a0000007-0000-0000-0000-000000000007'::uuid, 'Ceiling Systems',          'ceiling-systems',          NULL,        'Ceiling Systems — N/A, Fee model: percentage',  true, 7,  'Finishes',         'material', 'sheet',   0.00, 5.50,  'percentage', NULL,     NOW(), NOW()),
-  ('a0000008-0000-0000-0000-000000000008'::uuid, 'Tiles & Flooring',         'tiles-flooring',           NULL,        'Tiles & Flooring — FQI, Fee model: percentage', true, 8,  'Finishes',         'material', 'm2',      0.00, 6.00,  'percentage', NULL,     NOW(), NOW()),
-  ('a0000009-0000-0000-0000-000000000009'::uuid, 'Timber & Engineered Wood', 'timber-engineered-wood',   NULL,        'Timber & Engineered Wood — WQI, Fee model: percentage', true, 9, 'Finishes', 'material', 'sheet', 0.00, 4.00, 'percentage', NULL, NOW(), NOW()),
-  ('a0000010-0000-0000-0000-000000000010'::uuid, 'Roofing Systems',          'roofing-systems',          NULL,        'Roofing Systems — RQI, Fee model: percentage',  true, 10, 'Building Envelope', 'material', 'sheet', 0.00, 5.00,  'percentage', NULL,     NOW(), NOW()),
-  ('a0000011-0000-0000-0000-000000000011'::uuid, 'Plumbing Systems',         'plumbing-systems',         NULL,        'Plumbing Systems — PQI, Fee model: percentage', true, 11, 'MEP',              'material', 'piece',  0.00, 4.50,  'percentage', NULL,     NOW(), NOW()),
-  ('a0000012-0000-0000-0000-000000000012'::uuid, 'Sanitary Ware',            'sanitary-ware',            NULL,        'Sanitary Ware — N/A, Fee model: percentage',    true, 12, 'MEP',              'material', 'unit',   0.00, 5.50,  'percentage', NULL,     NOW(), NOW()),
-  ('a0000013-0000-0000-0000-000000000013'::uuid, 'Electrical Systems',       'electrical-systems',       NULL,        'Electrical Systems — EQI, Fee model: percentage', true, 13, 'MEP', 'material', 'roll', 0.00, 4.50, 'percentage', NULL, NOW(), NOW()),
-  ('a0000014-0000-0000-0000-000000000014'::uuid, 'Paints & Coatings',        'paints-coatings',          NULL,        'Paints & Coatings — PQI, Fee model: percentage', true, 14, 'Finishes', 'material', 'bucket', 0.00, 5.50, 'percentage', NULL, NOW(), NOW()),
-  ('a0000015-0000-0000-0000-000000000015'::uuid, 'Doors, Windows & Facades', 'doors-windows-facades',    NULL,        'Doors, Windows & Facades — DFQI, Fee model: percentage', true, 15, 'Building Envelope', 'material', 'unit', 0.00, 6.00, 'percentage', NULL, NOW(), NOW()),
-  ('a0000016-0000-0000-0000-000000000016'::uuid, 'Glass',                    'glass',                    NULL,        'Glass — N/A, Fee model: percentage',             true, 16, 'Building Envelope', 'material', 'm2',   0.00, 6.00,  'percentage', NULL,     NOW(), NOW()),
-  ('a0000017-0000-0000-0000-000000000017'::uuid, 'Smart Building Systems',   'smart-building-systems',   NULL,        'Smart Building Systems — N/A, Fee model: percentage', true, 17, 'Building Services', 'material', 'system', 0.00, 6.00, 'percentage', NULL, NOW(), NOW()),
-  ('a0000018-0000-0000-0000-000000000018'::uuid, 'Solar & Renewable Energy', 'solar-renewable-energy',   NULL,        'Solar & Renewable Energy — SQI, Fee model: percentage', true, 18, 'Building Services', 'material', 'system', 0.00, 4.50, 'percentage', NULL, NOW(), NOW()),
-  ('a0000019-0000-0000-0000-000000000019'::uuid, 'Tools & Consumables',      'tools-consumables',        NULL,        'Tools & Consumables — N/A, Fee model: percentage', true, 19, 'Finishes', 'material', 'unit', 0.00, 6.00, 'percentage', NULL, NOW(), NOW()),
-  ('a0000020-0000-0000-0000-000000000020'::uuid, 'Equipment & Site Services','equipment-site-services',  NULL,        'Equipment & Site Services — N/A, Fee model: service', true, 20, 'External Works', 'material', 'contract', 0.00, 6.50, 'service', NULL, NOW(), NOW())
+  ('a0000001-0000-0000-0000-000000000001'::uuid, 'Cement',                    'cement',                    NULL::uuid, 'Cement - CQI, Fee model: fixed',                true, 1,  'Structure',        'material', 'bag',     0.00, 1.50,  'fixed',      200.00,   NOW(), NOW()),
+  ('a0000002-0000-0000-0000-000000000002'::uuid, 'Reinforcement Steel',       'reinforcement-steel',       NULL,        'Reinforcement Steel - SQI, Fee model: percentage', true, 2,  'Structure',        'material', 'tonne',   0.00, 1.25,  'percentage', NULL,     NOW(), NOW()),
+  ('a0000003-0000-0000-0000-000000000003'::uuid, 'Fine Aggregates',          'fine-aggregates',          NULL,        'Fine Aggregates - N/A, Fee model: fixed',       true, 3,  'Structure',        'material', 'trip',    0.00, 5.00,  'fixed',      10000.00, NOW(), NOW()),
+  ('a0000004-0000-0000-0000-000000000004'::uuid, 'Coarse Aggregates',        'coarse-aggregates',        NULL,        'Coarse Aggregates - N/A, Fee model: fixed',     true, 4,  'Structure',        'material', 'trip',    0.00, 5.00,  'fixed',      19000.00, NOW(), NOW()),
+  ('a0000005-0000-0000-0000-000000000005'::uuid, 'Masonry Products',         'masonry-products',         NULL,        'Masonry Products - BQI, Fee model: fixed',      true, 5,  'Structure',        'material', 'piece',   0.00, 3.00,  'fixed',      55.00,    NOW(), NOW()),
+  ('a0000006-0000-0000-0000-000000000006'::uuid, 'Burnt Bricks',             'burnt-bricks',             NULL,        'Burnt Bricks - N/A, Fee model: percentage',     true, 6,  'Structure',        'material', 'piece',   0.00, 5.00,  'percentage', NULL,     NOW(), NOW()),
+  ('a0000007-0000-0000-0000-000000000007'::uuid, 'Ceiling Systems',          'ceiling-systems',          NULL,        'Ceiling Systems - N/A, Fee model: percentage',  true, 7,  'Finishes',         'material', 'sheet',   0.00, 5.50,  'percentage', NULL,     NOW(), NOW()),
+  ('a0000008-0000-0000-0000-000000000008'::uuid, 'Tiles & Flooring',         'tiles-flooring',           NULL,        'Tiles & Flooring - FQI, Fee model: percentage', true, 8,  'Finishes',         'material', 'm2',      0.00, 6.00,  'percentage', NULL,     NOW(), NOW()),
+  ('a0000009-0000-0000-0000-000000000009'::uuid, 'Timber & Engineered Wood', 'timber-engineered-wood',   NULL,        'Timber & Engineered Wood - WQI, Fee model: percentage', true, 9, 'Finishes', 'material', 'sheet', 0.00, 4.00, 'percentage', NULL, NOW(), NOW()),
+  ('a0000010-0000-0000-0000-000000000010'::uuid, 'Roofing Systems',          'roofing-systems',          NULL,        'Roofing Systems - RQI, Fee model: percentage',  true, 10, 'Building Envelope', 'material', 'sheet', 0.00, 5.00,  'percentage', NULL,     NOW(), NOW()),
+  ('a0000011-0000-0000-0000-000000000011'::uuid, 'Plumbing Systems',         'plumbing-systems',         NULL,        'Plumbing Systems - PQI, Fee model: percentage', true, 11, 'MEP',              'material', 'piece',  0.00, 4.50,  'percentage', NULL,     NOW(), NOW()),
+  ('a0000012-0000-0000-0000-000000000012'::uuid, 'Sanitary Ware',            'sanitary-ware',            NULL,        'Sanitary Ware - N/A, Fee model: percentage',    true, 12, 'MEP',              'material', 'unit',   0.00, 5.50,  'percentage', NULL,     NOW(), NOW()),
+  ('a0000013-0000-0000-0000-000000000013'::uuid, 'Electrical Systems',       'electrical-systems',       NULL,        'Electrical Systems - EQI, Fee model: percentage', true, 13, 'MEP', 'material', 'roll', 0.00, 4.50, 'percentage', NULL, NOW(), NOW()),
+  ('a0000014-0000-0000-0000-000000000014'::uuid, 'Paints & Coatings',        'paints-coatings',          NULL,        'Paints & Coatings - PQI, Fee model: percentage', true, 14, 'Finishes', 'material', 'bucket', 0.00, 5.50, 'percentage', NULL, NOW(), NOW()),
+  ('a0000015-0000-0000-0000-000000000015'::uuid, 'Doors, Windows & Facades', 'doors-windows-facades',    NULL,        'Doors, Windows & Facades - DFQI, Fee model: percentage', true, 15, 'Building Envelope', 'material', 'unit', 0.00, 6.00, 'percentage', NULL, NOW(), NOW()),
+  ('a0000016-0000-0000-0000-000000000016'::uuid, 'Glass',                    'glass',                    NULL,        'Glass - N/A, Fee model: percentage',             true, 16, 'Building Envelope', 'material', 'm2',   0.00, 6.00,  'percentage', NULL,     NOW(), NOW()),
+  ('a0000017-0000-0000-0000-000000000017'::uuid, 'Smart Building Systems',   'smart-building-systems',   NULL,        'Smart Building Systems - N/A, Fee model: percentage', true, 17, 'Building Services', 'material', 'system', 0.00, 6.00, 'percentage', NULL, NOW(), NOW()),
+  ('a0000018-0000-0000-0000-000000000018'::uuid, 'Solar & Renewable Energy', 'solar-renewable-energy',   NULL,        'Solar & Renewable Energy - SQI, Fee model: percentage', true, 18, 'Building Services', 'material', 'system', 0.00, 4.50, 'percentage', NULL, NOW(), NOW()),
+  ('a0000019-0000-0000-0000-000000000019'::uuid, 'Tools & Consumables',      'tools-consumables',        NULL,        'Tools & Consumables - N/A, Fee model: percentage', true, 19, 'Finishes', 'material', 'unit', 0.00, 6.00, 'percentage', NULL, NOW(), NOW()),
+  ('a0000020-0000-0000-0000-000000000020'::uuid, 'Equipment & Site Services','equipment-site-services',  NULL,        'Equipment & Site Services - N/A, Fee model: service', true, 20, 'External Works', 'material', 'contract', 0.00, 6.50, 'service', NULL, NOW(), NOW())
 ) AS c(id, name, slug, parent_id, description, is_active, display_order, division, material_type, default_unit, waste_factor, platform_margin, fee_model, fee_fixed, created_at, updated_at)
 WHERE NOT EXISTS (SELECT 1 FROM categories x WHERE x.slug = c.slug);
 

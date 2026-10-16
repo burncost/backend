@@ -1,5 +1,5 @@
 -- =============================================================
--- BURNCOST DATABASE SCHEMA — DDL Script
+-- BURNCOST DATABASE SCHEMA - DDL Script
 -- Generated from SQLAlchemy models in Backend/app/models/
 -- Run after: alembic upgrade head  (or standalone)
 -- =============================================================
@@ -1413,9 +1413,9 @@ CREATE TABLE IF NOT EXISTS delivery_job_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     delivery_job_id UUID REFERENCES delivery_jobs(id) ON DELETE CASCADE,
     order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
-    actor_type VARCHAR(20) NOT NULL DEFAULT 'driver',  -- driver | vendor | admin
+    actor_type VARCHAR(20) NOT NULL DEFAULT 'driver',  -- driver | vendor | admin | buyer
     actor_name VARCHAR(255),
-    event_type VARCHAR(20) NOT NULL DEFAULT 'status',  -- location | status | note
+    event_type VARCHAR(20) NOT NULL DEFAULT 'status',  -- location | status | note | proof | proof_review
     status VARCHAR(20),
     lat NUMERIC(11,8),
     lng NUMERIC(11,8),
@@ -1427,6 +1427,10 @@ CREATE INDEX IF NOT EXISTS ix_delivery_job_events_order_id ON delivery_job_event
 CREATE INDEX IF NOT EXISTS ix_delivery_job_events_created_at ON delivery_job_events (created_at);
 
 -- 49.8 ENUM CHECK CONSTRAINTS (delivery tables)
+-- NOTE: `chk_delivery_job_events_event_type` and `chk_delivery_job_events_actor_type`
+-- must stay in sync with what the code writes: POD capture writes event_type
+-- 'proof', proof review writes 'proof_review', and the buyer's receipt
+-- confirmation writes actor_type 'buyer'.
 ALTER TABLE delivery_jobs
   ADD CONSTRAINT chk_delivery_jobs_status CHECK (status IS NULL OR status IN ('available','accepted','picked_up','in_transit','delivered','cancelled','expired'));
 ALTER TABLE delivery_jobs
@@ -1440,9 +1444,9 @@ ALTER TABLE driver_location_updates
 ALTER TABLE driver_location_updates
   ADD CONSTRAINT chk_driver_location_updates_lng CHECK (lng BETWEEN -180 AND 180);
 ALTER TABLE delivery_job_events
-  ADD CONSTRAINT chk_delivery_job_events_actor_type CHECK (actor_type IS NULL OR actor_type IN ('driver','vendor','admin'));
+  ADD CONSTRAINT chk_delivery_job_events_actor_type CHECK (actor_type IS NULL OR actor_type IN ('driver','vendor','admin','buyer'));
 ALTER TABLE delivery_job_events
-  ADD CONSTRAINT chk_delivery_job_events_event_type CHECK (event_type IS NULL OR event_type IN ('location','status','note'));
+  ADD CONSTRAINT chk_delivery_job_events_event_type CHECK (event_type IS NULL OR event_type IN ('location','status','note','proof','proof_review'));
 
 -- =============================================================
 -- 50. MESSAGING / PAYMENT CAPTURE / SETTLEMENT / EMAIL PREFS / TOKEN PURCHASES

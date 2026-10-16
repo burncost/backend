@@ -27,7 +27,7 @@ from app.services.vendor_tier_service import normalize_tier
 BASE_RISK = 50.0
 
 # Risk credit granted by each tier milestone: NIN-verified identity (tier 2) then
-# CAC-verified business (tier 3). A tier-2 upgrade must visibly move the score — it
+# CAC-verified business (tier 3). A tier-2 upgrade must visibly move the score - it
 # previously changed nothing because this table still used the pre-rework tier codes.
 TIER_RISK_CREDIT = {
     "starter": 0,
@@ -67,7 +67,7 @@ def compute_risk_score(
     else:  # pending / unknown
         score += 10
 
-    # Tier milestone — identity (NIN) then registration (CAC) verification.
+    # Tier milestone - identity (NIN) then registration (CAC) verification.
     # normalize_tier() maps legacy codes onto the current scheme, so this only needs the
     # three live codes; unknown/legacy values fall back to "starter" (no credit).
     score -= TIER_RISK_CREDIT.get(normalize_tier(verification_tier), 0)

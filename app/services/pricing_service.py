@@ -1,9 +1,9 @@
-"""Central pricing engine (Phase 2) — platform-margin infusion, VAT and the
+"""Central pricing engine (Phase 2) - platform-margin infusion, VAT and the
 client/vendor margin split.
 
 Design decisions (approved):
 
-* **Basis = Option B — the EFFECTIVE selling price.** Margin is charged on the price
+* **Basis = Option B - the EFFECTIVE selling price.** Margin is charged on the price
   the buyer actually pays (`discount_price` when one exists, else `base_price`),
   never on the struck-through market price.
 * **`fee_model` is honoured per category.**
@@ -294,6 +294,70 @@ def compute_order_pricing(
     )
 
 
+def item_key(item: Any, index: int = 0) -> str:
+    """Stable lookup key for one basket line.
+
+    Per-line vendor deductions must be matched back to the exact line that
+    produced them (the escrow release pays vendors line by line). Real OrderItems
+    carry an `id`; the lightweight dicts used by the pricing tests may not, so
+    the position in the basket is the fallback.
+    """
+    item_id = getattr(item, "id", None)
+    if item_id is None and isinstance(item, Mapping):
+        item_id = item.get("id")
+    return str(item_id) if item_id is not None else f"idx:{index}"
+
+
+async def item_platform_margins(db: AsyncSession, items: Sequence[Any]) -> list[Decimal]:
+    """Total platform margin for each line, resolved from the category fee model.
+
+    Shared primitive behind both the order-level settlement deduction and the
+    per-line escrow deduction, so the two can never drift apart. Resolution is
+    best-effort: an unknown product/category falls back to the default fee.
+    """
+    from app.models.product import Product
+
+    line_items = list(items)
+    product_ids = [getattr(i, "product_id", None) for i in line_items]
+    product_ids = [pid for pid in product_ids if pid is not None]
+    if not product_ids:
+        return [Decimal("0") for _ in line_items]
+
+    rows = (await db.execute(
+        select(Product.id, Product.category_id).where(Product.id.in_(product_ids))
+    )).all()
+    cat_by_product = {str(pid): (str(cid) if cid else None) for pid, cid in rows}
+    fees = await load_category_fees(db, cat_by_product.values())
+
+    return [
+        compute_item_margin(
+            getattr(item, "unit_price", 0),
+            getattr(item, "quantity", 0),
+            fee_for(cat_by_product.get(str(getattr(item, "product_id", ""))), fees),
+        )
+        for item in line_items
+    ]
+
+
+async def vendor_margins_by_item(db: AsyncSession, items: Sequence[Any]) -> dict[str, Decimal]:
+    """Vendor-borne margin PER LINE, keyed by :func:`item_key`.
+
+    `vendor_margin_for_items` collapses every line into one order-level total,
+    which is all the settlement ledger needs. The escrow release pays each vendor
+    line individually, so it needs the deduction belonging to *that* line - this
+    keeps the per-line split instead of summing first.
+
+    Best-effort: unresolvable lines contribute ``Decimal("0")``.
+    """
+    cfg = load_pricing_config()
+    margins = await item_platform_margins(db, items)
+    result: dict[str, Decimal] = {}
+    for index, (item, margin) in enumerate(zip(list(items), margins)):
+        _client_fee, vendor_fee = split_margin(margin, cfg)
+        result[item_key(item, index)] = vendor_fee
+    return result
+
+
 async def vendor_margin_for_items(db: AsyncSession, items: Sequence[Any]) -> Decimal:
     """Vendor-borne portion of the platform margin for a set of OrderItems.
 
@@ -304,25 +368,54 @@ async def vendor_margin_for_items(db: AsyncSession, items: Sequence[Any]) -> Dec
 
     Best-effort: returns 0 when items cannot be resolved.
     """
+    total = sum(await item_platform_margins(db, items), Decimal("0"))
+    _client_fee, vendor_fee = split_margin(total, load_pricing_config())
+    return vendor_fee
+
+
+async def order_pricing_breakdown(
+    db: AsyncSession, order: Any
+) -> tuple[OrderPricing, Decimal, Decimal]:
+    """Restate an order's full pricing from its own items.
+
+    `orders` does not persist the per-product platform fee, so the buyer's fee,
+    the vendor's deduction and VAT are recomputed here from Product -> Category
+    and the *live* configuration. Callers must present the result as
+    "current config", which is why the admin view shows it next to the amounts
+    actually charged at checkout.
+
+    Returns ``(pricing, client_share, vendor_share)``.
+    """
     from app.models.product import Product
 
-    product_ids = [getattr(i, "product_id", None) for i in items]
-    product_ids = [pid for pid in product_ids if pid is not None]
-    if not product_ids:
-        return Decimal("0")
+    line_items = list(getattr(order, "items", None) or [])
+    product_ids = [i.product_id for i in line_items if getattr(i, "product_id", None)]
+    category_by_product: dict[str, Any] = {}
+    if product_ids:
+        rows = (await db.execute(
+            select(Product.id, Product.category_id).where(Product.id.in_(product_ids))
+        )).all()
+        category_by_product = {str(pid): cid for pid, cid in rows}
 
-    rows = (await db.execute(
-        select(Product.id, Product.category_id).where(Product.id.in_(product_ids))
-    )).all()
-    cat_by_product = {str(pid): (str(cid) if cid else None) for pid, cid in rows}
-    fees = await load_category_fees(db, cat_by_product.values())
-    cfg = load_pricing_config()
+    items = [
+        {
+            "product_id": i.product_id,
+            "category_id": category_by_product.get(str(i.product_id)),
+            "product_name": i.product_name,
+            "quantity": i.quantity,
+            "unit_price": i.unit_price,
+            "total_price": i.total_price,
+        }
+        for i in line_items
+    ]
 
-    total = Decimal("0")
-    for item in items:
-        category_id = cat_by_product.get(str(getattr(item, "product_id", "")))
-        fee = fee_for(category_id, fees)
-        total += compute_item_margin(getattr(item, "unit_price", 0), getattr(item, "quantity", 0), fee)
-
-    _client_fee, vendor_fee = split_margin(total, cfg)
-    return vendor_fee
+    fees = await load_category_fees(db, [i["category_id"] for i in items])
+    pricing = compute_order_pricing(
+        items,
+        fees,
+        shipping_fee=getattr(order, "shipping_fee", 0) or 0,
+        discount_amount=getattr(order, "discount_amount", 0) or 0,
+        promo_discount=getattr(order, "promo_discount", 0) or 0,
+    )
+    client_share, vendor_share = margin_split()
+    return pricing, client_share, vendor_share

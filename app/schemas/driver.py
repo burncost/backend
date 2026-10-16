@@ -32,7 +32,7 @@ class DriverProfileOut(BaseModel):
     rating: Optional[float] = None
     rating_count: Optional[int] = None
 
-    # Payout / settlement account — the single bank account earnings are paid
+    # Payout / settlement account - the single bank account earnings are paid
     # into. Nullable until the driver supplies them.
     bank_name: Optional[str] = None
     bank_account_number: Optional[str] = None

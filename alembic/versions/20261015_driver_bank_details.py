@@ -3,7 +3,7 @@
 Additive migration only: adds four NULLABLE columns to the existing
 `driver_profiles` table so an independent driver can supply the single bank
 account their earnings are settled into. Nullable columns are safe on a live
-table — existing rows keep working, and a driver can onboard and deliver before
+table - existing rows keep working, and a driver can onboard and deliver before
 adding payout details.
 
 No new table is created: a driver is settled into exactly one account, so the

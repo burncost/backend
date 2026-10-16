@@ -1,4 +1,4 @@
-"""Phase 5 admin dispute endpoints — Disputes, Details, Resolution.
+"""Phase 5 admin dispute endpoints - Disputes, Details, Resolution.
 
 Powered by the new dispute models.
 """
@@ -32,7 +32,7 @@ def _dispute_dict(d: Dispute) -> dict:
         "amount": float(d.amount or 0),
         "filed_by": d.filed_by,
         "filed_at": d.filed_at.isoformat() if d.filed_at else None,
-        "created_date": d.filed_at.strftime("%b %d, %Y") if d.filed_at else "—",
+        "created_date": d.filed_at.strftime("%b %d, %Y") if d.filed_at else "-",
         "evidence": [
             {"id": str(e.id), "submitted_by": e.submitted_by, "evidence_type": e.evidence_type,
              "description": e.description, "url": e.url}

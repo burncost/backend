@@ -51,7 +51,7 @@ def upgrade() -> None:
         )
     """)
 
-    # Create indexes (idempotent — IF NOT EXISTS)
+    # Create indexes (idempotent - IF NOT EXISTS)
     op.execute('CREATE INDEX IF NOT EXISTS ix_token_usage_user_id ON token_usage (user_id)')
     op.execute('CREATE INDEX IF NOT EXISTS ix_token_transactions_user_id ON token_transactions (user_id)')
     op.execute('CREATE INDEX IF NOT EXISTS ix_token_transactions_created_at ON token_transactions (created_at)')

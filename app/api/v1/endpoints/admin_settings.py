@@ -1,4 +1,4 @@
-"""Phase 6 admin settings endpoints — system settings key-value store.
+"""Phase 6 admin settings endpoints - system settings key-value store.
 
 Powered by the SystemSetting model.
 """

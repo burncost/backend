@@ -1,4 +1,4 @@
-"""Admin pricing endpoints (Phase 9) — category margin/fee-model editor + VAT and
+"""Admin pricing endpoints (Phase 9) - category margin/fee-model editor + VAT and
 margin-split configuration.
 
 `categories.py` is a read-only public surface, so the write path for per-category

@@ -3,7 +3,7 @@
 BOQ-triggered demand broadcasts reuse `DemandAlert` (the public line) plus
 `Negotiation` rows with `demand_alert_id` set (one per-vendor bid thread).
 Those bid threads are deliberately excluded from the discount tooling in
-`admin_negotiation.py`, so they are surfaced here instead — read-only browsing
+`admin_negotiation.py`, so they are surfaced here instead - read-only browsing
 plus a close/reopen moderation action.
 
 No new tables and no migration: this module only reads existing columns.
@@ -114,7 +114,7 @@ async def admin_list_demand_broadcasts(
     current_user: dict = Depends(admin_guard),
     db: AsyncSession = Depends(get_db),
 ):
-    """All demand broadcasts — admins see history, so expired rows are included."""
+    """All demand broadcasts - admins see history, so expired rows are included."""
     query = select(DemandAlert)
     count_query = select(func.count(DemandAlert.id))
 
@@ -152,7 +152,7 @@ async def admin_list_demand_broadcasts(
     rows = (await db.execute(query.order_by(DemandAlert.created_at.desc())
                              .offset((page - 1) * page_size).limit(page_size))).scalars().all()
 
-    # Bid aggregates for this page only — one extra query, no N+1.
+    # Bid aggregates for this page only - one extra query, no N+1.
     alert_ids = [a.id for a in rows]
     bids_by_alert: dict = {}
     if alert_ids:

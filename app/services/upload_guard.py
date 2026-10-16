@@ -1,7 +1,7 @@
 """Cheap, dependency-free checks on an uploaded file's *content*.
 
 The BOQ endpoints only ever looked at the filename extension and the declared
-MIME type — both are attacker-controlled strings. Two classes of abuse slip
+MIME type - both are attacker-controlled strings. Two classes of abuse slip
 through:
 
 * a file that is not what it claims to be (an executable renamed ``bill.xlsx``);
@@ -11,7 +11,7 @@ through:
   and ``openpyxl``/``python-docx`` will happily try to inflate it.
 
 ``inspect_upload`` answers both from the file's own bytes (and, for archives,
-its central directory only — nothing is extracted), so a hostile upload is
+its central directory only - nothing is extracted), so a hostile upload is
 rejected before any parser touches it. It never raises and never moves the
 caller's stream position: a rejected upload is a message, a clean upload is
 ``None``.
@@ -76,7 +76,7 @@ def _extension(filename: Optional[str]) -> str:
 def _matches_signature(extension: str, head: bytes) -> bool:
     """Does `head` look like the format `extension` claims to be?"""
     if extension == ".webp":
-        # RIFF....WEBP — the fourcc sits after the RIFF size field.
+        # RIFF....WEBP - the fourcc sits after the RIFF size field.
         return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
     expected = _SIGNATURES.get(extension)
     if expected is None:
@@ -163,7 +163,7 @@ def inspect_upload(
 
     `fileobj` must be a seekable binary file object; its position is restored to
     the start on every path so the caller can hand it straight to a parser.
-    An unknown extension is judged on its content alone — a PDF named ``plan``
+    An unknown extension is judged on its content alone - a PDF named ``plan``
     is still a PDF, and a file that matches nothing is refused.
     """
     extension = _extension(filename)
@@ -181,7 +181,7 @@ def inspect_upload(
         if extension in _TEXT_EXTENSIONS:
             if not _looks_like_text(head):
                 return (
-                    f"The {extension.lstrip('.').upper()} file is not readable text — "
+                    f"The {extension.lstrip('.').upper()} file is not readable text - "
                     "it looks like a binary file with the wrong extension."
                 )
             return None
@@ -192,7 +192,7 @@ def inspect_upload(
                     return _zip_expansion_reason(fileobj, max_uncompressed, max_entries)
                 return None
             detected = _known_binary_format(head)
-            described = f" — its contents are {detected}" if detected else ""
+            described = f" - its contents are {detected}" if detected else ""
             return (
                 f"This file is named '{filename}' but its contents are not "
                 f"{extension.lstrip('.').upper()}{described}. Please upload the original file."

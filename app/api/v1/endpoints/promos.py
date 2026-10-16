@@ -150,7 +150,7 @@ async def create_promo(
     promo = await promo_crud.create(db, data, vendor_id=vendor_id, scope_type=scope_type, scope_id=scope_id)
 
     # Notify the vendor's own past customers off the request path (own DB session);
-    # best-effort — never block promo creation on delivery.
+    # best-effort - never block promo creation on delivery.
     background_tasks.add_task(
         promo_notification_service.deliver_promo_created,
         promo.id, vendor_id=vendor_id, scope_label=scope_label,

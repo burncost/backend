@@ -5,7 +5,7 @@ flipping a toggle did nothing. This module is the single reader: every switch is
 resolved through :mod:`app.services.runtime_settings` (DB override → config
 default), so an admin change takes effect on the next request.
 
-Nothing here raises when the switch is OFF — the defaults are chosen so that
+Nothing here raises when the switch is OFF - the defaults are chosen so that
 behaviour is unchanged until an admin opts in (with `password_attempts` staying
 ON, since the lockout it governs is already always-on today).
 """
@@ -171,7 +171,7 @@ async def enforce_session_idle(user_id: str) -> None:
         return
 
     if raw is None:
-        # No record (fresh session or the key aged out) — start the clock.
+        # No record (fresh session or the key aged out) - start the clock.
         await touch_session(user_id)
         return
 
@@ -244,7 +244,7 @@ def ip_allowed(request: Request) -> bool:
 
 # ── two-factor authentication ──────────────────────────────────────────────
 
-"""Public alias — the 2FA service shares the same pooled connection."""
+"""Public alias - the 2FA service shares the same pooled connection."""
 get_redis = _redis
 
 

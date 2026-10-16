@@ -1,6 +1,6 @@
 """AI Procurement Intelligence endpoints (Phase 4).
 
-All operations are DB-verified — no hallucinated prices. Insufficient-data
+All operations are DB-verified - no hallucinated prices. Insufficient-data
 flags are returned instead of invented numbers.
 """
 from typing import List, Dict, Any, Optional

@@ -1,4 +1,4 @@
-"""Project Memory Service — derives what's been bought vs remaining for a project.
+"""Project Memory Service - derives what's been bought vs remaining for a project.
 
 Remaining = BOQ required qty − ordered qty.
 Reuses existing data: MongoDB `boqs` (required quantities) and PostgreSQL

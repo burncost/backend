@@ -1,9 +1,9 @@
-"""add vendor_settlement_ledger table (Phase 5 — Settlement & Disbursement).
+"""add vendor_settlement_ledger table (Phase 5 - Settlement & Disbursement).
 
 Additive migration only: creates the new `vendor_settlement_ledger` table and
 indexes. No columns/tables used by auth, onboarding, orders, payments or the
 delivery lifecycle are dropped, renamed or type-changed. This table is NOT yet
-written to by any live flow — it is the inert accounting foundation.
+written to by any live flow - it is the inert accounting foundation.
 
 Revision ID: 20260908_settlement_ledger
 Revises: 20260908_order_messages

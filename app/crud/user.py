@@ -90,7 +90,7 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
             await db.commit()
         except Exception:
             # Registration failed partway (e.g. profile insert failed after the
-            # user row was committed) — roll back and remove any partial user
+            # user row was committed) - roll back and remove any partial user
             # row so nothing incomplete is left in the database.
             await db.rollback()
             await db.execute(

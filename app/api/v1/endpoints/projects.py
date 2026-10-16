@@ -1,4 +1,4 @@
-"""Projects endpoints — Phase 5: project memory / procurement intelligence."""
+"""Projects endpoints - Phase 5: project memory / procurement intelligence."""
 from typing import Dict, Any, Optional
 import logging
 

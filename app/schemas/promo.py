@@ -33,7 +33,7 @@ class PromoCodeUpdate(BaseModel):
     actually sent (`exclude_unset`), so a cancel/reactivate stays a one-column
     write while the same endpoint also serves full edits. An explicit `null`
     clears a nullable column (e.g. dropping a product/category target or the
-    expiry date) — omitting the key leaves the stored value alone.
+    expiry date) - omitting the key leaves the stored value alone.
     """
 
     code: Optional[str] = Field(default=None, min_length=3, max_length=50)

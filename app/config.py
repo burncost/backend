@@ -115,7 +115,7 @@ class Settings(BaseSettings):
     MONNIFY_CONTRACT_CODE: Optional[str] = None
     MONNIFY_BASE_URL: Optional[str] = None
 
-    # Identity verification (Mono) — NIN is bypassed until the flag is on;
+    # Identity verification (Mono) - NIN is bypassed until the flag is on;
     # CAC verification is enforced whenever a Mono key is configured.
     MONO_SECRET_KEY: Optional[str] = None
     IDENTITY_VERIFY_ENABLED: bool = False
@@ -147,7 +147,7 @@ class Settings(BaseSettings):
     # ── Online price search (BOQ price chain, tier 3) ──────────────────────
     # Consulted ONLY after the product catalogue and material_rates have no
     # price for a line. Every lookup is cached and budgeted per BOQ run, and a
-    # failure (site down, no network) just moves on to the offline reference —
+    # failure (site down, no network) just moves on to the offline reference -
     # a BOQ always completes.
     ONLINE_PRICE_SEARCH_ENABLED: bool = True
     # Comma-separated published price-list pages to read first.
@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     # ── Maps / geocoding (delivery map pickers) ────────────────────────────
     # Search + reverse-geocoding run key-less (Nominatim/Photon + OSRM) by
     # default. Set a Google Maps Platform key to switch those lookups to
-    # Places/Geocoding instead — see `app/services/geo_providers.py`.
+    # Places/Geocoding instead - see `app/services/geo_providers.py`.
     GOOGLE_MAPS_API_KEY: Optional[str] = None
 
     # OAuth (Phase 12)

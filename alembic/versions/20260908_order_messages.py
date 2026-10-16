@@ -1,4 +1,4 @@
-"""add order_messages table (Phase 4B — buyer↔vendor messaging).
+"""add order_messages table (Phase 4B - buyer↔vendor messaging).
 
 Additive migration only: creates the new `order_messages` table and indexes. No
 columns/tables used by auth, onboarding, orders, payments or the delivery

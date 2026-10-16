@@ -2,7 +2,7 @@
 
 Platform-wide counterpart to the vendor `/promos` endpoints. Admins (and any
 role granted via `require_roles`) create/inspect/disable/delete promo codes
-that are NOT owned by a vendor — either `platform` (every product site-wide) or
+that are NOT owned by a vendor - either `platform` (every product site-wide) or
 `category` (every product in a category). Mounted under the `/admin` prefix so
 it is reachable from the Admin app.
 """
@@ -81,7 +81,7 @@ async def admin_create_promo(
 
     # Deliver the new code off the request path: a platform-wide fan-out touches
     # every active user, so it runs as a background task with its own DB session.
-    # Best-effort — a delivery hiccup must never block the promo from being created.
+    # Best-effort - a delivery hiccup must never block the promo from being created.
     background_tasks.add_task(
         promo_notification_service.deliver_promo_created,
         promo.id, scope_label=scope_label,

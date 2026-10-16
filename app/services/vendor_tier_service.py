@@ -41,8 +41,8 @@ TIER_LABELS: dict = {
 # Suggestive upsell copy a vendor sees at each tier (for UI prompts).
 TIER_NEXT_STEP = {
     "starter": "Add your NIN to become a Verified Vendor with a ₦10,000,000 limit.",
-    "verified_vendor": "Become a BurnCost Verified Enterprise — register your CAC for no transaction cap and the Verified badge.",
-    "enterprise": "You're fully verified — no transaction cap, BurnCost Verified badge active.",
+    "verified_vendor": "Become a BurnCost Verified Enterprise - register your CAC for no transaction cap and the Verified badge.",
+    "enterprise": "You're fully verified - no transaction cap, BurnCost Verified badge active.",
 }
 
 

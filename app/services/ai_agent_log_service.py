@@ -1,4 +1,4 @@
-"""AI Agent Log Service — records AI agent turns for observability.
+"""AI Agent Log Service - records AI agent turns for observability.
 
 Persists to the `ai_agent_logs` table (added in Phase 2) capturing intent,
 tool, args, result, price_source, confidence, fallback, tokens, latency.

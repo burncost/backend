@@ -1,5 +1,5 @@
 """
-Price Integrity + BOQ Analysis models — power the Price Integrity and
+Price Integrity + BOQ Analysis models - power the Price Integrity and
 BOQ Analysis admin pages (Phase 4).
 """
 from sqlalchemy import (

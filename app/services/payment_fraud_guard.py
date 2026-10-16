@@ -1,11 +1,11 @@
 """Payment & Fraud guard helpers for Phase 11.
 
 Centralises the integrity checks that must not be bypassed by client input:
-  - verify_order_payment()  — never trust a client amount; use DB order total.
-  - verify_webhook_signature() — HMAC/SHA512 signature checks for Paystack/Flutterwave.
-  - audit_payment_event() — persist every payment init/verify to audit_logs.
-  - payment_attempt_limit() — Redis rate-limit payment attempts per user/IP.
-  - record_failed_login() / is_login_locked() — ATO lockout after repeated failures.
+  - verify_order_payment()  - never trust a client amount; use DB order total.
+  - verify_webhook_signature() - HMAC/SHA512 signature checks for Paystack/Flutterwave.
+  - audit_payment_event() - persist every payment init/verify to audit_logs.
+  - payment_attempt_limit() - Redis rate-limit payment attempts per user/IP.
+  - record_failed_login() / is_login_locked() - ATO lockout after repeated failures.
 """
 import hashlib
 import hmac
@@ -73,7 +73,7 @@ async def record_fraud_flag(
     Also queues the matching admin-inbox notification, gated by the
     Admin → Settings → Notifications switches ("Fraud Detection Alerts" or,
     for price-integrity alerts, "Price Integrity Violations"). The audit row
-    itself is always written — a toggle silences the inbox, never the evidence.
+    itself is always written - a toggle silences the inbox, never the evidence.
     """
     try:
         import uuid

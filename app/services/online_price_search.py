@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 """
-LIVE ONLINE PRICE SEARCH — last price source before a BOQ gives up.
+LIVE ONLINE PRICE SEARCH - last price source before a BOQ gives up.
 
 The BOQ chain is strict and this module is only ever reached after BOTH of our
 own stores came up empty:
 
-  1. `products` (PostgreSQL) — vendor catalogue, discount price first
+  1. `products` (PostgreSQL) - vendor catalogue, discount price first
   2. `material_rates` (PostgreSQL `current_price`, then MongoDB)
-  3. THIS MODULE — published online price lists + general web search
-  4. `online_average_prices` — the offline observed reference (no network)
+  3. THIS MODULE - published online price lists + general web search
+  4. `online_average_prices` - the offline observed reference (no network)
   5. flagged AI estimate
 
 Rules enforced here (see tests/test_price_sourcing_chain.py):
   * Never reached before the database: callers only fall through on a DB miss.
-  * Every figure carries provenance — price_source="online_market" plus the
+  * Every figure carries provenance - price_source="online_market" plus the
     page/listing it came from, so an operator can check it. The `verified` flag
     is left blank on this tier (it is only ever asserted by our own database).
   * Unit-safe: a live figure is only accepted when it states the same selling
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 LIVE_SOURCE = "online_market"
 LIVE_LABEL = "Online market price"
 
-# MongoDB collection holding fetched online prices between runs (cache only —
+# MongoDB collection holding fetched online prices between runs (cache only -
 # deliberately NOT `material_rates`, so a scraped figure can never enter the
 # verified-rate path used for quote inflation checks).
 CACHE_COLLECTION = "online_price_cache"
@@ -69,11 +69,16 @@ def strip_html(raw: str) -> str:
     return re.sub(r"[ \t]+", " ", text)
 
 
-# A label followed by an amount: "Cement 50kg bag — ₦14,000" / "Sand: NGN 70000
+# A label followed by an amount: "Cement 50kg bag - ₦14,000" / "Sand: NGN 70000
 # per trip". Kept deliberately narrow so a phone number or a year is not read as
 # a price.
+# The separating "-" must stay LAST in the class: a hyphen sitting between two
+# literal characters (e.g. "[-\u2013-]") is read as a range, and en-dash ->
+# hyphen descends, which raises "bad character range" AT IMPORT TIME and stops
+# the app from booting. The dashes are written as escapes so an ASCII/em-dash
+# normalisation sweep cannot silently rewrite them into a broken range again.
 _ROW_PATTERN = re.compile(
-    r"(?P<label>[^\n|:;•]{3,90}?)\s*(?:[-–—:•|]{1,2})?\s*"
+    r"(?P<label>[^\n|:;•]{3,90}?)\s*(?:[\u2013\u2014:•|-]{1,2})?\s*"
     r"(?<![A-Za-z0-9])(?P<currency>₦|NGN|N)\s*(?P<amount>\d[\d,]*(?:\.\d{1,2})?)"
     r"(?:\s*(?:/|per\s+)\s*(?P<unit>[A-Za-z0-9²³]{1,12}))?",
     re.I,
@@ -233,7 +238,7 @@ async def _from_price_lists(
     for url in price_list_sources():
         try:
             raw = await fetch_price_list(url)
-        except Exception as exc:  # site down / blocked / timed out — try next
+        except Exception as exc:  # site down / blocked / timed out - try next
             logger.info("Online price list %s unavailable: %s", source_host(url), exc)
             continue
 
@@ -242,7 +247,7 @@ async def _from_price_lists(
             continue
 
         # A published price list is already a current market figure, so no city
-        # multiplier is invented on top of it — the city is recorded instead.
+        # multiplier is invented on top of it - the city is recorded instead.
         return _payload(
             row["price"],
             unit,
@@ -326,7 +331,7 @@ async def _from_web_search(
     line_unit = normalize_unit(unit)
     if normalize_unit(result.get("unit")) != line_unit:
         logger.info(
-            "Online search for '%s' returned unit %r, not %r — rejected",
+            "Online search for '%s' returned unit %r, not %r - rejected",
             description, result.get("unit"), unit,
         )
         return None
@@ -429,7 +434,7 @@ async def search_online_price(
 
     Called ONLY after the product catalogue and material_rates missed. Returns
     None for any failure or when the figure cannot be tied to the line's selling
-    unit — the caller then continues down the chain, so a BOQ always totals.
+    unit - the caller then continues down the chain, so a BOQ always totals.
     """
     if not settings.ONLINE_PRICE_SEARCH_ENABLED:
         return None

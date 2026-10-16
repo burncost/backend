@@ -121,7 +121,7 @@ async def get_product(
         vendor_email = user.email
         vendor_location = profile.location if profile and profile.location else f"{vendor.city}, {vendor.state}"
     else:
-        # No vendor found for this product — treat as unavailable publicly.
+        # No vendor found for this product - treat as unavailable publicly.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Product not found"

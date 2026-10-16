@@ -39,7 +39,7 @@ def _cap_price_lookups(tool_calls) -> Tuple[list, List[str]]:
 
     The system prompt asks the model for one price lookup per turn, but a thinking
     model still fanned out into ~5 parallel lookups in a single turn, and each of
-    those renders its own line and card — so the reply described products the
+    those renders its own line and card - so the reply described products the
     shopper never asked about. Extras are dropped before they run (and before they
     are written to history, so every function_call we keep still gets a response).
     """
@@ -573,7 +573,7 @@ def _strip_markdown(text: str) -> str:
 
 # Completion claims that must never reach the shopper without a backing tool
 # result. The model occasionally asserts "10 ... have been added to your cart"
-# without calling add_to_cart — which also bypasses the minimum-order guard.
+# without calling add_to_cart - which also bypasses the minimum-order guard.
 _CART_CLAIM_MARKERS = (
     "added to your cart",
     "added to cart",
@@ -581,7 +581,7 @@ _CART_CLAIM_MARKERS = (
     "have been added",
     "has been added",
     "added it to your cart",
-    # Guest/device-cart confirmation wording — the app's primary add phrasing.
+    # Guest/device-cart confirmation wording - the app's primary add phrasing.
     "saved to your cart",
     "saved to cart",
     "been saved to",
@@ -595,7 +595,7 @@ _CART_CLAIM_MARKERS = (
 )
 # Denials that neutralise a completion phrase, e.g. "nothing has been saved to
 # your cart yet" or "I couldn't add the cement". Without these an honest refusal
-# containing "saved to your cart" would be mistaken for a false claim — and the
+# containing "saved to your cart" would be mistaken for a false claim - and the
 # corrective nudge would then push the model to add something it should refuse.
 _CART_DENIAL_MARKERS = (
     "not been added",
@@ -644,7 +644,7 @@ def _has_cart_tool_result(tool_results: List[dict]) -> bool:
     return any((tr.get("tool") in _CART_TOOLS) for tr in tool_results or [])
 
 
-# Explicit "<number> <order unit>" clauses — each one is a separate item in a cart
+# Explicit "<number> <order unit>" clauses - each one is a separate item in a cart
 # request ("21 bags of 12mm rods ... and 10 bags of cement"). Deliberately
 # conservative in BOTH directions:
 #   - prose without a quantity ("add cement to my cart") counts as 0;
@@ -672,9 +672,9 @@ def _requested_add_target_count(text: str) -> int:
 
 # System prompt
 
-SYSTEM_PROMPT = """You are Burncost AI — a Nigerian construction project manager with 15+ years experience in building materials procurement across Lagos, Abuja, and Port Harcourt. You work for Burncost, a Nigerian construction materials marketplace.
+SYSTEM_PROMPT = """You are Burncost AI - a Nigerian construction project manager with 15+ years experience in building materials procurement across Lagos, Abuja, and Port Harcourt. You work for Burncost, a Nigerian construction materials marketplace.
 
-BREVITY (HIGHEST PRIORITY — overrides all other guidance):
+BREVITY (HIGHEST PRIORITY - overrides all other guidance):
 - Replies must be plain text with no markdown. Never use asterisks (* or **),
   underscores for emphasis, backticks, or "#" headings.
 - Never start a line with "* ". For lists use plain numbered lines ("1.", "2.")
@@ -717,28 +717,28 @@ GENERAL RESPONSE POLICY:
    c. Then say: "I've notified our vendors about this. You'll get quotations once available."
    d. Only use this fallback after a search_products call returns zero results; if results exist, present them with price, brand, and unit.
 3. When showing products, ALWAYS include: name, price, brand, why it's a good fit, plus the MARKETER (the supplier's business name, e.g. "Raintech Constructions") and the MARKET (the supplier's market/location, e.g. "Dei-Dei market, Abuja"). Use the marketer and market returned by the tools; if a field is blank, say so rather than inventing one.
-3b. MINIMUM ORDER RULE: if the user asks for a quantity below a product's minimum order quantity (MOQ), say clearly that you can't add that count and state the exact minimum, e.g. "Can't add 2 lengths — the minimum order is 10 lengths." Never add a sub-minimum quantity.
+3b. MINIMUM ORDER RULE: if the user asks for a quantity below a product's minimum order quantity (MOQ), say clearly that you can't add that count and state the exact minimum, e.g. "Can't add 2 lengths - the minimum order is 10 lengths." Never add a sub-minimum quantity.
 3c. CHEAPEST PRICE: when the user asks for the cheapest price of a specific product, call get_cheapest_price. The unit rate is the headline; the MOQ-inclusive total (minimum order + shipping) is separate and must never be presented as the price of one item.
-3c-bis. CATEGORY FILTERS: a search result that reports "relaxed_category_from" means the exact category the shopper named had no matches, so you broadened to related categories. Say so plainly (e.g. "nothing under Roofing Systems — here is what I found nearby") instead of presenting the results as if they were in that category.
-3d. CART CONFIRMATION: you MUST call add_to_cart before saying anything was added to the cart, and you must never say the cart changed without a confirming tool result. Only state that an item is in the shopper's cart when the tool result says success true, or `staged` true for a guest/device cart. For a staged add, say it is saved to their cart on this device and that they can proceed to checkout — signing in merges it into their account. If the tool refuses the quantity because it is below the minimum order quantity, tell the shopper that exact minimum; never pretend the add succeeded. Never claim an order has been placed; checkout always requires an account.
-3e. MULTI-ITEM CART RULE: when the shopper asks for more than one item, you must handle EVERY item — call search_products as needed and then add_to_cart once per item. Never add only some of them, and never stay silent about an item the shopper asked for: for each item say whether it was added or, if it was refused, why (e.g. below the minimum order). If an item is ambiguous (several matching products or brands), ask the shopper which one they mean instead of dropping it. Use the product's real unit of measure (reinforcement rods are sold per length, cement per bag); if the shopper used the wrong unit, add the quantity they asked for and mention the correct unit.
+3c-bis. CATEGORY FILTERS: a search result that reports "relaxed_category_from" means the exact category the shopper named had no matches, so you broadened to related categories. Say so plainly (e.g. "nothing under Roofing Systems - here is what I found nearby") instead of presenting the results as if they were in that category.
+3d. CART CONFIRMATION: you MUST call add_to_cart before saying anything was added to the cart, and you must never say the cart changed without a confirming tool result. Only state that an item is in the shopper's cart when the tool result says success true, or `staged` true for a guest/device cart. For a staged add, say it is saved to their cart on this device and that they can proceed to checkout - signing in merges it into their account. If the tool refuses the quantity because it is below the minimum order quantity, tell the shopper that exact minimum; never pretend the add succeeded. Never claim an order has been placed; checkout always requires an account.
+3e. MULTI-ITEM CART RULE: when the shopper asks for more than one item, you must handle EVERY item - call search_products as needed and then add_to_cart once per item. Never add only some of them, and never stay silent about an item the shopper asked for: for each item say whether it was added or, if it was refused, why (e.g. below the minimum order). If an item is ambiguous (several matching products or brands), ask the shopper which one they mean instead of dropping it. Use the product's real unit of measure (reinforcement rods are sold per length, cement per bag); if the shopper used the wrong unit, add the quantity they asked for and mention the correct unit.
 4. After presenting a product, naturally nudge toward action: "Want me to add this to your cart?" or "I can help you place an order."
-5. Use 90% proper English. Only use Pidgin once per conversation at the persuasion moment — e.g. "Oga, this one na the best price for 12mm iron rods for this week."
+5. Use 90% proper English. Only use Pidgin once per conversation at the persuasion moment - e.g. "Oga, this one na the best price for 12mm iron rods for this week."
 6. Prices are in Nigerian Naira (₦).
 7. If the user asks to create a BOQ, generate a quote, or place an order without an account, tell them to sign up and include a signup action.
-8. NON-NEGOTIABLE PRICE RULE: Never state a current market price unless it came from a tool result (compare_prices, get_price_range, get_price_history, or a verified DB price). Never invent or estimate a price from your own knowledge. If no verified price was returned, say exactly: "BurnCost does not currently have a verified price for this item in this location. I've notified our vendors — you'll get a quotation once available."
+8. NON-NEGOTIABLE PRICE RULE: Never state a current market price unless it came from a tool result (compare_prices, get_price_range, get_price_history, or a verified DB price). Never invent or estimate a price from your own knowledge. If no verified price was returned, say exactly: "BurnCost does not currently have a verified price for this item in this location. I've notified our vendors - you'll get a quotation once available."
 9. APPROVAL RULE: Never execute an order or place a purchase without the user's explicit, unambiguous confirmation. Always show the full itemized total and ask "Shall I proceed with this order?" before executing. You may only execute after the user confirms.
-10. DOMAIN GUARD: You are exclusively a construction and building-materials assistant. If the user asks about anything unrelated to construction, building materials, pricing, or project advice, do not engage. Respond with a polite redirect: "I specialize in construction and building materials procurement. I can help you with materials, pricing, BOQs, suppliers, and project advice — how can I assist with your project?"
+10. DOMAIN GUARD: You are exclusively a construction and building-materials assistant. If the user asks about anything unrelated to construction, building materials, pricing, or project advice, do not engage. Respond with a polite redirect: "I specialize in construction and building materials procurement. I can help you with materials, pricing, BOQs, suppliers, and project advice - how can I assist with your project?"
 11. CROSS-LOCATION RULE: If a tool returns offers for a different state/city than the user's (other_location is true), you may quote that verified price, but you MUST name its location explicitly (e.g. "verified FCT/Abuja rate of ₦11,500 per sheet") and make clear it is not a local price. Never present another location's price as the user's local price.
-12. TOOL USAGE RULE: Pass a plain product name to search_products and get_cheapest_price (e.g. "cement", "stone-coated roofing sheet"). Do NOT pass brand + grade + material combinations ("Dangote OPC cement") — pass the material and, if the user named a brand, that brand alone. Do not invent category names — an incorrect category returns zero results. If a search returns nothing, retry with a simpler product name before using the "no verified price" message.
-13. BROADENED-SEARCH RULE: when a tool result carries `relaxed_from`, the exact item was not found and the results are the closest alternatives. Say so plainly, then present the alternatives — for each one name the product, its price, the MARKETER (supplier) and the MARKET/location. Never say "we don't have it" or "no price available" while alternatives exist, and always name the alternative brand you are offering instead (e.g. "We don't stock Lafarge, but BUA and Dangote cement are available").
-14. ONE LOOKUP PER TURN: a price question gets at most ONE price lookup (get_cheapest_price or search_products) per turn. When the user asks about several brands or several items at once, look the material up ONCE (e.g. "cement") and answer from that single result — never fire one lookup per brand or per item. Repeat lookups return near-identical listings, waste tokens, and each one must never be presented as a separate answer: give ONE answer covering what the user asked, and say plainly which of the brands/items you do and do not stock.
+12. TOOL USAGE RULE: Pass a plain product name to search_products and get_cheapest_price (e.g. "cement", "stone-coated roofing sheet"). Do NOT pass brand + grade + material combinations ("Dangote OPC cement") - pass the material and, if the user named a brand, that brand alone. Do not invent category names - an incorrect category returns zero results. If a search returns nothing, retry with a simpler product name before using the "no verified price" message.
+13. BROADENED-SEARCH RULE: when a tool result carries `relaxed_from`, the exact item was not found and the results are the closest alternatives. Say so plainly, then present the alternatives - for each one name the product, its price, the MARKETER (supplier) and the MARKET/location. Never say "we don't have it" or "no price available" while alternatives exist, and always name the alternative brand you are offering instead (e.g. "We don't stock Lafarge, but BUA and Dangote cement are available").
+14. ONE LOOKUP PER TURN: a price question gets at most ONE price lookup (get_cheapest_price or search_products) per turn. When the user asks about several brands or several items at once, look the material up ONCE (e.g. "cement") and answer from that single result - never fire one lookup per brand or per item. Repeat lookups return near-identical listings, waste tokens, and each one must never be presented as a separate answer: give ONE answer covering what the user asked, and say plainly which of the brands/items you do and do not stock.
 
 GREETING RULES:
 - Greetings ("hi", "hello", "good morning") get one short friendly line that also
   offers help, e.g. "Hello! How can I help with your project today?". Thanks and
   pleasantries get a one-line acknowledgement.
-- Never answer a greeting with the DOMAIN GUARD redirect — the guard is only for
+- Never answer a greeting with the DOMAIN GUARD redirect - the guard is only for
   genuinely off-topic requests (news, entertainment, unrelated advice).
 - Greet the user only on the first message of a conversation.
 - Use a simple greeting such as "Hello!" or "Welcome!".
@@ -761,7 +761,7 @@ CONSTRUCTION ADVICE GUIDELINES:
   5. End with a specific next step or offer to search for relevant materials
 - Example: If asked about roofing, advise on roofing sheet types (stone-coated, aluminum, long-span), insulation needs, typical roof pitch, and material trade-offs
 - Example: If asked about foundation, advise on soil test importance, strip footing vs raft foundation, concrete mix ratios, and reinforcement requirements
-- These examples illustrate expected style ONLY — never answer an example unless the user actually asks about it."""
+- These examples illustrate expected style ONLY - never answer an example unless the user actually asks about it."""
 
 
 GUEST_SYSTEM_PROMPT = SYSTEM_PROMPT + """
@@ -979,7 +979,7 @@ class ToolExecutor:
         # Literal search first (precision); only broaden when it finds nothing.
         # A brand + spec + material phrase ("Dangote OPC cement") fails the
         # catalogue's AND-of-all-tokens match, and a colloquial term ("iron rods")
-        # never appears verbatim — both need a retry before we claim "not found".
+        # never appears verbatim - both need a retry before we claim "not found".
         if not products and filters.search:
             for alt in self._retry_terms(filters.search, await self._known_brand_tokens()):
                 alt_filters = filters.model_copy(update={"search": alt})
@@ -995,8 +995,8 @@ class ToolExecutor:
 
         # The assistant may pass a colloquial category ("roofing sheets") that no
         # single category name matches. The marketplace filter is an AND of the
-        # tokens so it can never show the wrong category, so relax to OR here —
-        # only after the strict attempt returned nothing — and report it.
+        # tokens so it can never show the wrong category, so relax to OR here -
+        # only after the strict attempt returned nothing - and report it.
         relaxed_category_from = None
         if not products and category:
             relaxed_result = await self.product_service.list_products(
@@ -1009,7 +1009,7 @@ class ToolExecutor:
                 relaxed_category_from = category
 
         # Relevance: listings NAMED for the search rank above ones that only mention
-        # it in their description/keywords — a "cement" search used to lead with
+        # it in their description/keywords - a "cement" search used to lead with
         # Tile Adhesive (a cement-based product) because the catalog sorts on price.
         # Stable sort: the catalog order inside each group is untouched and nothing
         # is hidden.
@@ -1105,11 +1105,11 @@ class ToolExecutor:
         Backed by the same product catalogue the marketplace uses (not the
         material_rates table) so every offer carries a product id the chat card
         can link to, plus the marketer (supplier business name), the market
-        location and the supplier's minimum order quantity / shipping — making
+        location and the supplier's minimum order quantity / shipping - making
         the unit rate and the MOQ-inclusive procurement total unambiguous.
 
         `only_verified=True` restricts offers to active (verified) vendors. Chat
-        leaves it False — it quotes what the shopper asked for — while a checkout
+        leaves it False - it quotes what the shopper asked for - while a checkout
         path such as the BOQ cart sets it so no suspended vendor can be billed.
         """
         from app.schemas.product import ProductFilter
@@ -1202,7 +1202,7 @@ class ToolExecutor:
             )
             if relaxed_from:
                 explanation = (
-                    f"No exact catalogue match for '{relaxed_from}' — showing closest available "
+                    f"No exact catalogue match for '{relaxed_from}' - showing closest available "
                     f"options. " + explanation
                 )
         else:
@@ -1541,7 +1541,7 @@ class ToolExecutor:
             return {
                 "success": False,
                 "error": (
-                    f"Can't add {requested} {unit}(s) of {name} — the minimum order "
+                    f"Can't add {requested} {unit}(s) of {name} - the minimum order "
                     f"quantity is {moq} {unit}(s)."
                 ),
                 "product_id": product_id,
@@ -1754,7 +1754,7 @@ class ChatService:
 
             msg = choice.message
 
-            # One price lookup per turn — see _cap_price_lookups.
+            # One price lookup per turn - see _cap_price_lookups.
             if msg.tool_calls and len(msg.tool_calls) > 1:
                 kept_calls, capped_names = _cap_price_lookups(msg.tool_calls)
                 if capped_names:
@@ -1781,7 +1781,7 @@ class ChatService:
                         if tool_results_list
                         else "I'm sorry, I didn't catch that. Could you rephrase your question?"
                     )
-                # A cart/order claim must be backed by the matching tool result —
+                # A cart/order claim must be backed by the matching tool result -
                 # otherwise the model has "confirmed" a change it never made and
                 # silently bypassed the minimum-order guard. Give it one chance to
                 # call the tool, then refuse to forward the unbacked claim.
@@ -1799,7 +1799,7 @@ class ChatService:
                                 "from the cart and no order exists. Call add_to_cart now with the "
                                 "product_id and the exact quantity the shopper asked for. If the "
                                 "quantity is below the product's minimum order quantity the tool "
-                                "will refuse it — then tell the shopper that minimum. Never say "
+                                "will refuse it - then tell the shopper that minimum. Never say "
                                 "the cart changed until a tool result confirms it."
                             ),
                         })
@@ -1807,7 +1807,7 @@ class ChatService:
 
                     logger.warning("Cart claim still unbacked after retry; replacing the reply")
                     reply_text = (
-                        "I haven't changed your cart yet — I won't confirm something I haven't "
+                        "I haven't changed your cart yet - I won't confirm something I haven't "
                         "done. Tell me the item and the quantity you want (for example \"add 20 "
                         "lengths of 12mm reinforcement rod\") and I'll add it and confirm."
                     )
@@ -1842,7 +1842,7 @@ class ChatService:
                         "role": "system",
                         "content": (
                             f"Your {len(failed_cart_writes)} cart call(s) did NOT take effect "
-                            f"({reasons}). That item is not in the cart — tell the shopper it was "
+                            f"({reasons}). That item is not in the cart - tell the shopper it was "
                             "not added and why. If the reason is a minimum order quantity, state "
                             "that exact minimum. Never claim an item was added unless the tool "
                             "result reports success true or staged true."
@@ -1876,14 +1876,14 @@ class ChatService:
                         "content": (
                             f"The shopper listed {target_count} items to add, but only "
                             f"{len(add_results)} were handled. Call add_to_cart again for EVERY "
-                            "remaining item (do not re-add the ones already confirmed) — "
+                            "remaining item (do not re-add the ones already confirmed) - "
                             "search_products first if you need its product_id. Use the product's "
                             "real unit of measure and the quantity the shopper asked for; for any "
                             "item whose quantity is below its minimum order quantity, do NOT add "
                             "it and state that minimum instead. If an item is ambiguous (several "
                             "matching products), ask the shopper which one they mean rather than "
                             "dropping it. Then confirm each item that was added and each item that "
-                            "was not — never stay silent about an item the shopper asked for."
+                            "was not - never stay silent about an item the shopper asked for."
                         ),
                     })
                     continue
@@ -1902,7 +1902,7 @@ class ChatService:
                 )
 
             # Process tool calls. Gemini requires the model turn that carries the
-            # function_call to precede its function_response — the inverted order
+            # function_call to precede its function_response - the inverted order
             # made Gemini return EMPTY text and poisoned the stored history.
             assistant_msg = {"role": "assistant", "content": msg.content, "tool_calls": []}
             text_signature = getattr(msg, "text_signature", None)
@@ -1976,7 +1976,7 @@ class ChatService:
 
         Captures intent, tool, args, result, price_source, quantity_source and
         confidence so every AI/tool interaction is auditable (Phase 10 too).
-        Never raises — logging failure must not break the chat flow.
+        Never raises - logging failure must not break the chat flow.
         """
         try:
             from app.services.ai_agent_log_service import AIAgentLogService
@@ -2083,7 +2083,7 @@ class ChatService:
         line = f"• {offer.get('product_name') or 'Listing'}"
         rate = offer.get("rate")
         if isinstance(rate, (int, float)):
-            line += f" — ₦{rate:,.0f} per {offer.get('unit') or 'unit'}"
+            line += f" - ₦{rate:,.0f} per {offer.get('unit') or 'unit'}"
         where = offer.get("market") or offer.get("city")
         if where:
             line += f" at {where}"
@@ -2094,7 +2094,7 @@ class ChatService:
         """Plain "here is what I found" summary built only from tool results.
 
         Used when the AI call failed, so every line is taken verbatim from a
-        tool result — no price is ever invented, and the shopper still gets an
+        tool result - no price is ever invented, and the shopper still gets an
         answer. Returns None when there is nothing worth showing.
         """
         try:
@@ -2113,7 +2113,7 @@ class ChatService:
                         price_hits.append((result, offers))
                         continue
                 # A tool that found nothing still explains why (no catalogue
-                # match, thin data) — echoing that beats a bare apology.
+                # match, thin data) - echoing that beats a bare apology.
                 if result.get("explanation"):
                     other_lines.append(f"• {str(result['explanation'])[:300]}")
                     continue
@@ -2122,7 +2122,7 @@ class ChatService:
                 if result.get("message"):
                     other_lines.append(f"• {str(result['message'])[:300]}")
 
-            # Exactly ONE price answer — the most exact lookup of the turn, which
+            # Exactly ONE price answer - the most exact lookup of the turn, which
             # is also the card _build_cards keeps. Listing every fanned-out lookup
             # here is what made this text describe products the cards never
             # showed.
@@ -2142,7 +2142,7 @@ class ChatService:
                 return None
             lines = lines[:10]
             lines.append(
-                "I couldn't finish writing that up just now — ask me again if you'd "
+                "I couldn't finish writing that up just now - ask me again if you'd "
                 "like the full breakdown."
             )
             return "\n".join(lines)
@@ -2215,7 +2215,7 @@ class ChatService:
                     data={"tool": tool, "description": result.get("description"),
                           "city": result.get("city"),
                           "source": result.get("source"),
-                          # Left blank unless our own database asserted it — a
+                          # Left blank unless our own database asserted it - a
                           # negative flag is never shipped to the client.
                           "verified": result.get("verified"),
                           "insufficient_data": result.get("insufficient_data", False),
@@ -2325,7 +2325,7 @@ class ChatService:
 
         # One card per card type per turn: a model that fans out into several
         # lookups (e.g. one per brand) must not stack near-identical cards in
-        # the transcript. The most exact match wins — a lookup that hit the
+        # the transcript. The most exact match wins - a lookup that hit the
         # query outright beats a broadened/relaxed one or an estimate; equal
         # results keep the first, which is what the reply answers from.
         best_by_type: Dict[str, ChatCard] = {}
@@ -2358,7 +2358,7 @@ class ChatService:
     def _card_exactness(card: ChatCard) -> Tuple[int, int, int]:
         """Rank a card by how exactly its lookup matched what was asked.
 
-        Same ordering as _price_exactness — the card payload carries the same
+        Same ordering as _price_exactness - the card payload carries the same
         matched_query / relaxed_from / insufficient_data fields the tool returned.
         """
         return ChatService._price_exactness(card.data or {})
@@ -2367,7 +2367,7 @@ class ChatService:
     def _product_candidates(tool_results: List[dict]) -> List[dict]:
         """Collect addable products (id, name, quantity, moq) from tool results.
 
-        Quantity stays 1 for catalogue listings — a product's `quantity` field is
+        Quantity stays 1 for catalogue listings - a product's `quantity` field is
         stock, not the buyer's requested count. Only an explicit add_to_cart
         result carries the count the user actually asked for.
         """
@@ -2427,7 +2427,7 @@ class ChatService:
         cart_intent = (ai_wants_cart or user_wants_cart) and bool(candidates)
 
         # The model may already have executed the add (signed-in carts are written
-        # server-side), so never offer a second add — offer checkout instead.
+        # server-side), so never offer a second add - offer checkout instead.
         already_added = any(
             tr.get("tool") == "add_to_cart" and (tr.get("result") or {}).get("success") is True
             for tr in tool_results
@@ -2438,7 +2438,7 @@ class ChatService:
         # keyword matching ("alright add the 20" matches none of them), so it is
         # driven straight from the tool result. One action PER item: a multi-item
         # request stages several lines in one turn, and `next(...)` used to keep
-        # only the first — silently dropping every other item the model added.
+        # only the first - silently dropping every other item the model added.
         staged_adds: List[dict] = []
         for tr in tool_results:
             res = tr.get("result") or {}
@@ -2460,7 +2460,7 @@ class ChatService:
         ])
         checkout_intent = any(kw in lower_user for kw in ["checkout", "place order", "proceed with the order"])
 
-        # 1. Add to Cart — carries the requested quantity + minimum so the client
+        # 1. Add to Cart - carries the requested quantity + minimum so the client
         #    can refuse a sub-minimum add and quote the exact minimum. Also emitted
         #    whenever guest adds are staged (see `staged_adds` above).
         if (cart_intent or staged_adds) and not already_added:
@@ -2495,14 +2495,14 @@ class ChatService:
                     data=action_data,
                 ))
 
-        # 2. Checkout — anonymous shoppers land on the guest cart.
+        # 2. Checkout - anonymous shoppers land on the guest cart.
         confirmed = any(kw in lower_user for kw in ["yes", "add it", "go ahead", "sure"]) or checkout_intent
         mentions_cart_flow = any(kw in lower_reply for kw in ["cart", "order", "checkout"])
         if (confirmed or ai_suggests_action) and (mentions_cart_flow or checkout_intent):
             if not any(a.type == "checkout" for a in actions):
                 actions.append(ActionButton(label="Proceed to Checkout", type="checkout", data={}))
 
-        # Already added server-side — offer the cart instead of another add.
+        # Already added server-side - offer the cart instead of another add.
         if already_added and not any(a.type == "checkout" for a in actions):
             actions.append(ActionButton(label="View Cart", type="checkout", data={}))
 
@@ -2519,7 +2519,7 @@ class ChatService:
                     data={"redirect": "/auth/choose-role"},
                 ))
 
-        # 4. View results — a product-level link when we have one, else the
+        # 4. View results - a product-level link when we have one, else the
         #    marketplace catalogue.
         if tool_results:
             has_results = bool(candidates) or any(

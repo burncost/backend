@@ -93,7 +93,7 @@ async def admin_payout_run(
     payload: dict,
     db: AsyncSession = Depends(get_db),
 ):
-    """Attempt payouts for a gateway — never fires unless flag+keys are configured.
+    """Attempt payouts for a gateway - never fires unless flag+keys are configured.
 
     Omitting ``gateway`` uses the admin-configured primary (Paystack) and falls
     back to the backup (Monnify) when the primary is unconfigured.

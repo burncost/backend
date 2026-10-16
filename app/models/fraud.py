@@ -1,5 +1,5 @@
 """
-Fraud detection models — power the Fraud Detection admin pages (Phase 3).
+Fraud detection models - power the Fraud Detection admin pages (Phase 3).
 """
 from sqlalchemy import (
     Column, String, DateTime, Numeric, Integer, Boolean, ForeignKey, Text, Index

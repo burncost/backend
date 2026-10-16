@@ -1,5 +1,5 @@
 """
-Disputes & Refunds models — power the Dispute Resolution admin pages (Phase 5).
+Disputes & Refunds models - power the Dispute Resolution admin pages (Phase 5).
 """
 from sqlalchemy import Column, String, DateTime, Numeric, Boolean, ForeignKey, Text, Index
 from sqlalchemy.dialects.postgresql import UUID

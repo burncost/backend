@@ -2,12 +2,12 @@
 
 Additive migration only (no existing column/table is dropped or changed):
 
-* `negotiations.agreed_price/agreed_at/agreed_by` — the two-party agreed
+* `negotiations.agreed_price/agreed_at/agreed_by` - the two-party agreed
   absolute per-unit final price, set when the counterparty accepts a proposal.
   Checkout auto-applies it as the unit price for the agreeing builder only.
-* `negotiation_counter_offers.final_price` — optional absolute per-unit price
+* `negotiation_counter_offers.final_price` - optional absolute per-unit price
   proposed alongside the existing discount percentage.
-* `product_favorites` — per-user saved products; guests use localStorage and
+* `product_favorites` - per-user saved products; guests use localStorage and
   replay to the API on sign-in (mirrors the guest-cart flow).
 
 Revision ID: 20261011_negotiation_final_price

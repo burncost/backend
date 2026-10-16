@@ -1,4 +1,4 @@
-"""Vendor settlement ledger (Phase 5 — Settlement & Disbursement, increment 1).
+"""Vendor settlement ledger (Phase 5 - Settlement & Disbursement, increment 1).
 
 A per-vendor, per-delivery accounting row tracking what Burncost *should* settle
 to a vendor and why. This is the idempotent data foundation the payout runner

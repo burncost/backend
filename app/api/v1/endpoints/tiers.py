@@ -129,7 +129,7 @@ async def upgrade_vendor_tier(
 
     Identity verification (Mono):
     - NIN: bypassed until IDENTITY_VERIFY_ENABLED=True (instant auto-verify).
-    - CAC: enforced — business name must match and status must be "active".
+    - CAC: enforced - business name must match and status must be "active".
     """
     target = normalize_tier((payload.get("tier_code") or "").strip())
     nin = (payload.get("nin") or "").strip()
@@ -219,7 +219,7 @@ async def upgrade_vendor_tier(
             )
         vend.cac_business_registration_number = cac
 
-    # Save personal details (DOB + names) on the user profile — needed for Mono
+    # Save personal details (DOB + names) on the user profile - needed for Mono
     # NIN name/DOB matching and kept for manual admin review.
     profile = (await db.execute(
         select(UserProfile).where(UserProfile.user_id == current_user.id)
@@ -258,7 +258,7 @@ async def upgrade_vendor_tier(
                 )
 
     if target == "enterprise":
-        # ---- Mono CAC verification (ENFORCED — no bypass) ----
+        # ---- Mono CAC verification (ENFORCED - no bypass) ----
         from app.config import settings
         from app.services import mono_identity_service as mono
         if settings.MONO_SECRET_KEY:
@@ -285,7 +285,7 @@ async def upgrade_vendor_tier(
         review_status="pending",
     ))
 
-    # Auto-approve: instant tier bump (monotonic — never downgrade).
+    # Auto-approve: instant tier bump (monotonic - never downgrade).
     from app.services.vendor_tier_service import tier_index
     current_rank = tier_index(vend.verification_tier)
     if tier_index(target) >= current_rank:

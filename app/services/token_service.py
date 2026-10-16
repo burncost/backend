@@ -1,5 +1,5 @@
 """
-Token Service — manages user token balance, consumption, and purchases.
+Token Service - manages user token balance, consumption, and purchases.
 """
 from typing import Optional, Dict, Any, List
 import logging
@@ -37,7 +37,7 @@ TOKEN_COSTS: Dict[str, int] = {
     "export_docx": 0.5,
     "export_csv": 0.5,
     "boq_regenerate": 1,
-    # Phase 4/8 — AI procurement intelligence operations
+    # Phase 4/8 - AI procurement intelligence operations
     "drawing_analysis": 1,
     "quotation_analysis": 1,
     "supplier_optimisation": 2,
@@ -315,13 +315,13 @@ class TokenService:
         """Credit the tokens quoted for `reference` once its payment is confirmed.
 
         Callers (the Flutterwave webhook, the return-trip verification endpoint) only
-        ever report that a payment succeeded — quantity, price and owning user come
+        ever report that a payment succeeded - quantity, price and owning user come
         from the pending row written by `initiate_purchase`, so a forged callback can
         never mint tokens. Idempotent: the row is claimed with a conditional UPDATE in
         the same transaction that adds the balance, so a repeated webhook (or a webhook
         racing the buyer's return trip) credits exactly once.
 
-        Returns {"status": ...} — one of:
+        Returns {"status": ...} - one of:
           credited | already_credited | not_found | forbidden | tokens_mismatch | amount_mismatch
         """
         purchase = (await self.db.execute(
@@ -359,7 +359,7 @@ class TokenService:
         # May insert the usage row (commits internally); nothing else is pending yet.
         usage = await self.get_or_create_usage(owner_id)
 
-        # Atomic claim — a second caller (webhook vs. return trip) gets rowcount 0.
+        # Atomic claim - a second caller (webhook vs. return trip) gets rowcount 0.
         claimed = await self.db.execute(
             update(TokenPurchase)
             .where(TokenPurchase.id == purchase.id, TokenPurchase.status != PURCHASE_COMPLETED)

@@ -12,7 +12,7 @@ Both are kept valid, so existing data is untouched.
 
 The constraints only exist on databases created from ``sql/create_all_tables.sql``
 (plain Alembic-built databases never created them), so the migration drops them
-with ``IF EXISTS`` and re-adds them — a no-op on the latter. Legacy uppercase
+with ``IF EXISTS`` and re-adds them - a no-op on the latter. Legacy uppercase
 values are normalized first, mirroring ``sql/fix_legacy_enum_values.sql``, so a
 dirty row cannot make the ADD CONSTRAINT fail.
 

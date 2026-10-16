@@ -37,7 +37,7 @@ PREFERRED_VENDOR_RATING = 3.5
 OFFERS_PER_LINE = 8
 ALTERNATES_PER_LINE = 3
 
-# Element groups that are not materials — nothing to put in a cart.
+# Element groups that are not materials - nothing to put in a cart.
 _NON_MATERIAL_ELEMENTS = ("preliminar",)
 
 # Work/allowance wording: a rate for doing the work, not a product to buy.
@@ -123,7 +123,7 @@ class BOQCartService:
             )
         if unmatched:
             notes.append(
-                f"{len(unmatched)} line(s) had no verified in-stock vendor — review "
+                f"{len(unmatched)} line(s) had no verified in-stock vendor - review "
                 "them before checkout."
             )
         if skipped:
@@ -170,7 +170,7 @@ class BOQCartService:
 
         description = (item["description"] or "").lower()
         if _PROVISIONAL_SUM_HINT.search(description):
-            return "provisional sum / allowance — carried, not bought"
+            return "provisional sum / allowance - carried, not bought"
         for hint in _NON_MATERIAL_HINTS:
             if hint in description:
                 return f"not a material line ({hint})"
@@ -202,7 +202,7 @@ class BOQCartService:
         Walling is the documented exception: the bill measures the wall in m²
         while the catalogue sells blocks by number, using the same 9.9 blocks/m²
         face factor the rate matching already applies. A mismatch is never
-        guessed — the line is reported for review instead.
+        guessed - the line is reported for review instead.
         """
         if not offer_unit or bill_unit == offer_unit:
             return 1.0
@@ -267,7 +267,7 @@ class BOQCartService:
 
         if not candidates:
             if unit_mismatch:
-                return None, "catalogue sells this in a different unit — check by hand"
+                return None, "catalogue sells this in a different unit - check by hand"
             if out_of_stock:
                 return None, "verified vendors are out of stock for the required quantity"
             if inactive:
@@ -286,7 +286,7 @@ class BOQCartService:
         reasons: List[str] = []
         if float(chosen.get("rating") or 0) < PREFERRED_VENDOR_RATING:
             reasons.append(
-                f"no {PREFERRED_VENDOR_RATING}+ rated supplier for this line — the "
+                f"no {PREFERRED_VENDOR_RATING}+ rated supplier for this line - the "
                 "cheapest in-stock verified offer was used"
             )
         if chosen["raised_to_minimum"]:
@@ -298,7 +298,7 @@ class BOQCartService:
             reasons.append("vendor listing is not badge-verified")
         if found.get("relaxed_from"):
             reasons.append(
-                f"no exact catalogue match for '{found['relaxed_from']}' — closest "
+                f"no exact catalogue match for '{found['relaxed_from']}' - closest "
                 "available option"
             )
 

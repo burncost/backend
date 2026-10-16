@@ -1,5 +1,5 @@
 """
-Shipping Service — zone + weight hybrid calculation.
+Shipping Service - zone + weight hybrid calculation.
 Formula:
     zone = resolve_zone(vendor_origin, customer_destination)
     base_rate = zone.base_rate (or vendor override)

@@ -1,4 +1,4 @@
-"""add payment_captures table (Phase 5 — gateway capture persistence).
+"""add payment_captures table (Phase 5 - gateway capture persistence).
 
 Additive migration only. Creates the new `payment_captures` table and indexes; no
 existing table is dropped/renamed/type-changed. This table is not yet written by

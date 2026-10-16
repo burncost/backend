@@ -1,4 +1,4 @@
-"""AI Service — Gemini-powered document analysis and chat."""
+"""AI Service - Gemini-powered document analysis and chat."""
 import asyncio
 import base64
 import json
@@ -216,7 +216,7 @@ class ChatAIService:
         so the existing ChatService loop works without changes.
         """
         # Convert OpenAI-style messages to Gemini contents. System messages are
-        # NOT flattened into the contents — they are delivered separately as the
+        # NOT flattened into the contents - they are delivered separately as the
         # model's native system_instruction, so the model can tell instructions
         # apart from user input.
         contents = self._messages_to_contents(messages)
@@ -300,8 +300,8 @@ class ChatAIService:
 
         Used when Gemini refuses a replayed function_call for lacking its thought
         signature: the function call and every function_response are dropped, so
-        the model still sees what was said while the unusable tool turn — and the
-        signature-less call it carries — is left out entirely.
+        the model still sees what was said while the unusable tool turn - and the
+        signature-less call it carries - is left out entirely.
         """
         trimmed: List[dict] = []
         for content in contents:
@@ -427,7 +427,7 @@ class ChatAIService:
         tool_calls = []
         # Gemini 3 signs the part that produced each function call (and its
         # reasoning text). Both are handed back to the caller so the next turn can
-        # replay them verbatim — see _encode_signature.
+        # replay them verbatim - see _encode_signature.
         text_signature = None
 
         if content and content.parts:

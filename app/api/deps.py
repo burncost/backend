@@ -249,4 +249,4 @@ async def get_current_driver_profile(
 # mixing them raises "non-default argument follows default argument".
 #
 # Also note: `app/deps.py` is a DIFFERENT module whose own `get_current_user` returns a
-# dict — always import the dependency you actually mean.
+# dict - always import the dependency you actually mean.

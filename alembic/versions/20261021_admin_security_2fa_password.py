@@ -1,6 +1,6 @@
 """admin security: password age + two-factor authentication columns.
 
-Additive migration only — nothing is dropped, renamed or retyped, and every new
+Additive migration only - nothing is dropped, renamed or retyped, and every new
 column is nullable so existing rows read back unchanged.
 
 Backs the Admin → Settings → Security switches:

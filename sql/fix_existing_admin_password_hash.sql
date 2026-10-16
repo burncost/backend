@@ -1,5 +1,5 @@
 -- =============================================================
--- BURNCOST — DEPLOYMENT FIX: repair invalid admin/vendor password hashes
+-- BURNCOST - DEPLOYMENT FIX: repair invalid admin/vendor password hashes
 --
 -- PROBLEM
 --   The seed users (3 admins + 20 vendor demo accounts) were inserted with a

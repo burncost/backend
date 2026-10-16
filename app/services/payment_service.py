@@ -35,7 +35,7 @@ class PaymentService:
     ) -> Dict[str, Any]:
         """Initialize a payment transaction.
 
-        `provider` (optional): a specific gateway the client requested —
+        `provider` (optional): a specific gateway the client requested -
         "flutterwave" | "paystack" | "monnify". When omitted the existing order is
         preserved: try Flutterwave, then Paystack, else mock. The server remains the
         amount authority regardless of any client-chosen provider.
@@ -110,7 +110,7 @@ class PaymentService:
             elif payment_type == "ussd":
                 payload["payment_options"] = "ussd"
             else:
-                # Default: card — redirect to Flutterwave checkout
+                # Default: card - redirect to Flutterwave checkout
                 payload["redirect_url"] = redirect_url or f"{settings.FRONTEND_URL}/dashboard/orders"
 
             async with httpx.AsyncClient() as client:
@@ -148,7 +148,7 @@ class PaymentService:
                     elif payment_type == "ussd":
                         result["ussd_code"] = data["data"].get("ussd_code", "")
                     else:
-                        # Card — standard redirect
+                        # Card - standard redirect
                         result["authorization_url"] = data["data"]["link"]
 
                     return result

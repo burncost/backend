@@ -308,7 +308,7 @@ async def seed_categories():
     from sqlalchemy import select, delete
 
     async with AsyncSessionLocal() as db:
-        # Clear existing categories (optional — comment out for incremental seeding)
+        # Clear existing categories (optional - comment out for incremental seeding)
         await db.execute(delete(Category))
         await db.commit()
 
@@ -325,7 +325,7 @@ async def seed_categories():
                 fee_model=cat_data.get("fee_model", "percentage"),
                 fee_fixed=cat_data.get("fee_fixed"),
                 is_active=True,
-                description=f"{cat_data['name']} — {cat_data.get('quality_metric', 'N/A') or 'N/A'}, Fee model: {cat_data['fee_model']}",
+                description=f"{cat_data['name']} - {cat_data.get('quality_metric', 'N/A') or 'N/A'}, Fee model: {cat_data['fee_model']}",
             )
             db.add(parent)
             await db.flush()

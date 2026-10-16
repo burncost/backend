@@ -193,7 +193,7 @@ async def list_payments(
 # confirmed (`Order.delivered_at` is set by BOTH the buyer confirm-delivery flow and
 # the driver mark-delivered flow).
 #
-# DISPLAY / DERIVED ONLY — this does not schedule, delay or release any transfer.
+# DISPLAY / DERIVED ONLY - this does not schedule, delay or release any transfer.
 # Escrow release still runs in the existing capture/release flow.
 PAYOUT_WINDOW_HOURS = 48
 
@@ -238,7 +238,7 @@ async def list_vendor_payments(
     )).scalars().all()
 
     # Per-order vendor share. An order can contain items from several vendors, so a
-    # row's amount must be THIS vendor's slice — not the whole order total (using the
+    # row's amount must be THIS vendor's slice - not the whole order total (using the
     # order total made rows contradict the summary and showed other vendors' money).
     share_by_order: dict = {}
     if orders:
@@ -249,7 +249,7 @@ async def list_vendor_payments(
         )).all()
         share_by_order = {row[0]: float(row[1] or 0) for row in share_rows}
 
-    # Summary across ALL of this vendor's orders — one aggregate query.
+    # Summary across ALL of this vendor's orders - one aggregate query.
     summary_rows = (await db.execute(
         select(Order.payment_status, func.sum(OrderItem.total_price))
         .select_from(OrderItem)
@@ -427,7 +427,7 @@ async def process_payment(
             detail="Order has already been paid"
         )
 
-    # Phase 11: NEVER trust a client-supplied amount — the server total is
+    # Phase 11: NEVER trust a client-supplied amount - the server total is
     # the single source of truth (payment manipulation protection).
     # A client-supplied amount that disagrees with the DB total is a fraud
     # signal and is flagged, not honoured.
@@ -666,7 +666,7 @@ async def flutterwave_webhook(
     import hashlib
     import json
 
-    # Phase 11: fail-closed signature verification — reject when the secret is
+    # Phase 11: fail-closed signature verification - reject when the secret is
     # unset or the signature is absent/invalid (never process an unverified webhook).
     payload_bytes = await request.body()
     signature = request.headers.get("verif-hash", "")
@@ -711,7 +711,7 @@ async def flutterwave_webhook(
                 if not order:
                     return {"status": "ok"}
 
-                # Phase 11: reconcile gateway amount vs DB order total — never
+                # Phase 11: reconcile gateway amount vs DB order total - never
                 # confirm a mismatched amount (payment manipulation protection).
                 gateway_amount = float(data.get("amount") or 0)
                 order_amount = float(order.total_amount)
@@ -771,7 +771,7 @@ def _verify_monnify_signature(payload_bytes: bytes, header_sig: str) -> bool:
     return hmac.compare_digest(expected, cleaned)
 
 
-### Monnify webhook (Phase 5) — plug-and-play; verify with test keys on staging.
+### Monnify webhook (Phase 5) - plug-and-play; verify with test keys on staging.
 @router.post("/webhook/monnify")
 async def monnify_webhook(
     request: Request,
@@ -859,7 +859,7 @@ async def paystack_webhook(
     import hashlib
     import json
 
-    # Phase 11: fail-closed signature verification — never process an unverified webhook.
+    # Phase 11: fail-closed signature verification - never process an unverified webhook.
     payload_bytes = await request.body()
     signature = request.headers.get("x-paystack-signature", "")
     secret = settings.PAYSTACK_SECRET_KEY
@@ -898,7 +898,7 @@ async def paystack_webhook(
                 if not order:
                     return {"status": "ok"}
 
-                # Phase 11: reconcile gateway amount vs DB order total — never
+                # Phase 11: reconcile gateway amount vs DB order total - never
                 # confirm a mismatched amount (payment manipulation protection).
                 gateway_amount = float(data.get("amount") or 0) / 100.0  # Paystack returns kobo
                 order_amount = float(order.total_amount)

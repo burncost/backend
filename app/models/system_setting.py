@@ -1,4 +1,4 @@
-"""System settings model — key-value store for admin configurable settings (Phase 6)."""
+"""System settings model - key-value store for admin configurable settings (Phase 6)."""
 from sqlalchemy import Column, String, Text, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime

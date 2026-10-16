@@ -27,10 +27,18 @@ from app.models.address import CustomerAddress
 from app.models.negotiation import Negotiation
 # Reuse the single source of truth for the no-GPS buyer receipt-confirmation gate
 # (same rule the delivery engine serialises to the buyer UI).
-from app.api.v1.endpoints.deliveries import _buyer_confirm_hint, _can_buyer_confirm
+from app.api.v1.endpoints.deliveries import (
+    _buyer_confirm_hint,
+    _can_buyer_confirm,
+    _credit_driver_earnings,
+)
 from app.core.database import get_db
 from app.services.notification_service import NotificationService
 from app.services.shipping_service import ShippingService
+# Used by the escrow release below. Was referenced without being imported, so the
+# transfer raised NameError and was swallowed by the function's broad `except`
+# (the payout silently never happened).
+from app.services.payment_service import PaymentService
 from app.models.category import Category
 from app.services import pricing_service as _pricing
 from app.services import runtime_settings as _runtime_settings
@@ -383,7 +391,7 @@ async def create_order(
         else:
             logger.warning(f"Promo code '{promo_code}' not found or inactive")
 
-    # Total (platform margin, VAT base, discounts and grand total — pricing_service)
+    # Total (platform margin, VAT base, discounts and grand total - pricing_service)
     pricing = _pricing.compute_order_pricing(
         order_items,
         fees,
@@ -989,21 +997,18 @@ async def confirm_delivery(
             detail="Not authorized to confirm delivery for this order"
         )
 
-    # A POD photo with no GPS is scored `awaiting_buyer`, so the driver's job is
-    # already `delivered` while the buyer still owes a receipt confirmation.
-    proof_awaiting_receipt = None
-    if order.status not in ["picked_up", "shipped", "in_transit"]:
-        if order.status != "delivered":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot confirm delivery for order in '{order.status}' status"
-            )
-        proof_awaiting_receipt = await _order_awaiting_receipt_proof(db, uid)
-        if proof_awaiting_receipt is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot confirm delivery for order in '{order.status}' status"
-            )
+    if order.status in ("cancelled", "refunded"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot confirm delivery for order in '{order.status}' status"
+        )
+
+    # A POD photo with no location data is scored `awaiting_buyer` AND blocks the
+    # driver from closing the job, so this confirmation is what actually completes
+    # the delivery (job + driver earnings + escrow) - not just the buyer's side.
+    proof_awaiting_receipt = await _order_awaiting_receipt_proof(db, uid)
+
+    if proof_awaiting_receipt is not None:
         if proof_awaiting_receipt.buyer_confirmed_at:
             # Idempotent: escrow was already released on the first confirmation.
             return {"message": "Delivery already confirmed", "order_id": order_id}
@@ -1012,50 +1017,33 @@ async def confirm_delivery(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=_buyer_confirm_hint(proof_awaiting_receipt) or "Receipt cannot be confirmed yet.",
             )
-        # Record the buyer's confirmation on the proof row so the no-GPS proof is
-        # no longer `awaiting_buyer` and drops out of any review surface.
-        proof_awaiting_receipt.buyer_confirmed_at = datetime.utcnow()
-        proof_awaiting_receipt.buyer_confirmed_by = current_user.id
-        proof_awaiting_receipt.verification_status = "buyer_confirmed"
-        proof_awaiting_receipt.needs_review = False
-        proof_awaiting_receipt.verification_note = "Buyer confirmed receipt (photo had no location data)."
-
-    order.status = "delivered"
-    order.delivered_at = datetime.utcnow()
-    order.payment_status = "completed"
-
-    # Mirror the receipt confirmation into the buyer-facing delivery feed so the
-    # event appears next to the driver's updates.
-    if proof_awaiting_receipt is not None:
-        job = (
-            await db.execute(
-                select(DeliveryJob)
-                .where(DeliveryJob.order_id == uid)
-                .order_by(DeliveryJob.created_at.desc())
-            )
-        ).scalars().first()
-        db.add(DeliveryJobEvent(
-            delivery_job_id=job.id if job else None,
-            order_id=uid,
+        # Records the confirmation on the proof row (so it is no longer
+        # `awaiting_buyer`) and finalises the order + job + driver earnings.
+        await _finalize_delivery_on_receipt(
+            db,
+            order,
+            proof_awaiting_receipt,
+            confirmed_by=current_user.id,
             actor_type="buyer",
             actor_name="Buyer",
-            event_type="status",
-            status="delivered",
             note="Buyer confirmed receipt (photo had no location data).",
-        ))
+        )
+    elif order.status in ("picked_up", "shipped", "in_transit"):
+        # Standard flow: the driver already captured a verified geotagged proof,
+        # so confirming only closes the order and releases the escrow.
+        order.status = "delivered"
+        order.delivered_at = datetime.utcnow()
+        order.payment_status = "completed"
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot confirm delivery for order in '{order.status}' status"
+        )
 
     await db.commit()
 
     # Trigger escrow release to vendor(s) in background
-    for item in order.items:
-        if item.vendor_id:
-            background_tasks.add_task(
-                _release_escrow_to_vendor,
-                vendor_id=str(item.vendor_id),
-                order_number=order.order_number,
-                amount=float(item.total_price),
-                db_session=db,
-            )
+    await release_order_escrow(background_tasks, order, db)
 
     logger.info(f"Order {order_id} delivery confirmed by user {current_user.id}")
     return {"message": "Delivery confirmed", "order_id": order_id}
@@ -1079,6 +1067,109 @@ async def _order_awaiting_receipt_proof(db: AsyncSession, order_id) -> Optional[
     return None
 
 
+# Job statuses that can no longer be advanced (mirrors deliveries._TERMINAL).
+_JOB_TERMINAL = ("delivered", "cancelled", "expired")
+
+
+async def _finalize_delivery_on_receipt(
+    db: AsyncSession,
+    order: Order,
+    proof: Optional[DeliveryProof],
+    *,
+    confirmed_by,
+    actor_type: str,
+    actor_name: str,
+    note: str,
+) -> Optional[DeliveryJob]:
+    """Complete a delivery once its receipt is confirmed (single choke point).
+
+    Used by the buyer's `confirm-delivery` and by the admin
+    "accept on behalf" escalation. A no-GPS proof blocks the driver's own
+    "mark delivered", so without closing the job here the delivery would strand
+    in transit while the money moved.
+
+    Sets the confirmation on the proof (clearing the `awaiting_buyer` verdict),
+    closes the job (accruing the driver's earnings) and the order, and appends
+    the buyer-visible feed event. Commits nothing - the caller owns the
+    transaction and the escrow release.
+    """
+    now = datetime.utcnow()
+
+    if proof is not None:
+        proof.buyer_confirmed_at = now
+        proof.buyer_confirmed_by = confirmed_by
+        proof.verification_status = "buyer_confirmed"
+        proof.needs_review = False
+        proof.verification_note = note
+
+    job = (
+        await db.execute(
+            select(DeliveryJob)
+            .where(DeliveryJob.order_id == order.id)
+            .order_by(DeliveryJob.created_at.desc())
+        )
+    ).scalars().first()
+    if job is not None and job.status not in _JOB_TERMINAL:
+        job.status = "delivered"
+        job.delivered_at = now
+        # The driver's own transition never ran for this job, so the ledger row
+        # is accrued here (idempotent: one row per job).
+        await _credit_driver_earnings(db, job)
+
+    order.status = "delivered"
+    order.delivered_at = now
+    order.payment_status = "completed"
+
+    if proof is not None:
+        # Mirror the confirmation into the buyer-facing delivery feed so the
+        # event appears next to the driver's updates.
+        db.add(DeliveryJobEvent(
+            delivery_job_id=job.id if job else None,
+            order_id=order.id,
+            actor_type=actor_type,
+            actor_name=actor_name,
+            event_type="status",
+            status="delivered",
+            note=note,
+        ))
+    return job
+
+
+async def release_order_escrow(background_tasks: BackgroundTasks, order: Order, db: AsyncSession) -> None:
+    """Queue the escrow release for every vendor line on a completed order.
+
+    Each vendor line is paid its own line total MINUS that line's vendor-borne
+    share of the platform margin (`pricing_service.vendor_margins_by_item`). The
+    buyer was only ever charged the *client* share at checkout, so without this
+    deduction the platform would be paying out its own margin. The buyer's
+    shipping fee is not part of any vendor line and is settled to the driver.
+
+    Shared so an order finalised outside the buyer's own confirmation (the admin
+    accept-on-behalf escalation) settles the vendors identically.
+    """
+    try:
+        deductions = await _pricing.vendor_margins_by_item(db, order.items)
+    except Exception as exc:  # a pricing recompute must never block a release
+        logger.error(f"Vendor margin recompute failed for order {order.order_number}: {exc}")
+        deductions = {}
+
+    for index, item in enumerate(order.items):
+        if not item.vendor_id:
+            continue
+        gross = _pricing.f2(item.total_price)
+        deduction = min(_pricing.f2(deductions.get(_pricing.item_key(item, index), 0)), gross)
+        background_tasks.add_task(
+            _release_escrow_to_vendor,
+            vendor_id=str(item.vendor_id),
+            order_number=order.order_number,
+            # Only the net leaves escrow; the retained margin stays on the platform.
+            amount=round(gross - deduction, 2),
+            gross_amount=gross,
+            platform_deduction=deduction,
+            db_session=db,
+        )
+
+
 # Phase 11: escrow/transfer safety limits.
 ESCROW_TRANSFER_CAP = 1_000_000.0   # NGN per release; above this requires admin approval
 
@@ -1088,13 +1179,20 @@ async def _release_escrow_to_vendor(
     order_number: str,
     amount: float,
     db_session: AsyncSession,
+    gross_amount: Optional[float] = None,
+    platform_deduction: float = 0.0,
 ):
     """Background task: release escrow funds to vendor.
+
+    `amount` is the NET the vendor receives - the line total already reduced by the
+    vendor-borne share of the platform margin (`platform_deduction`, with
+    `gross_amount` kept only for the log/audit trail). The cap and the bank-details
+    check therefore apply to what actually leaves escrow.
 
     Phase 11 safety:
       - Only release when the vendor bank details (account number) exist
         and the transfer amount is within cap.
-      - Releases above the cap are NOT auto-executed — they are logged for
+      - Releases above the cap are NOT auto-executed - they are logged for
         admin approval (escrow/transfer safety).
       - Validates the recipient reference is well-formed before calling the gateway.
     """
@@ -1108,17 +1206,17 @@ async def _release_escrow_to_vendor(
             logger.warning(f"Vendor {vendor_id} not found for escrow release")
             return
 
-        # Phase 11: validate recipient — must have a bank account on file.
+        # Phase 11: validate recipient - must have a bank account on file.
         account_number = getattr(vendor, "bank_account_number", None)
         if not account_number:
             logger.warning(f"Escrow release blocked: vendor {vendor_id} has no bank account on file (order {order_number})")
             return
 
-        # Phase 11: enforce transfer amount cap — large payouts staged for admin.
+        # Phase 11: enforce transfer amount cap - large payouts staged for admin.
         if float(amount) > ESCROW_TRANSFER_CAP:
             logger.warning(
                 f"Escrow release for order {order_number} to vendor {vendor_id} "
-                f"(₦{amount:,.2f}) exceeds cap ₦{ESCROW_TRANSFER_CAP:,.2f} — requires admin approval."
+                f"(₦{amount:,.2f}) exceeds cap ₦{ESCROW_TRANSFER_CAP:,.2f} - requires admin approval."
             )
             return  # do not auto-execute; flagged for manual/admin review
 
@@ -1129,15 +1227,25 @@ async def _release_escrow_to_vendor(
             return
 
         transfer_ref = f"TRF-{order_number}-{vendor_id[:8]}"
+        reason = f"Escrow release - Order {order_number}"
+        if platform_deduction:
+            reason = (
+                f"{reason} (net of ₦{platform_deduction:,.2f} platform fee "
+                f"on ₦{float(gross_amount or amount):,.2f} gross)"
+            )
         payment_service = PaymentService()
         await payment_service.create_transfer(
             amount=amount,
             recipient_code=recipient_code,
             reference=transfer_ref,
-            reason=f"Escrow release - Order {order_number}",
+            reason=reason,
         )
 
-        logger.info(f"Escrow released to vendor {vendor_id}: ₦{amount:,.2f} for order {order_number}")
+        logger.info(
+            f"Escrow released to vendor {vendor_id}: ₦{amount:,.2f} net "
+            f"(₦{float(gross_amount or amount):,.2f} gross - ₦{platform_deduction:,.2f} "
+            f"platform fee) for order {order_number}"
+        )
     except Exception as e:
         logger.error(f"Failed to release escrow to vendor {vendor_id}: {e}")
 
@@ -1321,8 +1429,8 @@ async def vendor_update_order(
         raise HTTPException(status_code=404, detail="Order not found")
 
     # Authorization: a vendor may only act on orders that contain their own items.
-    # This check was missing entirely, so any vendor could transition — or mark
-    # delivered/cancelled — another vendor's order.
+    # This check was missing entirely, so any vendor could transition - or mark
+    # delivered/cancelled - another vendor's order.
     vendor_id = current_vendor["id"]
     if not any(str(item.vendor_id) == str(vendor_id) for item in order.items):
         raise HTTPException(

@@ -2,8 +2,8 @@
 
 Two methods are supported per admin, chosen at enrolment:
 
-* ``email`` — a 6-digit code is emailed and verified (stored hashed in Redis).
-* ``totp``  — an authenticator app, provisioned from a server-rendered QR code
+* ``email`` - a 6-digit code is emailed and verified (stored hashed in Redis).
+* ``totp``  - an authenticator app, provisioned from a server-rendered QR code
   (no new Admin npm dependency) plus 10 single-use recovery codes.
 
 Secrets are encrypted at rest with a key derived from ``SECRET_KEY`` and the

@@ -79,7 +79,7 @@ class ConsoleFormatter(logging.Formatter):
             f"{timestamp} [{record.levelname:<8}] "
             f"[{req_id}] [{user}] "
             f"{record.name}:{record.funcName}:{record.lineno} "
-            f"— {record.getMessage()}"
+            f"- {record.getMessage()}"
         )
 
 

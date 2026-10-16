@@ -1,5 +1,5 @@
 """
-TokenUsage model — tracks user token balance and consumption.
+TokenUsage model - tracks user token balance and consumption.
 """
 from sqlalchemy import Column, String, Integer, Float, DateTime, Enum as SAEnum, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID

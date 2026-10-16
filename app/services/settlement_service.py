@@ -1,4 +1,4 @@
-"""Settlement service scaffold (Phase 5 — Settlement & Disbursement, increment 1).
+"""Settlement service scaffold (Phase 5 - Settlement & Disbursement, increment 1).
 
 This increment is DELIBERATELY INERT:
 - Nothing in the request/order/payment flow calls into this service yet.

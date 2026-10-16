@@ -37,7 +37,7 @@ _IGNORED_SHEET_RE = re.compile(r"^sheet\d*$", re.I)
 _ELEMENT_PREFIX_RE = re.compile(r"^\s*element\s*(nr\.?|no\.?|number)?\s*\d*\s*", re.I)
 
 # Rows that carry a total rather than a measurable item. "Collection from page
-# N" is the per-page carry-forward block at the foot of an element sheet — it
+# N" is the per-page carry-forward block at the foot of an element sheet - it
 # re-states amounts already itemised above, so counting it double-books the
 # element (it must never be parsed as an item).
 _SUBTOTAL_MARKERS = (
@@ -57,7 +57,7 @@ _HEADER_SYNONYMS: Dict[str, Tuple[str, ...]] = {
     "amount": ("amount", "total", "value"),
 }
 
-# A cell is numeric only when it is a number or looks like a plain number — this
+# A cell is numeric only when it is a number or looks like a plain number - this
 # keeps "PAGE 2/31" and the "N" currency marker out of the totals.
 _PLAIN_NUMBER_RE = re.compile(r"^\s*[₦nN]?\s*-?\d[\d,]*(?:\.\d+)?\s*$")
 _HEADER_JUNK_RE = re.compile(r"[^a-z0-9/\.\s]")
@@ -263,7 +263,7 @@ def _docx_table_rows(table: Any) -> List[List[str]]:
 def _read_docx(
     content: bytes, filename: str
 ) -> Tuple[List[Tuple[str, List[List[Any]]]], List[str]]:
-    """Flatten a Word BOQ into [(table heading, rows)] — one table = one element.
+    """Flatten a Word BOQ into [(table heading, rows)] - one table = one element.
 
     The paragraph immediately above each table names it, so a document laid out
     as "ELEMENT NR.3 CONCRETE" + table is classified and grouped like an Excel
@@ -331,7 +331,7 @@ def _pdf_text_rows(text: str) -> List[List[str]]:
 def _read_pdf(
     content: bytes, filename: str
 ) -> Tuple[List[Tuple[str, List[List[Any]]]], List[str]]:
-    """Flatten a PDF BOQ into [(page heading, rows)] — one sheet per page.
+    """Flatten a PDF BOQ into [(page heading, rows)] - one sheet per page.
 
     Uses pdfplumber's ruled-table grid when the bill has one, and falls back to
     layout-mode text so a borderless bill still reaches the shared row parser.
@@ -453,7 +453,7 @@ def _parse_element_sheet(
     subtotal: Optional[float] = None
     warnings: List[str] = []
     previous_description: Optional[str] = None
-    # Qualified headings above an item carry the material and size — the samples
+    # Qualified headings above an item carry the material and size - the samples
     # list "225mm thick" under a "Blockwork; hollow sandcrete 450x225mm" heading,
     # and a rate match needs that wording.
     heading_window: List[str] = []
@@ -488,7 +488,7 @@ def _parse_element_sheet(
             continue
 
         # An amount with neither quantity nor rate is either a provisional sum
-        # (a real priced item) or the sheet's own summary line —
+        # (a real priced item) or the sheet's own summary line -
         # e.g. MECHANICA ends with a block of "Sanitary Appliances 1,604,000" /
         # "Mechanical System Installation 5,873,970" rows that re-state totals
         # already itemised above. Counting those would inflate the element.
@@ -537,7 +537,7 @@ def _read_summary_sheet(
 ) -> Dict[str, Any]:
     """Read element totals (SUMMARY) or the bill/contingency/VAT block (GENERAL SUMMARY).
 
-    Values are taken from the first numeric cell *after* the row's label — real
+    Values are taken from the first numeric cell *after* the row's label - real
     sheets carry a second, unrelated figure column (wider scope / another
     currency) to the right, so ``max(cells)`` picks up junk such as
     16,800,000,000 for a ₦480,000 fittings line.
@@ -609,7 +609,7 @@ def parse_boq_file(content: bytes, filename: str) -> Dict[str, Any]:
     # Sheets are parsed one at a time and their rows released with each pass, so
     # the peak footprint is the largest single sheet rather than the whole
     # workbook (see `_iter_sheets`). A file that yields no sheet at all leaves
-    # `items`/`stated` empty and carries its reason in `warnings` — the same
+    # `items`/`stated` empty and carries its reason in `warnings` - the same
     # result the previous read-everything-first version returned.
     for name, rows in _iter_sheets(content, filename, warnings):
         kind = _classify_sheet(name)

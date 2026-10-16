@@ -25,7 +25,7 @@ async def bootstrap_admin(email: str, password: str, role: str = "super_admin") 
         result = await session.execute(select(User).where(User.email == email))
         existing = result.scalar_one_or_none()
         if existing:
-            print(f"Admin already exists for {email} (id={existing.id}) — nothing to do.")
+            print(f"Admin already exists for {email} (id={existing.id}) - nothing to do.")
             return
 
         user = User(
@@ -56,7 +56,7 @@ async def reset_two_factor(email: str) -> None:
     async with AsyncSessionLocal() as session:
         user = (await session.execute(select(User).where(User.email == email))).scalar_one_or_none()
         if not user:
-            print(f"No user found for {email} — nothing to do.")
+            print(f"No user found for {email} - nothing to do.")
             return
 
         previous = user.two_factor_method
@@ -81,7 +81,7 @@ async def reset_password(email: str, password: str) -> None:
     async with AsyncSessionLocal() as session:
         user = (await session.execute(select(User).where(User.email == email))).scalar_one_or_none()
         if not user:
-            print(f"No user found for {email} — nothing to do.")
+            print(f"No user found for {email} - nothing to do.")
             return
 
         user.password_hash = get_password_hash(password)

@@ -1,4 +1,4 @@
-"""Procurement Intelligence Service — DB-verified comparison, history, range,
+"""Procurement Intelligence Service - DB-verified comparison, history, range,
 quotation analysis, savings, and procurement score.
 
 All prices trace to the DB (material_rates / material_rate_history / products).
@@ -35,8 +35,8 @@ _RATE_STOPWORDS = {
 }
 
 # Dimension/measurement tokens express size, not material identity. They must
-# never be the only reason a rate matches — otherwise "12mm plywood" answers a
-# "12mm iron rods" query — but they still pin down the size.
+# never be the only reason a rate matches - otherwise "12mm plywood" answers a
+# "12mm iron rods" query - but they still pin down the size.
 _DIMENSION_TOKEN = re.compile(r"^\d+(\.\d+)?(mm|cm|m|kg|g|l|ml|ft|inch|in)?$|^\d+x\d+$")
 
 
@@ -133,7 +133,7 @@ class ProcurementIntelligenceService:
                 "best_price": min(o["total_procurement_cost"] for o in offers),
                 "explanation": (
                     f"No verified price for '{description}' in {city}. Verified rate(s) "
-                    f"available in {', '.join(states)} — always name that location when "
+                    f"available in {', '.join(states)} - always name that location when "
                     "quoting the price."
                 ),
             }
@@ -322,7 +322,7 @@ class ProcurementIntelligenceService:
         offers = await self._verified_offers(description, city)
         other_location = False
         if not offers:
-            # Fall back to the same material's verified rates in other states —
+            # Fall back to the same material's verified rates in other states -
             # labelled so it is never presented as a local price.
             offers = await self._verified_offers_other_states(description, city)
             other_location = bool(offers)
@@ -352,7 +352,7 @@ class ProcurementIntelligenceService:
             result["requested_city"] = city
             result["explanation"] = (
                 f"No verified price for '{description}' in {city}. Range based on "
-                f"{len(prices)} verified offer(s) in {', '.join(states)} — always name "
+                f"{len(prices)} verified offer(s) in {', '.join(states)} - always name "
                 "that location when quoting the price."
             )
         return result
@@ -437,7 +437,7 @@ class ProcurementIntelligenceService:
             quoted_rate = float(line.get("quoted_rate", 0))
             total_quoted += quantity * quoted_rate
 
-            # DB-verified rate only — never an estimate, so inflation flags
+            # DB-verified rate only - never an estimate, so inflation flags
             # are never based on invented prices.
             verified = await self._verified_offer_rate(description, city)
             if verified:
@@ -577,7 +577,7 @@ class ProcurementIntelligenceService:
           1. `boq_analysis_items.potential_saving` (per-item persisted savings
              from a prior BOQ analysis) when the item description matches a DB row.
           2. Otherwise the verified DB market rate (material_rates).
-        Never AI-invented — every figure traces to the DB.
+        Never AI-invented - every figure traces to the DB.
         """
         baseline = 0.0
         total_a = 0.0

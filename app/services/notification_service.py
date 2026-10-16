@@ -102,7 +102,7 @@ class NotificationService:
             <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
         </div>
         <h2 style="color:#FF6B00;">Welcome to Burncost, {full_name}! 🎉</h2>
-        <p>Thank you for joining Burncost — Nigeria's trusted marketplace for construction materials.</p>
+        <p>Thank you for joining Burncost - Nigeria's trusted marketplace for construction materials.</p>
         <p>Here's what you can do:</p>
         <ul style="line-height:1.8;">
             <li>🔍 Browse verified suppliers and compare prices</li>
@@ -127,7 +127,7 @@ class NotificationService:
             <img src="https://res.cloudinary.com/ddwdbu4tf/image/upload/v1775528651/e3b31e077ad9310acc512868f1f8d64384f40417_tddsgp.png" alt="Burncost" style="height:40px;" />
         </div>
         <h2 style="color:#FF6B00;">Welcome to Burncost, {full_name}! 🎉</h2>
-        <p>Thank you for joining Burncost — Nigeria's trusted marketplace for construction materials.</p>
+        <p>Thank you for joining Burncost - Nigeria's trusted marketplace for construction materials.</p>
         <p>Your account is active. To get the most out of Burncost, please complete your profile:</p>
         <ul style="line-height:1.8;">
             <li>🛠️ Complete your profile details</li>
@@ -296,7 +296,7 @@ class NotificationService:
         expires_at: Optional[Any] = None,
         scope_label: Optional[str] = None,
     ) -> bool:
-        """Send a promo-code announcement. Marketing email — callers must have
+        """Send a promo-code announcement. Marketing email - callers must have
         verified the recipient opted in (see promo_notification_service)."""
         amount = float(discount_amount or 0)
         target = f" {scope_label}" if scope_label else " your order"

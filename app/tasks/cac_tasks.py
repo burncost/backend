@@ -49,7 +49,7 @@ def _clean(value) -> str:
 def get_cac_business_info(rc_number: str, max_retries: int = 3) -> dict:
     """Look up a CAC registration by RC number and return the legacy dict shape."""
     result = {
-        # Legacy contract — read by vendors.py
+        # Legacy contract - read by vendors.py
         "business_name": "",
         "rc_number": _clean(rc_number),
         "date_of_registration": "",

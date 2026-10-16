@@ -49,7 +49,7 @@ async def _resolve_user(request: Request, db: AsyncSession) -> tuple:
 
 
 # In-memory anonymous chat counter keyed by client IP (per month). Server-side
-# only — a new conversation_id cannot bypass it. Authenticated users use the
+# only - a new conversation_id cannot bypass it. Authenticated users use the
 # token_usage.chat_messages_* columns instead.
 import collections
 _ANONYMOUS_CHAT_COUNTS: Dict[tuple, int] = collections.defaultdict(int)
@@ -84,7 +84,7 @@ async def chat_endpoint(
             return ChatResponse(
                 reply=(
                     "You've reached your monthly chat message limit. "
-                    "Purchasing tokens raises your limit — or wait for the next month to continue."
+                    "Purchasing tokens raises your limit - or wait for the next month to continue."
                 ),
                 conversation_id=request.conversation_id or "",
                 action="signup_required",

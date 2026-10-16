@@ -1,7 +1,7 @@
 """Read an uploaded PDF's real metadata, tables and first-page image.
 
-This module previously returned *invented* data — a hard-coded ``pageCount`` of
-5, an "Architect Name" author and a two-line "bill of quantities" table — which
+This module previously returned *invented* data - a hard-coded ``pageCount`` of
+5, an "Architect Name" author and a two-line "bill of quantities" table - which
 was then handed to the AI analysis as though it had been read from the user's
 file. Nothing here is guessed: every value comes from the document, and a file
 that cannot be read reports an ``error`` instead of a plausible-looking lie.
@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Extracting a page's tables walks its whole object graph, so only the first
-# pages pay for it — the page *count* reported is always the document's real one.
+# pages pay for it - the page *count* reported is always the document's real one.
 _MAX_TABLE_PAGES = 50
 _MAX_TABLE_ROWS = 200
 _TEXT_PREVIEW_CHARS = 2000
@@ -102,7 +102,7 @@ class PDFExtractor:
 
     @staticmethod
     def _error(message: str) -> Dict[str, Any]:
-        """An empty, clearly-failed result — never fabricated content."""
+        """An empty, clearly-failed result - never fabricated content."""
         return {
             "pageCount": 0,
             "title": None,

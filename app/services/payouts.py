@@ -1,4 +1,4 @@
-"""Payout / disbursement layer (Phase 5) — flag- and config-gated.
+"""Payout / disbursement layer (Phase 5) - flag- and config-gated.
 
 Guarantees:
 - `run()` does NOTHING unless `SETTLEMENT_ENABLED` is truthy AND the chosen
@@ -115,8 +115,8 @@ class PayoutService:
         Never fires unless the feature flag is on and the gateway is configured.
         When `gateway` is omitted (or unusable), the admin-configured primary is
         used and the backup (Monnify) is tried before giving up. When
-        enabled/configured, this resolves each vendor's payout account and —
-        only with account data present — would submit a real provider request.
+        enabled/configured, this resolves each vendor's payout account and -
+        only with account data present - would submit a real provider request.
         The concrete request bodies must be confirmed against each provider's test
         docs/payloads on staging before enabling real money.
         """

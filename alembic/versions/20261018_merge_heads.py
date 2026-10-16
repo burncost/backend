@@ -9,8 +9,8 @@ order-promo-discount migrations were added on separate lineages:
 Multiple heads make a plain ``alembic upgrade head`` abort with
 "Multiple head revisions are present", forcing callers to name a revision
 explicitly. This merge revision joins the two lineages into a single head so the
-ordinary command works again. It performs no schema change — it only records the
-join in ``alembic_version`` — so it is safe to apply on a database that already
+ordinary command works again. It performs no schema change - it only records the
+join in ``alembic_version`` - so it is safe to apply on a database that already
 sits on one or both of the joined revisions.
 
 Revision ID: 20261018_merge_heads

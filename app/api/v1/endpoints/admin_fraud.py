@@ -1,4 +1,4 @@
-"""Phase 3 admin fraud endpoints — Fraud Detection + Alert Review.
+"""Phase 3 admin fraud endpoints - Fraud Detection + Alert Review.
 
 Powered by the new fraud models.
 """
@@ -30,7 +30,7 @@ def _alert_dict(a: FraudAlert) -> dict:
         "status": a.status,
         "is_negotiation": bool(a.is_negotiation),
         "detected_at": a.detected_at.isoformat() if a.detected_at else None,
-        "timestamp": a.detected_at.strftime("%b %d, %Y at %I:%M %p") if a.detected_at else "—",
+        "timestamp": a.detected_at.strftime("%b %d, %Y at %I:%M %p") if a.detected_at else "-",
         "accounts": [
             {"id": str(x.id), "name": x.account_name, "email": x.account_email,
              "account_id": x.account_id, "created_at": x.created_at.isoformat() if x.created_at else None}

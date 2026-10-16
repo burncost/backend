@@ -60,7 +60,7 @@ async def list_by_vendor(db: AsyncSession, vendor_id: UUID) -> list[PromoCode]:
 
 
 async def list_all(db: AsyncSession) -> list[PromoCode]:
-    """Every promo (admin view) — platform, vendor and scoped codes alike."""
+    """Every promo (admin view) - platform, vendor and scoped codes alike."""
     result = await db.execute(
         select(PromoCode).order_by(PromoCode.created_at.desc())
     )
@@ -81,7 +81,7 @@ async def update(db: AsyncSession, promo_id: UUID, fields: dict) -> PromoCode | 
     """Apply `fields` (already validated/normalised by the endpoint) to a promo.
 
     Only the keys present in `fields` are written, so a partial PATCH leaves every
-    other column — including `current_uses` — untouched.
+    other column - including `current_uses` - untouched.
     """
     promo = await get_by_id(db, promo_id)
     if not promo:

@@ -1,4 +1,4 @@
-"""Admin-facing endpoints — RBAC-protected reads of core platform data.
+"""Admin-facing endpoints - RBAC-protected reads of core platform data.
 
 These power the Burncost Admin dashboard pages with real DB data
 (Phase 2). All endpoints require an admin-tier role via `require_roles`.
@@ -395,7 +395,7 @@ async def admin_list_orders(
     current_user: dict = Depends(admin_guard),
     db: AsyncSession = Depends(get_db),
 ):
-    """All orders — powers Escrow Payments + Disputes views."""
+    """All orders - powers Escrow Payments + Disputes views."""
     query = select(Order).options(selectinload(Order.user).selectinload(User.profile))
     count_query = select(func.count(Order.id))
 
@@ -437,7 +437,7 @@ async def admin_list_orders(
             {
                 "id": str(o.id),
                 "order_number": o.order_number,
-                "buyer": f"{o.user.profile.first_name} {o.user.profile.last_name}".strip() if o.user and o.user.profile else (o.user.email if o.user else "—"),
+                "buyer": f"{o.user.profile.first_name} {o.user.profile.last_name}".strip() if o.user and o.user.profile else (o.user.email if o.user else "-"),
                 "buyer_email": o.user.email if o.user else None,
                 "amount": float(o.total_amount),
                 "subtotal": float(o.subtotal),

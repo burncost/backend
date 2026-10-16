@@ -104,7 +104,7 @@ async def place_demand_alert_bid(
 ):
     """Vendor places a bid on a demand alert.
 
-    Guarded so only a vendor that actually sells a matching product can bid —
+    Guarded so only a vendor that actually sells a matching product can bid -
     otherwise the demand feed becomes a cold-call channel.
     """
     vendor = (await db.execute(

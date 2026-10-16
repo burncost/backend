@@ -1,11 +1,11 @@
-"""User email marketing preferences (Phase 3 — newsletter / opt-in).
+"""User email marketing preferences (Phase 3 - newsletter / opt-in).
 
 Stores explicit, revocable consent for marketing/newsletter email. This is the
 compliance record the scheduled newsletter sender queries before emailing anyone:
 a user must have `marketing_opt_in = True` to be contacted for marketing.
 
 - One row per user (`user_id` unique).
-- `marketing_opt_in` defaults False — emailing always requires an explicit opt-in.
+- `marketing_opt_in` defaults False - emailing always requires an explicit opt-in.
 - `unsubscribe_token` powers a one-click unsubscribe link (no login required).
 - The actual sends reuse NotificationService/Brevo in a later sub-increment; this
   table only governs *who* may be emailed.

@@ -2,9 +2,9 @@
 
 The pickers need three things from outside:
 
-* ``search_places(query)``  — a typed street, area or landmark -> candidate pins
-* ``reverse_place(lat,lng)`` — a pin -> a human-readable area ("Pankshin, Plateau State")
-* ``snap_to_road(lat,lng)``  — a pin -> the nearest routable point + how far it moved
+* ``search_places(query)``  - a typed street, area or landmark -> candidate pins
+* ``reverse_place(lat,lng)`` - a pin -> a human-readable area ("Pankshin, Plateau State")
+* ``snap_to_road(lat,lng)``  - a pin -> the nearest routable point + how far it moved
 
 All three are key-less by default (Nominatim for search/reverse, Photon as a
 search fallback, OSRM's demo server for the road snap), which keeps the map
@@ -193,7 +193,7 @@ async def nominatim_search(query: str, limit: int, countrycodes: Optional[str] =
 
 
 async def photon_search(query: str, limit: int) -> List[dict]:
-    """Photon ``/api`` search — the key-less fallback when Nominatim draws blank."""
+    """Photon ``/api`` search - the key-less fallback when Nominatim draws blank."""
     params: Dict[str, Any] = {"q": query, "limit": max(limit, 8), "lang": "en"}
     async with httpx.AsyncClient(
         timeout=TIMEOUT, follow_redirects=True, headers={"User-Agent": USER_AGENT}
@@ -203,12 +203,12 @@ async def photon_search(query: str, limit: int) -> List[dict]:
 
 
 async def google_search(query: str, limit: int) -> List[dict]:
-    """Places API (New) ``searchText`` — only reached when a key is configured."""
+    """Places API (New) ``searchText`` - only reached when a key is configured."""
     key = getattr(settings, "GOOGLE_MAPS_API_KEY", None)
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": key or "",
-        # Only the fields the picker renders — keeps the billed SKU minimal.
+        # Only the fields the picker renders - keeps the billed SKU minimal.
         "X-Goog-FieldMask": (
             "places.displayName,places.formattedAddress,places.location,"
             "places.addressComponents"
@@ -250,7 +250,7 @@ async def search_places(query: str, limit: int = 5) -> List[dict]:
     Google runs first when configured; otherwise Nominatim is tried with a
     Nigeria bias, then unfiltered, and only if both come back empty does Photon
     get a turn. Raises :class:`GeoUnavailable` only when *every* attempt failed
-    — an honest empty result comes back as ``[]`` so the picker can say
+    - an honest empty result comes back as ``[]`` so the picker can say
     "No matches" rather than "search is down".
     """
     tried = 0
@@ -285,7 +285,7 @@ async def search_places(query: str, limit: int = 5) -> List[dict]:
 
 
 async def nominatim_reverse(lat: float, lng: float) -> dict:
-    """Nominatim ``/reverse`` — the pin's street/area description."""
+    """Nominatim ``/reverse`` - the pin's street/area description."""
     params: Dict[str, Any] = {
         "lat": lat,
         "lon": lng,
@@ -309,7 +309,7 @@ async def nominatim_reverse(lat: float, lng: float) -> dict:
 
 
 async def google_reverse(lat: float, lng: float) -> dict:
-    """Geocoding API reverse lookup — only reached when a key is configured."""
+    """Geocoding API reverse lookup - only reached when a key is configured."""
     key = getattr(settings, "GOOGLE_MAPS_API_KEY", None)
     params = {"latlng": f"{lat},{lng}", "key": key, "language": "en"}
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
@@ -353,7 +353,7 @@ async def snap_to_road(lat: float, lng: float) -> Optional[dict]:
     The distance doubles as a free sanity check on a fix: a genuine handheld
     fix sits within tens of metres of a road, while a coarse Wi-Fi/IP estimate
     can land kilometres from one. Returns ``None`` when the upstream is
-    unreachable — the caller treats "no snap" as "unknown", never as "bad".
+    unreachable - the caller treats "no snap" as "unknown", never as "bad".
     """
     url = f"{OSRM_NEAREST_URL}/{lng},{lat}"  # OSRM takes lon,lat
     try:

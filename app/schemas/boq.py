@@ -16,9 +16,9 @@ class DrawingType(str, Enum):
 
 
 class DrawingFormat(str, Enum):
-    PDF   = "pdf"    # BEST — vector, scalable, preserves dimensions
-    IMAGE = "image"  # OK   — raster; quality depends on scan resolution
-    CAD   = "cad"    # N/A  — not accepted by this system
+    PDF   = "pdf"    # BEST - vector, scalable, preserves dimensions
+    IMAGE = "image"  # OK   - raster; quality depends on scan resolution
+    CAD   = "cad"    # N/A  - not accepted by this system
 
 
 class DrawingQuality(BaseModel):
@@ -366,7 +366,7 @@ class BOQCartRequest(BaseModel):
     Supply either a stored `boq_id` or the inline `boq` payload (the
     just-generated result, or a guest preview that was never persisted).
 
-    Resolution is read-only — the cart itself is written by the existing
+    Resolution is read-only - the cart itself is written by the existing
     `/cart/add` endpoint, so guests keep their on-device cart and signed-in
     shoppers keep their account cart.
     """

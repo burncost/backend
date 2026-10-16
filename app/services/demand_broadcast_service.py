@@ -10,7 +10,7 @@ message log). A `Notification` nudges each matched vendor.
 Reuse strategy (Option A): no new tables are introduced, so the marketplace
 demand feed and the negotiation centre keep working unchanged. If this ever
 needs dedicated tables (Option B), only `_open_bid_thread` / `_post_bid_message`
-have to change — every caller talks to `broadcast_boq_demand` / `place_vendor_bid`.
+have to change - every caller talks to `broadcast_boq_demand` / `place_vendor_bid`.
 
 All helpers are best-effort: a single failing line or vendor is logged and
 skipped, so a BOQ run never fails because of demand broadcasting.
@@ -226,7 +226,7 @@ async def broadcast_boq_demand(
             if alert is None:
                 continue
             summary["alerts_created"] += 1
-            # Threads need an owner (builder_id is NOT NULL) — skip for guests.
+            # Threads need an owner (builder_id is NOT NULL) - skip for guests.
             if requester is None or not match_vendors:
                 continue
             vendors = await _match_vendors(pg_db, line["description"])

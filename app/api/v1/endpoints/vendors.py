@@ -405,7 +405,7 @@ async def update_my_vendor_profile(
         from app.models.vendor_bank_account import VendorBankAccount
         account = next((a for a in vendor.bank_accounts if a.is_primary), None)
         if not account:
-            # All three fields are NOT NULL — only create when complete.
+            # All three fields are NOT NULL - only create when complete.
             if not all(bank_fields.get(k) for k in ("bank_name", "bank_account_number", "bank_account_name")):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -479,7 +479,7 @@ async def get_vendor_status(
     tier_labels = {
         "starter": "Starter",
         "verified_vendor": "Verified Vendor",
-        "enterprise": "Enterprise — BurnCost Verified",
+        "enterprise": "Enterprise - BurnCost Verified",
     }
     volume = float(vendor.transaction_volume or 0)
     volume_pct = round((volume / cap) * 100, 1) if cap else None
@@ -524,7 +524,7 @@ async def get_demand_alerts(
     # raised, so anything older is excluded here AND from the count (kept in sync so
     # the "Pending" badge matches the list). City matching is case/whitespace
     # insensitive because alerts are seeded with e.g. "Abuja" while a vendor may have
-    # stored "abuja " — an exact match silently hid every alert from those vendors.
+    # stored "abuja " - an exact match silently hid every alert from those vendors.
     cutoff = demand_alert_cutoff()
     count_stmt = text("""
         SELECT COUNT(*) FROM demand_alerts
@@ -745,7 +745,7 @@ async def upload_vendor_image(
         )
 
 
-### Verify business via CAC — background pre-fetch endpoint
+### Verify business via CAC - background pre-fetch endpoint
 @router.post("/verify-business")
 async def verify_business_cac(
     rc_number: str = Query(..., min_length=1, max_length=20, description="CAC RC number (digits only)"),

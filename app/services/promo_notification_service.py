@@ -1,13 +1,13 @@
-"""Promo (discount code) delivery — fans a new promo out to the users it reaches.
+"""Promo (discount code) delivery - fans a new promo out to the users it reaches.
 
 Promos used to be discoverable only by typing the code into the cart. This
 service surfaces them through the notification channels the app already has:
 
-* **In-app** — one `notifications` row per eligible user (`type="promotion"`,
+* **In-app** - one `notifications` row per eligible user (`type="promotion"`,
   already rendered by the customer/supplier notification screens). Delivered to
   everyone who has not explicitly opted out of promo alerts (`push_promotions`
   for customers, `promotions` for vendors; an absent key means "not opted out").
-* **Email** — only to users who explicitly opted in to marketing email, via the
+* **Email** - only to users who explicitly opted in to marketing email, via the
   granular `email_promotions` toggle or the `user_email_preferences` consent row
   (`marketing_opt_in`).
 
@@ -55,7 +55,7 @@ def _in_app_enabled(prefs: Optional[dict]) -> bool:
 
 
 def _email_enabled(prefs: Optional[dict], email: Optional[str], opted_in_emails: set) -> bool:
-    """Email requires an explicit opt-in — granular toggle or consent record."""
+    """Email requires an explicit opt-in - granular toggle or consent record."""
     prefs = prefs or {}
     if prefs.get("email_promotions") is True:
         return True
@@ -163,7 +163,7 @@ async def notify_promo_created(
 ) -> dict:
     """Deliver a freshly created promo: in-app rows now + opted-in emails in the background.
 
-    Returns {"in_app": n, "email": n}. Never raises — delivery is best-effort.
+    Returns {"in_app": n, "email": n}. Never raises - delivery is best-effort.
     """
     t_lookup = time.monotonic()
     try:
@@ -235,7 +235,7 @@ async def deliver_promo_created(
     session: the request's `db` (from `get_db`) is closed by the time Starlette runs
     background tasks, so reusing it would fail on a closed session.
 
-    Never raises — the promo itself is already committed by the caller.
+    Never raises - the promo itself is already committed by the caller.
     """
     started = time.monotonic()
     try:

@@ -1,5 +1,5 @@
 """
-Token management endpoints — balance, purchase, pricing.
+Token management endpoints - balance, purchase, pricing.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Dict, Any, List
@@ -140,7 +140,7 @@ async def verify_token_purchase(
 
     Used when the buyer returns from the checkout page: a locally-hosted server
     cannot receive gateway webhooks, so the return trip is the trigger. Safe to
-    call any number of times — crediting is idempotent by reference, and the
+    call any number of times - crediting is idempotent by reference, and the
     webhook may already have done it.
     """
     from app.services.payment_service import PaymentService

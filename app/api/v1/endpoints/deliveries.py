@@ -16,6 +16,7 @@ status transitions) so the existing buyer tracking / admin views keep working.
 Notifications are written for vendor, driver and buyer at each step.
 """
 import json
+import logging
 import math
 import random
 import string
@@ -55,6 +56,8 @@ from app.services.geo_providers import (
 )
 from app.utils.storage import StorageService
 from app.utils.geo_exif import extract_photo_metadata
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -118,7 +121,7 @@ class RatingCreate(BaseModel):
 
 class PodReviewRequest(BaseModel):
     """Vendor/admin outcome for a flagged proof of delivery."""
-    action: str = Field(..., pattern="^(clear|reject)$")
+    action: str = Field(..., pattern="^(clear|reject|accept_on_behalf)$")
     note: Optional[str] = Field(None, max_length=500)
 
 
@@ -145,7 +148,7 @@ def _pod_photo_age_seconds(taken_at, captured_at) -> Optional[int]:
     """Age of a proof photo in seconds; None when there is no usable timestamp.
 
     A small negative value (photo stamped slightly in the future due to clock
-    skew) is returned as-is — callers treat a non-positive age as "fresh".
+    skew) is returned as-is - callers treat a non-positive age as "fresh".
     """
     ts = taken_at or captured_at
     if ts is None:
@@ -394,7 +397,7 @@ async def geo_search(
     if not allowed:
         raise HTTPException(
             http_status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many address searches — please wait a moment.",
+            detail="Too many address searches - please wait a moment.",
         )
 
     cache_key = f"{query.lower()}|{limit_n}"
@@ -409,7 +412,7 @@ async def geo_search(
         # user drop a pin or use their current location.
         raise HTTPException(
             http_status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Address search is temporarily unavailable — drop a pin on the map instead.",
+            detail="Address search is temporarily unavailable - drop a pin on the map instead.",
         ) from e
 
     _cache_put(_geo_cache, cache_key, results)
@@ -425,7 +428,7 @@ async def geo_reverse(
     """Describe a pin: its area name, and how far it sits from the nearest road.
 
     Powers the "Pinned: <area> (+/- 30 m)" line and the imprecise-location
-    warning in the map pickers. Never raises on an upstream failure — the pin
+    warning in the map pickers. Never raises on an upstream failure - the pin
     is still a valid pin, we simply cannot describe it, so the caller degrades
     to raw coordinates.
     """
@@ -436,7 +439,7 @@ async def geo_reverse(
     if not allowed:
         raise HTTPException(
             http_status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many location lookups — please wait a moment.",
+            detail="Too many location lookups - please wait a moment.",
         )
 
     # ~1 m precision: the cache key, so a re-tapped pin reuses one upstream call.
@@ -488,8 +491,8 @@ def _vendor_primary_address(payload: VendorPickupPoint, vendor: Optional[Vendor]
         address_type="warehouse",
         address_line1=(payload.label or (vendor.business_address if vendor else None)
                        or (vendor.city if vendor else None) or "Dispatch pickup point"),
-        city=(vendor.city if vendor and vendor.city else "—"),
-        state=(vendor.state if vendor and vendor.state else "—"),
+        city=(vendor.city if vendor and vendor.city else "-"),
+        state=(vendor.state if vendor and vendor.state else "-"),
         latitude=Decimal(str(payload.lat)),
         longitude=Decimal(str(payload.lng)),
         is_primary=True,
@@ -749,13 +752,13 @@ async def vendor_create_dispatch(
     if not await _vendor_owns_order(db, order, vendor_id):
         raise HTTPException(http_status.HTTP_403_FORBIDDEN, detail="This order is not from your catalog.")
 
-    # Only dispatch orders that have actually been paid — dispatching an unpaid
+    # Only dispatch orders that have actually been paid - dispatching an unpaid
     # order would put a driver on the road for money that never arrived.
     paid = order.payment_status.value if hasattr(order.payment_status, "value") else str(order.payment_status or "")
     if paid != "completed":
         raise HTTPException(
             http_status.HTTP_400_BAD_REQUEST,
-            detail="This order isn't paid yet — dispatch becomes available once payment is confirmed.",
+            detail="This order isn't paid yet - dispatch becomes available once payment is confirmed.",
         )
 
     # No duplicate active dispatch for the same (order, vendor).
@@ -870,7 +873,7 @@ async def list_my_jobs(
 
     Vendors see the jobs they created; drivers see the jobs assigned to them.
     This used to be two handlers on the same path, so the vendor handler shadowed
-    the driver one and any driver hitting it received 403 — breaking the driver
+    the driver one and any driver hitting it received 403 - breaking the driver
     dashboard. Role-based dispatch here serves both clients from one route.
     """
     role = current_user.role.value if getattr(current_user, "role", None) is not None and hasattr(current_user.role, "value") else str(getattr(current_user, "role", "") or "")
@@ -1086,7 +1089,7 @@ async def driver_accept_offer(
     return _job_dict(job, order_number=(order.order_number if order else None))
 
 
-# NOTE: the driver-scoped GET /jobs/mine handler was removed — it duplicated the
+# NOTE: the driver-scoped GET /jobs/mine handler was removed - it duplicated the
 # role-aware handler above and, being registered second, was unreachable (FastAPI
 # serves the first match). Drivers are now served by GET /jobs/mine directly.
 
@@ -1142,6 +1145,19 @@ async def _driver_transition(db: AsyncSession, profile: DriverProfile, job_id: U
                 detail=(
                     f"The proof photo is about {max(1, age // 60)} min old; retake a fresh "
                     f"photo (max {settings.POD_MAX_PHOTO_AGE_MIN} min)."
+                ),
+            )
+        # STRICT GATE: a photo with no location data is handed to the buyer
+        # instead of being accepted outright, so the job cannot be closed here -
+        # the buyer's receipt confirmation (or an admin accepting on their
+        # behalf) finalises the delivery and releases escrow. Without this, a
+        # photo the buyer never confirmed would already look delivered.
+        if _awaiting_buyer_receipt(proof):
+            raise HTTPException(
+                http_status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "This photo has no location data, so the recipient must confirm receipt "
+                    "in the app before the delivery can be completed."
                 ),
             )
         job.status = "delivered"
@@ -1310,9 +1326,9 @@ async def _verify_pod_photo(
     """Score a submitted POD photo against freshness + geofence rules.
 
     Freshness is the hard gate (a `blocked_reason` is returned when the photo
-    carries no usable capture time or is too old — the caller turns that into a
+    carries no usable capture time or is too old - the caller turns that into a
     400). Distance is advisory: it is always recorded and the row flagged for
-    review, but never blocks. Never raises — a missing EXIF block degrades to
+    review, but never blocks. Never raises - a missing EXIF block degrades to
     "unverified" rather than crashing proof capture.
     """
     radius_m = settings.POD_GEOFENCE_RADIUS_M
@@ -1448,7 +1464,7 @@ def _apply_pod_verification(proof: DeliveryProof, verification: Optional[dict]) 
     proof.verification_note = verification.get("verification_note")
     proof.raw_exif = verification.get("raw_exif")
     proof.buyer_confirmation_required = bool(verification.get("buyer_confirmation_required"))
-    # A re-capture invalidates any earlier buyer confirmation — the new photo
+    # A re-capture invalidates any earlier buyer confirmation - the new photo
     # must be confirmed afresh.
     proof.buyer_confirmed_at = None
     proof.buyer_confirmed_by = None
@@ -1474,13 +1490,23 @@ def _can_buyer_confirm(p: Optional[DeliveryProof]) -> bool:
     """Whether the buyer may confirm receipt for this proof right now.
 
     Only a no-GPS proof that has not yet been confirmed and whose capture day is
-    *today* qualifies — so an old photo cannot be rubber-stamped days later.
+    *today* qualifies - so an old photo cannot be rubber-stamped days later.
     """
     if not p or not p.buyer_confirmation_required or p.buyer_confirmed_at:
         return False
     if p.exif_taken_at is None:
         return False
     return p.exif_taken_at.date() == _pod_today()
+
+
+def _awaiting_buyer_receipt(p: Optional[DeliveryProof]) -> bool:
+    """Whether a proof still gates the delivery on the buyer's receipt.
+
+    True for a no-location photo the buyer has not confirmed yet: the driver must
+    not be able to close the job himself, because the recipient (or an admin
+    accepting on their behalf) is the one who finalises it.
+    """
+    return bool(p is not None and p.buyer_confirmation_required and not p.buyer_confirmed_at)
 
 
 def _buyer_confirm_hint(p: Optional[DeliveryProof]) -> Optional[str]:
@@ -1491,7 +1517,7 @@ def _buyer_confirm_hint(p: Optional[DeliveryProof]) -> Optional[str]:
         return "This proof has no capture time, so receipt cannot be confirmed."
     if p.exif_taken_at.date() != _pod_today():
         return "Confirm on the day the photo was taken; this photo is from an earlier day."
-    return "This photo has no location data. Confirm you received this delivery to complete the order."
+    return "This photo has no location data. Wait for builder to complete this delivery to complete the order."
 
 
 def _pod_summary(p: Optional[DeliveryProof]) -> Optional[dict]:
@@ -1600,13 +1626,22 @@ def _apply_pod_review(
 
     `clear` accepts the proof (drops it from the review queue); `reject` keeps it
     flagged so the photo must be re-captured. Appends a buyer-visible event and
-    notifies the driver. Commits nothing — the caller owns the transaction.
+    notifies the driver. Commits nothing - the caller owns the transaction.
     """
     now = datetime.utcnow()
     if action == "clear":
         proof.review_status = "cleared"
         proof.needs_review = False
         verb = "cleared"
+    elif action == "accept_on_behalf":
+        # Escalation fallback for a no-GPS photo whose buyer never confirmed
+        # (the driver cannot close the job himself while it awaits receipt).
+        # An admin vouches for the receipt here; the order/job/escrow
+        # side-effects are applied by the caller through the shared finaliser,
+        # which also sets `verification_status` + `buyer_confirmed_*`.
+        proof.review_status = "cleared"
+        proof.needs_review = False
+        verb = "accepted on the buyer's behalf"
     else:
         proof.review_status = "rejected"
         proof.needs_review = True
@@ -1629,7 +1664,7 @@ def _apply_pod_review(
             db,
             driver_user_id,
             f"Proof {verb}",
-            f"Delivery proof for {job.job_number if job else 'your delivery'} was {verb} by the vendor.",
+            f"Delivery proof for {job.job_number if job else 'your delivery'} was {verb}.",
         )
 
 
@@ -1734,9 +1769,17 @@ async def driver_submit_proof(
 
     order_number = job.order.order_number if job.order else ""
     if job.order:
-        _notify(db, job.order.user_id, "Delivery proof added",
-                f"Driver {profile.full_name or profile.phone or ''} submitted proof for delivery {job.job_number} (order {order_number}).",
-                "/dashboard/orders")
+        if existing.buyer_confirmation_required:
+            # No location on the photo: the driver cannot complete this job, so
+            # the buyer is told exactly what is expected of them (and where).
+            _notify(db, job.order.user_id, "Confirm your delivery",
+                    f"Driver {profile.full_name or profile.phone or ''} delivered {job.job_number} "
+                    f"(order {order_number}). Open the order and confirm you received it to complete the order.",
+                    "/dashboard/orders")
+        else:
+            _notify(db, job.order.user_id, "Delivery proof added",
+                    f"Driver {profile.full_name or profile.phone or ''} submitted proof for delivery {job.job_number} (order {order_number}).",
+                    "/dashboard/orders")
     # Record the capture on the buyer-facing feed, noting any review flag.
     review_note = existing.verification_note if verification is not None else None
     _write_job_event(
@@ -1748,7 +1791,14 @@ async def driver_submit_proof(
         event_type="proof",
         note=review_note,
     )
-    await db.commit()
+    # The photo row is already committed above, so a feed/notification failure
+    # must not surface as a 500 - that would push the driver to re-shoot a photo
+    # for a delivery that is already recorded.
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning("POD feed event / notification failed for job %s", job_id, exc_info=True)
 
     return {"message": "Proof of delivery saved", "proof": _proof_dict(existing)}
 
@@ -1762,7 +1812,7 @@ async def get_delivery_proof(
     """Read the stored proof of delivery for a job.
 
     Accessible to the delivery driver, the owning vendor, the buyer on the order,
-    or admin — mirroring the role guards already used by the job tracking endpoint.
+    or admin - mirroring the role guards already used by the job tracking endpoint.
     """
     row = await db.execute(
         select(DeliveryProof, DeliveryJob, Order)
@@ -2001,8 +2051,8 @@ async def driver_earnings_summary(
 ):
     """Earnings summary + ledger history for the authenticated independent driver.
 
-    Every figure is a server-side aggregate over `driver_earnings` — the same
-    ledger the payout runner will read — so the portal can never disagree with
+    Every figure is a server-side aggregate over `driver_earnings` - the same
+    ledger the payout runner will read - so the portal can never disagree with
     what is actually owed:
 
     - `pending_balance`  net owed but not yet disbursed (status = pending)

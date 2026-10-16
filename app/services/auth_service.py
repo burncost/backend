@@ -69,7 +69,7 @@ class AuthService:
         try:
             import httpx
 
-            # Phase 12: state validation is handled by the calling endpoint —
+            # Phase 12: state validation is handled by the calling endpoint -
             # verify the authorization code at Google and never trust client input.
             async with httpx.AsyncClient() as client:
                 token_response = await client.post(
@@ -220,7 +220,7 @@ class AuthService:
             )
             user = result.scalar_one_or_none()
 
-        # 2. Existing user by email — link the provider if not already.
+        # 2. Existing user by email - link the provider if not already.
         #    Case-insensitive (reuses CRUDUser.get_by_email) so a provider email
         #    in a different case doesn't create a duplicate account.
         if not user and email:
@@ -253,7 +253,7 @@ class AuthService:
                         user.profile.avatar_url = avatar_url
 
         # 3. Brand-new OAuth signup (no phone/password required).
-        # Strict: the client must send a valid role explicitly — no default is
+        # Strict: the client must send a valid role explicitly - no default is
         # ever written. A missing/invalid role aborts the whole signup.
         new_signup = user is None
         if new_signup:

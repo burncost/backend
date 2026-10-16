@@ -8,8 +8,8 @@ It is deliberately separate from `driver_location_updates` (the high-frequency
 GPS breadcrumb feed): this table stores the low-frequency, semantic updates the
 buyer should see *alongside* the live map, with an actor and event type.
 
-- `actor_type`: driver | vendor | admin (who authored the update)
-- `event_type`: location | status | note (what kind of update)
+- `actor_type`: driver | vendor | admin | buyer (who authored the update)
+- `event_type`: location | status | note | proof | proof_review (what kind of update)
 - `status`: the job status the actor moved to (when event_type == status)
 - `lat/lng`: optional manual location pin (when event_type == location)
 - `note`: optional free-text message
@@ -44,10 +44,10 @@ class DeliveryJobEvent(Base):
         index=True,
     )
 
-    actor_type = Column(String(20), default="driver", nullable=False)  # driver | vendor | admin
+    actor_type = Column(String(20), default="driver", nullable=False)  # driver | vendor | admin | buyer
     actor_name = Column(String(255))
 
-    event_type = Column(String(20), default="status", nullable=False)  # location | status | note | proof
+    event_type = Column(String(20), default="status", nullable=False)  # location | status | note | proof | proof_review
     status = Column(String(20))  # job status when event_type == status
 
     lat = Column(Numeric(11, 8))

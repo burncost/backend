@@ -2,7 +2,7 @@
 
 Used by the delivery proof-of-delivery flow to (a) confirm a photo is genuinely
 live/geotagged and (b) persist the capture time + GPS so a flagged delivery can
-be reviewed later. Design constraint: this is best-effort and NEVER raises — a
+be reviewed later. Design constraint: this is best-effort and NEVER raises - a
 missing/broken EXIF block simply yields empty fields so proof capture is not
 crashed by a camera that omits metadata (the caller decides how to treat that).
 """

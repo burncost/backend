@@ -1,4 +1,4 @@
-"""Phase 1 admin endpoints — dashboard charts, activity feed, notifications,
+"""Phase 1 admin endpoints - dashboard charts, activity feed, notifications,
 order detail, risk entities/trends, analytics overview. Uses existing models only.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -112,7 +112,7 @@ async def admin_stats_recent_activity(limit: int = Query(8, ge=1, le=50),
     now = datetime.utcnow()
     return {"activities": [
         {"id": str(e.id), "type": _activity_meta(e)[0], "title": _activity_meta(e)[1],
-         "description": f"{_activity_meta(e)[1]} — {e.resource_type or 'system'} ({e.resource_id or e.action})",
+         "description": f"{_activity_meta(e)[1]} - {e.resource_type or 'system'} ({e.resource_id or e.action})",
          "time": _relative(e.created_at, now), "color": _activity_meta(e)[2]}
         for e in entries
     ]}
@@ -139,14 +139,135 @@ async def admin_order_detail(order_id: UUID, current_user: dict = Depends(admin_
         supplier = {"business_name": first_vendor.business_name,
                     "contact": (f"{first_vendor.user.profile.first_name} {first_vendor.user.profile.last_name}".strip()
                                 if first_vendor.user and first_vendor.user.profile else None)}
+
+    # ── Fee / tax / commission breakdown ───────────────────────────────────
+    # `orders` only persists the buyer-side totals, so the per-product platform
+    # fee, the supplier's deduction and the driver split are restated here from
+    # Product -> Category and the live (DB-overridable) pricing config.
+    from decimal import Decimal, ROUND_HALF_UP
+    from app.api.v1.endpoints.deliveries import _DRIVER_COMMISSION_RATE
+    from app.models.delivery import DeliveryJob
+    from app.models.driver import DriverProfile
+    from app.models.driver_earnings import DriverEarnings
+    from app.services import pricing_service as _pricing
+    from app.services import runtime_settings as _runtime_settings
+    from app.services import settlement_service as _settlement_service
+
+    await _runtime_settings.refresh(db)
+    pricing, client_share, vendor_share = await _pricing.order_pricing_breakdown(db, order)
+    breakdown = list(pricing.breakdown)
+
+    # Amounts actually charged at checkout (authoritative) vs the restatement.
+    charged_subtotal = float(order.subtotal or 0)
+    charged_shipping = float(order.shipping_fee or 0)
+    charged_vat = float(order.tax_amount or 0)
+    charged_discount = float(order.discount_amount or 0)
+    charged_promo = float(order.promo_discount or 0)
+    charged_total = float(order.total_amount or 0)
+    # The buyer's platform fee is the residual of the checkout formula, adding the
+    # promo back so the fee is not understated by the promo taken off.
+    charged_platform_fee = max(
+        0.0,
+        charged_total - charged_subtotal - charged_shipping - charged_vat
+        + charged_discount + charged_promo,
+    )
+
+    # Per-line split (aligned 1:1 with `order.items`, same order as the pricing
+    # basket) so the card can show gross -> supplier deduction -> net transfer.
+    items_out = []
+    for index, i in enumerate(order.items):
+        line = breakdown[index] if index < len(breakdown) else {}
+        gross = float(i.total_price or 0)
+        vendor_fee = float(line.get("vendor_fee") or 0)
+        items_out.append({
+            "id": str(i.id), "product_name": i.product_name, "sku": i.sku, "quantity": i.quantity,
+            "unit_price": float(i.unit_price), "total_price": gross,
+            "vendor_status": i.vendor_status.value if hasattr(i.vendor_status, "value") else str(i.vendor_status),
+            "fee_model": line.get("fee_model"), "margin_pct": line.get("margin_pct"),
+            "fee_fixed": line.get("fee_fixed"), "margin": line.get("margin"),
+            "client_fee": line.get("client_fee"), "vendor_fee": vendor_fee,
+            "net_transfer": round(max(0.0, gross - vendor_fee), 2),
+        })
+
+    # ── Driver leg (delivery fee -> driver payout) ─────────────────────────
+    job = (await db.execute(
+        select(DeliveryJob).where(DeliveryJob.order_id == order.id)
+        .order_by(DeliveryJob.created_at.desc())
+    )).scalars().first()
+
+    driver_profile = None
+    if job and job.driver_profile_id:
+        driver_profile = (await db.execute(
+            select(DriverProfile).where(DriverProfile.id == job.driver_profile_id)
+        )).scalar_one_or_none()
+
+    earnings = None
+    if job:
+        earnings = (await db.execute(
+            select(DriverEarnings).where(DriverEarnings.delivery_job_id == job.id)
+        )).scalar_one_or_none()
+
+    delivery_fee = float(job.delivery_fee or 0) if job else 0.0
+    if earnings:
+        driver_commission = float(earnings.commission_amount or 0)
+        driver_net = float(earnings.net_amount or 0)
+        earnings_status = earnings.status
+    else:
+        # No ledger row yet: the delivery has not been completed, or the driver is
+        # on a vendor's fleet (paid by that vendor, so never credited here).
+        # Project the same split the ledger would write.
+        gross_dec = Decimal(str(delivery_fee)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        commission = (gross_dec * _DRIVER_COMMISSION_RATE).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        driver_commission = float(commission)
+        driver_net = float(gross_dec - commission)
+        earnings_status = None
+
+    driver = {
+        "assigned": bool(job and job.driver_profile_id),
+        "job_number": job.job_number if job else None,
+        "job_status": job.status if job else None,
+        "driver_name": (job.driver_name if job else None) or getattr(order, "driver_name", None),
+        "driver_phone": (job.driver_phone if job else None) or getattr(order, "driver_phone", None),
+        "is_fleet": bool(driver_profile and driver_profile.vendor_id),
+        "delivery_fee": round(delivery_fee, 2),
+        "commission_rate": float(_DRIVER_COMMISSION_RATE),
+        "commission_amount": round(driver_commission, 2),
+        "net_amount": round(driver_net, 2),
+        "earnings_status": earnings_status,
+    }
+
+    # ── Final split: who ends up with what ─────────────────────────────────
+    platform_fee = float(pricing.platform_fee)
+    vendor_fee_total = float(pricing.vendor_fee)
+    distribution = {
+        "subtotal": round(charged_subtotal, 2),
+        # What the supplier is transferred: line totals less their margin share.
+        "supplier_net": round(charged_subtotal - vendor_fee_total, 2),
+        "supplier_deduction": round(vendor_fee_total, 2),
+        "platform_fee_from_buyer": round(platform_fee, 2),
+        "platform_fee_from_supplier": round(vendor_fee_total, 2),
+        "platform_driver_commission": round(driver_commission, 2),
+        "platform_total": round(platform_fee + vendor_fee_total + driver_commission, 2),
+        "driver_net": round(driver_net, 2),
+        "tax": round(charged_vat, 2),
+        "buyer_charged_total": round(charged_total, 2),
+        # Proof the rows above reconcile to the buyer's invoice (ex-VAT, ex-coupons).
+        "reconciles_to": round(charged_total - charged_vat + charged_discount + charged_promo, 2),
+        "settlement_commission_rate": float(_settlement_service.commission_rate()),
+        "settlement_enabled": _settlement_service.is_enabled(),
+    }
+
     return {
         "id": str(order.id),
         "order_number": order.order_number,
         "status": order.status.value if hasattr(order.status, "value") else str(order.status),
         "payment_status": order.payment_status.value if hasattr(order.payment_status, "value") else str(order.payment_status),
         "payment_method": order.payment_method.value if hasattr(order.payment_method, "value") else None,
-        "subtotal": float(order.subtotal), "shipping_fee": float(order.shipping_fee or 0),
+        "subtotal": float(order.subtotal or 0), "shipping_fee": float(order.shipping_fee or 0),
         "tax_amount": float(order.tax_amount or 0), "discount_amount": float(order.discount_amount or 0),
+        "promo_discount": float(order.promo_discount or 0),
         "total_amount": float(order.total_amount),
         "created_at": order.created_at.isoformat() if order.created_at else None,
         "estimated_delivery_date": order.estimated_delivery_date.isoformat() if order.estimated_delivery_date else None,
@@ -157,10 +278,37 @@ async def admin_order_detail(order_id: UUID, current_user: dict = Depends(admin_
         "buyer": {"name": buyer_name, "email": order.user.email if order.user else None,
                   "phone": order.user.phone_number if order.user else None},
         "supplier": supplier,
-        "items": [{"id": str(i.id), "product_name": i.product_name, "sku": i.sku, "quantity": i.quantity,
-                   "unit_price": float(i.unit_price), "total_price": float(i.total_price),
-                   "vendor_status": i.vendor_status.value if hasattr(i.vendor_status, "value") else str(i.vendor_status)}
-                  for i in order.items],
+        "items": items_out,
+        "charged": {
+            "subtotal": round(charged_subtotal, 2),
+            "platform_fee": round(charged_platform_fee, 2),
+            "shipping_fee": round(charged_shipping, 2),
+            "vat_amount": round(charged_vat, 2),
+            "discount_amount": round(charged_discount, 2),
+            "promo_discount": round(charged_promo, 2),
+            "total_amount": round(charged_total, 2),
+        },
+        # Live-config restatement (see `order_pricing_breakdown`). `breakdown` is the
+        # per-product fee model/pct and it carries the client/vendor split.
+        "pricing": {
+            **pricing.as_dict(),
+            "margin_split": {"client_share": float(client_share), "vendor_share": float(vendor_share)},
+            # False when the admin changed fee/VAT config after this order was placed.
+            "matches_current_config": (
+                abs(charged_platform_fee - float(pricing.platform_fee)) < 0.01
+                and abs(charged_vat - float(pricing.vat_amount)) < 0.01
+            ),
+        },
+        "tax": {
+            "vat_enabled": pricing.vat_enabled,
+            "vat_rate": float(pricing.vat_rate),
+            "vat_base": pricing.vat_base,
+            "vat_base_amount": float(pricing.vat_base_amount),
+            "vat_amount_charged": round(charged_vat, 2),
+            "vat_amount_current": float(pricing.vat_amount),
+        },
+        "driver": driver,
+        "distribution": distribution,
     }
 
 

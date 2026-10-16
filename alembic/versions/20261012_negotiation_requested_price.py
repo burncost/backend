@@ -2,7 +2,7 @@
 
 Additive migration only (no existing column/table is dropped or changed):
 
-* `negotiations.requested_price` — the buyer's opening absolute per-unit bid.
+* `negotiations.requested_price` - the buyer's opening absolute per-unit bid.
   Buyers now bid a naira figure and `requested_discount` is derived from the
   product's catalogue `base_price` server-side (so the buyer never does the
   maths). Additive + nullable: existing rows read back NULL and keep showing

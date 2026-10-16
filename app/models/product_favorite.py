@@ -1,5 +1,5 @@
 """
-Product favourites — a per-user saved-products list.
+Product favourites - a per-user saved-products list.
 
 Guests keep favourites in localStorage (mirrors the guest-cart flow); on
 sign-in the client replays them to `POST /favorites/{product_id}`, so this

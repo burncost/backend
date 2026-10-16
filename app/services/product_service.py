@@ -73,8 +73,8 @@ def _category_conditions(category: str, relaxed: bool = False):
 
     STRICT (the default, used by every marketplace request): every token must
     match in at least one of those fields. Matching the tokens with OR instead
-    let the generic word "systems" — shared by five of the twenty parent
-    categories — bleed across them, so selecting "Roofing Systems" also returned
+    let the generic word "systems" - shared by five of the twenty parent
+    categories - bleed across them, so selecting "Roofing Systems" also returned
     the "Plumbing Systems" rows (PVC pipes, water tanks).
 
     Tokens match on word boundaries (`_norm_like`), not as bare substrings:
@@ -83,7 +83,7 @@ def _category_conditions(category: str, relaxed: bool = False):
 
     RELAXED (chat tool only, on an empty strict result): any token may match, so
     a free-text phrase such as "roofing sheets" still resolves to "Roofing
-    Systems". Never use this for a marketplace filter — it is what caused the
+    Systems". Never use this for a marketplace filter - it is what caused the
     wrong results.
     """
     groups = []
@@ -140,7 +140,7 @@ class ProductService:
         """Get products with filtering, search, and pagination using real DB queries.
 
         When `only_verified=True`, only products belonging to VERIFIED vendors are
-        returned — this is used by the public marketplace so that a pending vendor's
+        returned - this is used by the public marketplace so that a pending vendor's
         products stay private (visible only to the vendor themselves via my-products).
 
         `relaxed_category` is opt-in and used ONLY by the chat tool, as a retry after

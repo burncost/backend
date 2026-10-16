@@ -1,5 +1,5 @@
 """
-Negotiation system models — supplier-builder discount negotiations.
+Negotiation system models - supplier-builder discount negotiations.
 Powers the Negotiation Center admin pages (Phase 2).
 """
 from sqlalchemy import (

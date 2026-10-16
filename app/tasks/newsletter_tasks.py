@@ -1,4 +1,4 @@
-"""Newsletter background task (Phase 3) — daily market "price range of the day".
+"""Newsletter background task (Phase 3) - daily market "price range of the day".
 
 Runs on the Celery `emails` queue (and beat schedule). Respects opt-in: only
 `marketing_opt_in = True` addresses are emailed, composed from real

@@ -45,7 +45,7 @@ WASTAGE = {
 # Every measured quantity the bill carries comes from these documented factors,
 # so the arithmetic behind a rate is reproducible and auditable.
 
-# A carton of four 600x600mm tiles covers 1.44 m² — the pack most Nigerian
+# A carton of four 600x600mm tiles covers 1.44 m² - the pack most Nigerian
 # catalogues sell. 400mm and 300mm packs are listed for when a finish calls for
 # a smaller format.
 TILE_BOX_COVERAGE_M2: Dict[int, float] = {600: 1.44, 400: 0.96, 300: 0.54}

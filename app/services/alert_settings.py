@@ -8,7 +8,7 @@ The five switches on the Notifications tab map to notification *kinds*:
 
 An admin row is only created (and only shown in the inbox) for a kind whose
 toggle is ON. The underlying audit/fraud record is still written everywhere it
-was before — the toggle silences the *inbox*, it never erases evidence.
+was before - the toggle silences the *inbox*, it never erases evidence.
 """
 from __future__ import annotations
 

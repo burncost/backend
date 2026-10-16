@@ -280,12 +280,12 @@ def _change(curr: float, prev: float) -> dict:
 
 
 def _aov(revenue: float, orders: int) -> float:
-    """Average order value — revenue and orders must share one population."""
+    """Average order value - revenue and orders must share one population."""
     return round(revenue / orders, 2) if orders else 0
 
 
 def _bucket_start(ts: datetime, granularity: str) -> datetime:
-    """Start of the day (or ISO week — Monday) containing `ts`."""
+    """Start of the day (or ISO week - Monday) containing `ts`."""
     if granularity == "week":
         return (ts - timedelta(days=ts.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     return ts.replace(hour=0, minute=0, second=0, microsecond=0)

@@ -1,8 +1,8 @@
-"""Payment gateway capture record (Phase 5 — Settlement & Disbursement).
+"""Payment gateway capture record (Phase 5 - Settlement & Disbursement).
 
 Persists, per order, *which* gateway actually captured the funds plus the provider
 transaction reference, amount and gateway fee. Today the code decides the gateway
-at init/verify time but does not record it durably — this closes that gap so any
+at init/verify time but does not record it durably - this closes that gap so any
 later disbursement pays out on the platform that captured the money.
 
 INERT: nothing writes to this automatically yet. Recording is done through the

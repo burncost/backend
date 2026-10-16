@@ -1,4 +1,4 @@
-"""Settlement operations (Phase 5) — capture recording, flag-gated accrual, and
+"""Settlement operations (Phase 5) - capture recording, flag-gated accrual, and
 read summaries backing the admin endpoints. No disbursement here; that lives in
 `app.services.payouts`.
 """
@@ -65,6 +65,13 @@ async def accrue_order(db: AsyncSession, order_id: UUID):
 
     # The buyer was only charged the client share of the platform margin at
     # checkout; the vendor bears the remainder, deducted here from the payout.
+    #
+    # DOUBLE-COUNT WARNING: `release_order_escrow` now deducts the same
+    # vendor-share *per line* directly from the escrow transfer to the vendor.
+    # While `SETTLEMENT_ENABLED` is off (the default) this accrual is inert, so
+    # the two paths cannot both fire. Before enabling settlement, make the ledger
+    # record the margin for reporting only (do NOT subtract it from `net_amount`
+    # again), otherwise the vendor's share would be docked twice.
     from app.services import pricing_service
     vendor_margin = await pricing_service.vendor_margin_for_items(db, order.items)
 

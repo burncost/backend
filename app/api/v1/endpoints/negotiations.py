@@ -132,7 +132,7 @@ def _implied_discount(base_price, price) -> float | None:
 
 
 def _final_discount_pct(n: Negotiation, base_price=None) -> float | None:
-    """The agreed discount % for a list row — never NULL once the deal is settled.
+    """The agreed discount % for a list row - never NULL once the deal is settled.
 
     A stored `final_discount` (admin approve / legacy `accept`) always wins.
     Otherwise the figure is derived: `price_agreed` rows recompute the % off the
@@ -391,7 +391,7 @@ async def send_counter_offer(negotiation_id: UUID, payload: dict, current_user=D
         ))
     elif action == "accept_price":
         # Only the counterparty of the last proposer may accept (strictly the two
-        # parties of this negotiation — the guard above already rejected others).
+        # parties of this negotiation - the guard above already rejected others).
         last = (await db.execute(
             sa_select(NegotiationCounterOffer)
             .where(NegotiationCounterOffer.negotiation_id == n.id)

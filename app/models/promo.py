@@ -12,7 +12,7 @@ class PromoCode(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     code = Column(String(50), unique=True, nullable=False, index=True)
     description = Column(Text)
-    # Flat discount amount in Naira (whole number, e.g. 1000 = ₦1,000 off) —
+    # Flat discount amount in Naira (whole number, e.g. 1000 = ₦1,000 off) -
     # not a percentage. Capped at the eligible subtotal at checkout.
     discount_amount = Column(Numeric(15, 2), nullable=False)
     # Global cap on redemptions across all users (0 = unlimited).

@@ -3,7 +3,7 @@
 All endpoints are RBAC-protected (admin-tier roles only) and return
 in-memory file downloads. XLSX is produced with openpyxl (available); the
 optional PDF invoice uses reportlab and falls back to CSV when reportlab is
-not installed — matching the existing boq_generator.py pattern.
+not installed - matching the existing boq_generator.py pattern.
 """
 import csv
 import io
@@ -137,7 +137,7 @@ async def export_financial_report(
         for o in orders
     ]
 
-    # Totals row — 12 columns; place the 5 numeric totals into slots 4–8.
+    # Totals row - 12 columns; place the 5 numeric totals into slots 4–8.
     totals = [
         sum(float(o.subtotal) for o in orders),
         sum(float(o.shipping_fee or 0) for o in orders),
@@ -171,7 +171,7 @@ async def export_order_invoice(
         from fastapi import HTTPException, status as status_mod
         raise HTTPException(status_code=status_mod.HTTP_404_NOT_FOUND, detail="Order not found")
 
-    buyer = f"{order.user.profile.first_name} {order.user.profile.last_name}".strip() if order.user and order.user.profile else (order.user.email if order.user else "—")
+    buyer = f"{order.user.profile.first_name} {order.user.profile.last_name}".strip() if order.user and order.user.profile else (order.user.email if order.user else "-")
 
     header = ["Item", "SKU", "Qty", "Unit Price", "Total"]
     rows = [
@@ -189,7 +189,7 @@ async def export_order_invoice(
     if format == "csv":
         return _csv_response(filename, [["INVOICE", order.order_number], ["Buyer", buyer], [], header, *rows])
 
-    # PDF via reportlab — graceful CSV fallback if reportlab is unavailable.
+    # PDF via reportlab - graceful CSV fallback if reportlab is unavailable.
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib import colors
@@ -200,7 +200,7 @@ async def export_order_invoice(
         doc = SimpleDocTemplate(buf, pagesize=A4)
         styles = getSampleStyleSheet()
         story = [
-            Paragraph(f"Burncost Invoice — {order.order_number}", styles["Title"]),
+            Paragraph(f"Burncost Invoice - {order.order_number}", styles["Title"]),
             Spacer(1, 12),
             Paragraph(f"Buyer: {buyer}", styles["Normal"]),
             Paragraph(f"Date: {order.created_at.strftime('%Y-%m-%d') if order.created_at else ''}", styles["Normal"]),

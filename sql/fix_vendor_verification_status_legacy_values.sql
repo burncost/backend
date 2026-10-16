@@ -1,5 +1,5 @@
 -- =============================================================
--- BURNCOST — DATA FIX: normalize legacy uppercase enum values
+-- BURNCOST - DATA FIX: normalize legacy uppercase enum values
 --
 -- The current vendor model (Backend/app/models/vendor.py) stores
 -- verification_status in lowercase e.g. 'verified', 'pending'.

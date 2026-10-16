@@ -20,7 +20,7 @@ TIERS = [
     },
     {
         "tier_code": "enterprise", "display_name": "Enterprise", "sort_order": 3,
-        # Effectively uncapped — UI shows "no cap" for enterprise.
+        # Effectively uncapped - UI shows "no cap" for enterprise.
         "transaction_cap": 999_999_999_999,  # "commission_rate": 5.00,  # Phase 13: commission removed
         "required_document_types": ["cac"], "requires_manual_review": False,
         "perks": ["No transaction cap", "T+1 payouts", "BurnCost Verified badge", "Priority support"],

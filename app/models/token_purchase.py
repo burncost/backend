@@ -1,10 +1,10 @@
 """
-TokenPurchase model — a quoted token purchase awaiting (or having received) payment.
+TokenPurchase model - a quoted token purchase awaiting (or having received) payment.
 
 The row is written when the gateway checkout is created and is the single source
 of truth for the quantity and the amount: a webhook or verification call can only
 report that a payment succeeded, never how many tokens to add. It is also the
-idempotency guard — a reference that is already `completed` is never credited twice.
+idempotency guard - a reference that is already `completed` is never credited twice.
 """
 from sqlalchemy import Column, String, Integer, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
@@ -26,7 +26,7 @@ class TokenPurchase(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
 
-    # Our own reference (TKN-xxxxxxxxxxxx) — also used as the gateway tx_ref /
+    # Our own reference (TKN-xxxxxxxxxxxx) - also used as the gateway tx_ref /
     # paymentReference, so a webhook can map a charge back to this quote.
     reference = Column(String(100), nullable=False, unique=True, index=True)
 

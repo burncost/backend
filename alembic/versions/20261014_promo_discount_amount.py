@@ -4,7 +4,7 @@ Switch the promo discount from a percentage to a flat Naira amount. Renames
 `promo_codes.discount_percent` (Numeric(5,2), a 0-100 percentage) to
 `promo_codes.discount_amount` (Numeric(15,2), a whole-Naira amount such as 1000)
 and widens the precision so large amounts fit. Existing values are preserved
-as-is — a legacy row that stored `10` (meaning 10%) now reads as ₦10 off.
+as-is - a legacy row that stored `10` (meaning 10%) now reads as ₦10 off.
 
 Revision ID: 20261014_promo_discount_amount
 Revises: 20261013_promo_scope

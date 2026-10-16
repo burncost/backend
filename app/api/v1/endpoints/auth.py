@@ -118,7 +118,7 @@ def _set_auth_cookies(response: Response, access_token: str, refresh_token: str)
 def _tfa_claim_for(user, *, satisfied: bool) -> bool:
     """The `tfa` claim: has this session cleared the second-factor requirement?
 
-    False for an admin-tier user while `security_2fa` is ON — the admin guard
+    False for an admin-tier user while `security_2fa` is ON - the admin guard
     rejects those tokens, which closes the gap where an admin holding a session
     minted *before* the toggle was switched on would otherwise sail through.
     """
@@ -190,7 +190,7 @@ async def oauth_google(
     if not user_info:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google OAuth failed")
 
-    # Brand-new account? Do NOT create it yet — ask the user for their role first.
+    # Brand-new account? Do NOT create it yet - ask the user for their role first.
     existing = await auth_service.oauth_lookup(
         db, oauth_id=user_info.get("id"), email=user_info.get("email")
     )
@@ -251,7 +251,7 @@ async def oauth_facebook(
     if not user_info:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Facebook OAuth failed")
 
-    # Brand-new account? Do NOT create it yet — ask the user for their role first.
+    # Brand-new account? Do NOT create it yet - ask the user for their role first.
     existing = await auth_service.oauth_lookup(
         db, oauth_id=user_info.get("id"), email=user_info.get("email")
     )
@@ -492,7 +492,7 @@ async def register(
         )
     
     # Strict role validation: only explicit, valid signup roles are accepted.
-    # A missing/invalid role must never fall back to a default — reject before
+    # A missing/invalid role must never fall back to a default - reject before
     # anything is written to the database.
     allowed_roles = {"customer", "vendor", "driver"}
     if not user_in.role or user_in.role.lower() not in allowed_roles:
@@ -583,7 +583,7 @@ async def register(
         return user
         
     except ValueError as e:
-        # Strict role validation failure (from crud) — nothing was written.
+        # Strict role validation failure (from crud) - nothing was written.
         logger.error(f"Registration rejected: {str(e)}")
         await db.rollback()
         raise HTTPException(
@@ -711,7 +711,7 @@ async def login(
 
     # ── Two-factor authentication gate (Admin → Settings → Security) ────────
     # An admin-tier account that has not completed a factor never gets a session
-    # here — it receives a short-lived challenge token instead, so the only
+    # here - it receives a short-lived challenge token instead, so the only
     # screens it can reach are the enrolment/verification endpoints.
     if security_settings.role_requires_2fa(role):
         trusted_cookie = request.cookies.get("2fa_trust")
@@ -1022,7 +1022,7 @@ async def logout(
     # Always clear auth cookies on logout, even without a valid refresh token,
     # so no stale httpOnly crumbs survive the session. Mirror the Set-Cookie
     # attributes (secure / samesite) used when the cookies were created so the
-    # browser reliably deletes them — especially SameSite=None in production.
+    # browser reliably deletes them - especially SameSite=None in production.
     is_prod = settings.DEBUG == False
     response.delete_cookie(
         "access_token", path="/", secure=is_prod, httponly=True,
@@ -1160,8 +1160,8 @@ async def update_password(
 
 # ── Two-factor authentication (Admin → Settings → Security → Two-Factor) ─────
 # Two supported factors, chosen per admin at enrolment:
-#   email  — a 6-digit code emailed to the account (proves the channel works)
-#   totp   — an authenticator app, provisioned from a server-rendered QR code
+#   email  - a 6-digit code emailed to the account (proves the channel works)
+#   totp   - an authenticator app, provisioned from a server-rendered QR code
 # Enrolment is mandatory while `security_2fa` is ON: login withholds all session
 # cookies and hands back a short-lived challenge token instead.
 
@@ -1482,7 +1482,7 @@ async def two_factor_method_confirm(
     pending = await _read_pending(str(user.id))
     method = pending.get("method")
     if method not in ("email", "totp"):
-        raise HTTPException(400, "Start the switch again — your session expired.")
+        raise HTTPException(400, "Start the switch again - your session expired.")
 
     recovery_codes = None
     if method == "email":

@@ -76,7 +76,7 @@ async def set_driver_bank_details(
 
     Drives the earnings surface: marketplace earnings accrue against the ledger
     and are disbursed to this account. The three mandatory fields are required
-    together (enforced by the schema), so this is always a full upsert — there is
+    together (enforced by the schema), so this is always a full upsert - there is
     no way to leave a half-filled account behind for the payout runner to trip on.
     """
     profile.bank_name = payload.bank_name.strip()

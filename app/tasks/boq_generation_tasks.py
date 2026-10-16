@@ -51,7 +51,7 @@ def recalculate_boq_task(boq_id: str):
 
 # ── Background bill verification (large uploads) ──────────────────────────────
 #
-# A full QS workbook can take minutes to parse and re-price — far longer than a
+# A full QS workbook can take minutes to parse and re-price - far longer than a
 # request should be held open. `/boqs/verify/async` therefore spools the upload
 # to a temp path and creates a job document; this task advances that document,
 # and the client polls `GET /boqs/jobs/{job_id}` for the result.
@@ -63,7 +63,7 @@ class _SpooledUpload:
     """Minimal UploadFile stand-in over a temp path.
 
     `BOQGenerator.upload_and_verify` only needs `.read()` and `.filename`, and a
-    plain file object cannot carry the attribute — so the named temp file (the
+    plain file object cannot carry the attribute - so the named temp file (the
     thing that actually survives the request) is wrapped instead.
     """
 

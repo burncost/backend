@@ -1,4 +1,4 @@
-"""Quotation — user-uploaded supplier quotations parsed for verification."""
+"""Quotation - user-uploaded supplier quotations parsed for verification."""
 from sqlalchemy import (
     Column, String, DateTime, Numeric, Integer, ForeignKey, Text, Boolean, Index
 )

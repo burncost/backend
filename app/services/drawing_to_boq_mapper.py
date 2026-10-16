@@ -1,4 +1,4 @@
-"""Drawing → BOQ request mapper — builds a BOQGenerationRequest from
+"""Drawing → BOQ request mapper - builds a BOQGenerationRequest from
 Gemini Vision extraction output so the drawing→quantity pipeline is automatic.
 
 Reuses the existing BOQGenerationRequest schema and MITM/price enrichment flow.
@@ -45,7 +45,7 @@ DEFAULT_MIN_PLAUSIBLE_AREA_M2 = 25.0
 # carry wall thickness, circulation and openings.
 DRAWING_AREA_UPLIFT_PCT = 10.0
 
-# Nigerian practice for rooms the drawing did not dimension — assuming a size is
+# Nigerian practice for rooms the drawing did not dimension - assuming a size is
 # closer to how a QS would bill than dropping the room entirely.
 DEFAULT_ROOM_AREAS_M2 = {
     "master": 18.0,
@@ -175,7 +175,7 @@ class DrawingToBOQMapper:
         if rooms and room_total > 0 and abs(room_total - total_area) / total_area > 0.25:
             geometry_warnings.append(
                 f"Room areas total {round(room_total, 2)} m² against a stated floor area of "
-                f"{round(total_area, 2)} m² — one of the readings is likely wrong."
+                f"{round(total_area, 2)} m² - one of the readings is likely wrong."
             )
         if defaulted_rooms:
             geometry_warnings.append(

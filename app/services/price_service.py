@@ -8,12 +8,12 @@ Interfaces with the building materials database to:
   3. Flag items where BOQ price deviates significantly from DB price
   4. Fallback chain when our own database has no price for a line, tried in
      exactly this order and never in any other:
-        a. `products` (PostgreSQL) — vendor catalogue, the DISCOUNT price first,
+        a. `products` (PostgreSQL) - vendor catalogue, the DISCOUNT price first,
            cheapest sellable offer wins
         b. `material_rates` (PostgreSQL `current_price`, then MongoDB)
         c. published online price lists / general web search (online_market)
         d. offline observed online average reference (online_average)
-        e. clearly-flagged AI estimate (ai_estimate) — never presented as
+        e. clearly-flagged AI estimate (ai_estimate) - never presented as
            verified; it exists so a BOQ always totals
   5. Vendor notification for out-of-stock items
 
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 # Provenance values that mean "our own database priced this line". Anything else
 # (live online market, offline online average, AI estimate) is still priced so
-# the BOQ totals, but it is never tagged as verified — the `verified` field is
+# the BOQ totals, but it is never tagged as verified - the `verified` field is
 # simply left out of the payload rather than shipped as a negative flag.
 DB_SOURCES = frozenset({"database", "product_catalogue", "product_discount"})
 
@@ -164,7 +164,7 @@ class DBProduct:
 
 
 # ─────────────────────────────────────────
-# PRODUCT CATALOGUE PRICING (tier 1 — PostgreSQL `products`)
+# PRODUCT CATALOGUE PRICING (tier 1 - PostgreSQL `products`)
 # ─────────────────────────────────────────
 
 # Bill wording that is not part of a product name. Mirrors
@@ -195,8 +195,8 @@ def catalogue_search_term(description: str) -> str:
 def effective_product_price(product: Dict[str, Any]) -> Tuple[float, str]:
     """Rate a buyer actually pays for a catalogue product, and its provenance.
 
-    The discount price wins whenever it is a real positive figure — that is the
-    price we sell at — and the list price is the fallback. Same rule (and same
+    The discount price wins whenever it is a real positive figure - that is the
+    price we sell at - and the list price is the fallback. Same rule (and same
     ranking) as ToolExecutor._get_cheapest_price, so a BOQ line prices exactly
     like the same item searched in chat.
     """
@@ -349,15 +349,15 @@ FINISH_MULTIPLIERS: Dict[str, float] = {
 
 
 # ─────────────────────────────────────────
-# PRICE ENGINE — real DB queries + flagged estimate fallback
+# PRICE ENGINE - real DB queries + flagged estimate fallback
 # ─────────────────────────────────────────
 
 class PriceEngine:
     """
     PriceEngine queries the MongoDB material_rates collection for real prices.
-    No hallucinated prices — DB only. For unmatched items the caller falls back
+    No hallucinated prices - DB only. For unmatched items the caller falls back
     to the observed online average price reference, and only when that has
-    nothing either, to get_market_rate_estimate — a clearly-flagged AI estimate
+    nothing either, to get_market_rate_estimate - a clearly-flagged AI estimate
     that is never presented as a verified market price.
     """
 
@@ -430,7 +430,7 @@ class PriceEngine:
             except Exception as e:
                 logger.warning(f"MongoDB query failed: {e}")
 
-        # No mock fallback — return None so caller can try flagged estimate
+        # No mock fallback - return None so caller can try flagged estimate
         return None
 
     async def get_market_rate_estimate(self, description: str, city: str = "Abuja") -> Optional[Dict[str, Any]]:
@@ -448,7 +448,7 @@ for this construction material in {city}, Nigeria:
 Material: {description}
 City: {city}
 
-This is an ESTIMATE only — it must never be presented as a verified market price.
+This is an ESTIMATE only - it must never be presented as a verified market price.
 
 Return ONLY valid JSON with this exact structure:
 {{
@@ -546,7 +546,7 @@ If you cannot provide an estimate, return: {{"rate": null, "confidence": 0}}"""
 
 
 # ─────────────────────────────────────────
-# PRICE TRUTH SERVICE — DB-only verified prices + provenance
+# PRICE TRUTH SERVICE - DB-only verified prices + provenance
 # ─────────────────────────────────────────
 
 class PriceTruthService:
@@ -565,7 +565,7 @@ class PriceTruthService:
     ) -> Optional[Dict[str, Any]]:
         """
         Return a DB-verified price only, with provenance.
-        Returns None when no verified DB price exists — never an estimate.
+        Returns None when no verified DB price exists - never an estimate.
         """
         prices = await self.price_service._load_prices()
         description_lower = description.lower()
@@ -734,7 +734,7 @@ class PriceService:
             return self._price_cache
 
         self._price_cache = {}
-        logger.info("No DB prices loaded — verified prices unavailable; AI estimates may be used")
+        logger.info("No DB prices loaded - verified prices unavailable; AI estimates may be used")
         return self._price_cache
 
     # ── Tier 1: product catalogue (PostgreSQL `products`) ───────────────────
@@ -748,7 +748,7 @@ class PriceService:
         marketplace and chat use, so a BOQ carries the price a buyer actually
         pays: the discount price whenever there is one, the list price
         otherwise, cheapest offer wins. Only ACTIVE listings with a positive
-        price from non-suspended vendors qualify — a draft or discontinued row
+        price from non-suspended vendors qualify - a draft or discontinued row
         must never anchor a contract sum.
 
         Runs only when a Postgres session was injected: a service built without
@@ -841,7 +841,7 @@ class PriceService:
         if not settings.ONLINE_PRICE_SEARCH_ENABLED:
             return None
         if self._online_lookups >= max(0, int(settings.ONLINE_PRICE_SEARCH_MAX_PER_RUN)):
-            logger.info("Online price search budget reached — skipping '%s'", description)
+            logger.info("Online price search budget reached - skipping '%s'", description)
             return None
 
         self._online_lookups += 1
@@ -856,7 +856,7 @@ class PriceService:
 
         The prompt's `[INSERT YOUR APP'S DATABASE PRICE LIST CONTEXT HERE]`
         placeholder is filled from the application's own `material_rates` data so
-        the model can name the right specification from a real catalogue — it
+        the model can name the right specification from a real catalogue - it
         still never states a price: enrichment does the arithmetic afterwards.
 
         A full rate table would blow the input budget, so rows are capped (city
@@ -874,7 +874,7 @@ class PriceService:
 
         if not prices:
             return (
-                "  (no verified catalogue rates are loaded — leave every rate at 0 "
+                "  (no verified catalogue rates are loaded - leave every rate at 0 "
                 "and let the price service fill them in)"
             )
 
@@ -924,7 +924,7 @@ class PriceService:
     ) -> Optional[Dict[str, Any]]:
         """
         DB-only verified rate lookup used by quotation analysis.
-        Returns None when no verified DB price exists — never an estimate,
+        Returns None when no verified DB price exists - never an estimate,
         so inflation flags are never based on invented prices.
         """
         verified = await PriceTruthService(self).get_verified_rate(description, city)
@@ -938,10 +938,10 @@ class PriceService:
         Get the best matching rate for a BOQ item description.
         Sources are tried in this order and never in any other:
           1. Product catalogue in our database (products table): discount price
-             first, cheapest sellable offer — price_source='product_discount'
+             first, cheapest sellable offer - price_source='product_discount'
              or 'product_catalogue'
           2. Market rates in our database (material_rates.current_price, then
-             MongoDB) — price_source='database'
+             MongoDB) - price_source='database'
           3. Current best price found online (price_source='online_market')
           4. Offline observed online average reference (price_source=
              'online_average')
@@ -964,20 +964,20 @@ class PriceService:
         if verified:
             return verified
 
-        # 3. Live online price search — only after both DB stores missed.
+        # 3. Live online price search - only after both DB stores missed.
         online_market = await self.get_online_market_rate(description, city, unit)
         if online_market:
-            logger.info(f"Database price not found for '{description}' — using online market price")
+            logger.info(f"Database price not found for '{description}' - using online market price")
             return online_market
 
         # 4. Observed online average reference (offline, deterministic).
         online = self.engine.get_online_average_rate(description, city, unit)
         if online:
-            logger.info(f"Database price not found for '{description}' — using online average price")
+            logger.info(f"Database price not found for '{description}' - using online average price")
             return online
 
         # 5. Flagged AI estimate fallback (never presented as verified)
-        logger.info(f"Database price not found for '{description}' — returning flagged AI estimate")
+        logger.info(f"Database price not found for '{description}' - returning flagged AI estimate")
         estimate = await self.engine.get_market_rate_estimate(description, city)
         if estimate:
             return estimate
@@ -1108,7 +1108,7 @@ class PriceService:
                 if matching_product.price_source in ("product_discount", "product_catalogue")
                 else "database"
             )
-            # Quantity provenance — preserve existing label (user/drawing/ai),
+            # Quantity provenance - preserve existing label (user/drawing/ai),
             # default to "mitm" (Nigerian default ratios) when not set.
             if not item.get("quantity_source"):
                 item["quantity_source"] = "mitm"
@@ -1171,14 +1171,14 @@ class PriceService:
 
             return item, None, None
 
-        # Current best price found online — reached only because both of our own
+        # Current best price found online - reached only because both of our own
         # stores (products, material_rates) had nothing. Never presented as
         # verified, and the page it came from travels with the figure.
         market = await self.get_online_market_rate(
             item.get("description", ""), city, item.get("unit")
         )
         if market:
-            logger.info(f"No database match for '{description}' — using online market price")
+            logger.info(f"No database match for '{description}' - using online market price")
             item["db_price_matched"] = False
             item["db_product_name"] = market.get("product_name", description)
             item["db_product_code"] = market.get("product_code", "")
@@ -1193,14 +1193,14 @@ class PriceService:
             item["source_name"] = market.get("source_name")
             return item, None, None
 
-        # Observed online average price — the DB had nothing, so an observed
+        # Observed online average price - the DB had nothing, so an observed
         # market median completes the total. It is never presented as verified
         # and is always labelled "online average price" to the user.
         online = self.engine.get_online_average_rate(
             item.get("description", ""), city, item.get("unit")
         )
         if online:
-            logger.info(f"No DB match for '{description}' — using online average price")
+            logger.info(f"No DB match for '{description}' - using online average price")
             item["db_price_matched"] = False
             item["db_product_name"] = online.get("product_name", description)
             item["db_product_code"] = online.get("product_code", "")
@@ -1215,7 +1215,7 @@ class PriceService:
             return item, None, None
 
         # Flagged AI estimate fallback (never presented as verified)
-        logger.info(f"No DB match for '{description}' — returning flagged AI estimate")
+        logger.info(f"No DB match for '{description}' - returning flagged AI estimate")
         estimate = await self.engine.get_market_rate_estimate(description, city)
         if estimate:
             item["db_price_matched"] = False
@@ -1231,7 +1231,7 @@ class PriceService:
             item["estimated"] = True
             return item, None, None
 
-        # No price or estimate found — mark as out of stock
+        # No price or estimate found - mark as out of stock
         item["db_price_matched"] = False
         item["rate_source"] = "unavailable"
         item["price_status"] = "unavailable"
@@ -1260,7 +1260,7 @@ class PriceService:
         Returns count of alerts created.
         """
         if not self.pg_db:
-            logger.warning("No PostgreSQL session — cannot notify vendors")
+            logger.warning("No PostgreSQL session - cannot notify vendors")
             return 0
 
         count = 0

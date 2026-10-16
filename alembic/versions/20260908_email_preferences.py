@@ -1,4 +1,4 @@
-"""add user_email_preferences table (Phase 3 — email opt-in).
+"""add user_email_preferences table (Phase 3 - email opt-in).
 
 Additive migration only: creates the new `user_email_preferences` table and
 indexes. No columns/tables used by auth, onboarding, orders or payments are

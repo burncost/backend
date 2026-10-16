@@ -1,4 +1,4 @@
-"""Phase 2 admin negotiation endpoints — Negotiation Center, Discount Config,
+"""Phase 2 admin negotiation endpoints - Negotiation Center, Discount Config,
 Supplier Performance, Builder Activity, and Negotiation Analytics.
 
 These power the negotiation admin pages. Powered by the new negotiation models.
@@ -36,7 +36,7 @@ def _status_label(s: str) -> str:
 
 
 def _final_discount_pct(n: Negotiation) -> float | None:
-    """Agreed discount % for a row — never NULL once the deal is settled.
+    """Agreed discount % for a row - never NULL once the deal is settled.
 
     Mirrors `negotiations._final_discount_pct`; the catalogue list price is not
     loaded here, so a `price_agreed` row uses `counter_offer`, which
@@ -75,8 +75,8 @@ def _neg_dict(n: Negotiation) -> dict:
         "status": _status_label(n.status),
         "flagged": bool(n.flagged),
         "suspended": bool(n.suspended),
-        "request_date": n.created_at.strftime("%Y-%m-%d") if n.created_at else "—",
-        "request_time": n.created_at.strftime("%H:%M") if n.created_at else "—",
+        "request_date": n.created_at.strftime("%Y-%m-%d") if n.created_at else "-",
+        "request_time": n.created_at.strftime("%H:%M") if n.created_at else "-",
         "created_at": n.created_at.isoformat() if n.created_at else None,
         "counter_offers": [
             {"id": str(c.id), "offered_by": c.offered_by,
@@ -98,7 +98,7 @@ async def admin_list_negotiations(
 ):
     """All negotiations for the center, with optional status/search filtering."""
     # Demand-broadcast bid threads reuse the Negotiation table but are not
-    # discount negotiations — keep them out of the discount tooling.
+    # discount negotiations - keep them out of the discount tooling.
     query = (select(Negotiation)
              .where(Negotiation.demand_alert_id.is_(None))
              .options(selectinload(Negotiation.builder).selectinload(User.profile),
@@ -208,7 +208,7 @@ async def admin_negotiation_review(
     if not action:
         raise HTTPException(400, "action is required")
 
-    # Bid threads (demand_alert_id set) are not discount negotiations — an admin
+    # Bid threads (demand_alert_id set) are not discount negotiations - an admin
     # must not approve/reject them through the discount review path.
     n = (await db.execute(select(Negotiation).where(
         Negotiation.id == negotiation_id,
@@ -267,7 +267,7 @@ async def admin_list_discount_configs(current_user=Depends(admin_guard), db=Depe
          "auto_rejection_threshold": float(c.auto_rejection_threshold or 0),
          "min_order_qty": c.min_order_qty or 0, "min_order_value": float(c.min_order_value or 0),
          "quote_expiration": c.quote_expiration_hours or 0,
-         "last_modified": c.updated_at.strftime("%Y-%m-%d") if c.updated_at else "—",
+         "last_modified": c.updated_at.strftime("%Y-%m-%d") if c.updated_at else "-",
          "modified_by": c.last_modified_by or "System"}
         for c in rows]}
 
@@ -317,7 +317,7 @@ async def admin_negotiation_analytics(current_user=Depends(admin_guard), db=Depe
         "total_requests": str(total), "approved_requests": str(approved),
         "rejected_requests": str(rejected), "pending_requests": str(pending),
         "counter_offers": str(counter), "success_rate": f"{success_rate}%",
-        "total_savings": float(savings), "avg_requested_discount": "—", "avg_approved_discount": "—",
+        "total_savings": float(savings), "avg_requested_discount": "-", "avg_approved_discount": "-",
         "monthly_trend": monthly,
         "category_breakdown": [{"name": r[0] or "Other", "value": round((r[1] / total_cat) * 100)} for r in cats],
         "funnel": [

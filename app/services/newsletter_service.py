@@ -1,4 +1,4 @@
-"""Newsletter service (Phase 3) — composes a market "price range of the day"
+"""Newsletter service (Phase 3) - composes a market "price range of the day"
 email and respects the opt-in record in `user_email_preferences`.
 
 Real sends go through NotificationService/Brevo (the same transport already used
@@ -65,7 +65,7 @@ class NewsletterService:
         def _range(it: Dict[str, Any]) -> str:
             lo, hi = it.get("low"), it.get("high")
             if lo is None and hi is None:
-                return "—"
+                return "-"
             if hi is None or lo is None or abs((hi or 0) - (lo or 0)) < 0.005:
                 return f"₦{lo if lo is not None else hi:,.2f}"
             return f"₦{lo:,.2f} – ₦{hi:,.2f}"

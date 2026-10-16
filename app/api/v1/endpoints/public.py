@@ -31,7 +31,7 @@ async def list_testimonials(
     db: AsyncSession = Depends(get_db),
 ):
     """Aggregate approved reviews across products and vendors into a public
-    testimonial feed for the landing page. Never raises — returns [] on error
+    testimonial feed for the landing page. Never raises - returns [] on error
     so a public page cannot be broken by an empty/unhealthy DB."""
     try:
         if limit < 1:

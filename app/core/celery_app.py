@@ -29,7 +29,7 @@ celery_app.conf.update(
     worker_max_tasks_per_child=1000,
 )
 
-# Daily market price newsletter (Phase 3) — runs on the emails queue.
+# Daily market price newsletter (Phase 3) - runs on the emails queue.
 celery_app.conf.beat_schedule = {
     "send-price-of-day-daily": {
         "task": "send_price_of_day_newsletter",

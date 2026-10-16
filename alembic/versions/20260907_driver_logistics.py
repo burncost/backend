@@ -27,7 +27,7 @@ def upgrade() -> None:
     if not exists:
         op.execute(sa.text("ALTER TYPE user_role ADD VALUE 'driver'"))
 
-    # 2) driver_profiles — driver identity, availability, default/live location.
+    # 2) driver_profiles - driver identity, availability, default/live location.
     op.create_table(
         "driver_profiles",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -59,7 +59,7 @@ def upgrade() -> None:
     op.create_index("ix_driver_profiles_user_id", "driver_profiles", ["user_id"], unique=True)
     op.create_index("ix_driver_profiles_vendor_id", "driver_profiles", ["vendor_id"])
 
-    # 3) delivery_jobs — dispatch records for orders.
+    # 3) delivery_jobs - dispatch records for orders.
     op.create_table(
         "delivery_jobs",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -102,7 +102,7 @@ def upgrade() -> None:
     op.create_index("ix_delivery_jobs_status", "delivery_jobs", ["status"])
     op.create_index("ix_delivery_jobs_created_at", "delivery_jobs", ["created_at"])
 
-    # 4) driver_location_updates — time-series live-location feed.
+    # 4) driver_location_updates - time-series live-location feed.
     op.create_table(
         "driver_location_updates",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),

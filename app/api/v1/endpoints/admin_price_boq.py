@@ -1,4 +1,4 @@
-"""Phase 4 admin endpoints — Price Integrity + BOQ Analysis.
+"""Phase 4 admin endpoints - Price Integrity + BOQ Analysis.
 
 Powered by the new price_boq models.
 """
@@ -30,7 +30,7 @@ def _anomaly_dict(a: PriceAnomaly) -> dict:
         "variance_pct": float(a.variance_pct or 0),
         "status": a.status,
         "detected_at": a.detected_at.isoformat() if a.detected_at else None,
-        "last_checked": a.detected_at.strftime("%Y-%m-%d") if a.detected_at else "—",
+        "last_checked": a.detected_at.strftime("%Y-%m-%d") if a.detected_at else "-",
         "history": [{"price": float(h.price or 0), "recorded_at": h.recorded_at.isoformat() if h.recorded_at else None}
                     for h in a.history],
     }

@@ -1,8 +1,8 @@
-"""Email marketing preferences (Phase 3 — newsletter opt-in).
+"""Email marketing preferences (Phase 3 - newsletter opt-in).
 
 Lets a signed-in user view or change their explicit marketing opt-in, and lets
 anyone unsubscribe via a one-click token link (no login required). No email is
-sent here — this only records consent that the later newsletter sender respects.
+sent here - this only records consent that the later newsletter sender respects.
 """
 from datetime import datetime
 from uuid import UUID
