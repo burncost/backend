@@ -64,6 +64,23 @@ router = APIRouter()
 _ACTIVE_JOB_STATUSES = ("accepted", "picked_up", "in_transit")
 _TERMINAL = ("delivered", "cancelled", "expired")
 
+
+def _require_vehicle_photos(profile: DriverProfile) -> None:
+    """Enforce the onboarding photo gate on every path that can win a job.
+
+    A driver must have documented the whole vehicle (front, back, left, right)
+    before going online or accepting work. The check is server-side and reads
+    the model property, so bypassing the UI cannot get around it; the message
+    names the missing angles so the driver knows exactly what to upload.
+    """
+    if profile.vehicle_photos_complete:
+        return
+    missing = ", ".join(profile.missing_vehicle_photos)
+    raise HTTPException(
+        http_status.HTTP_403_FORBIDDEN,
+        detail=f"Upload your vehicle photos before accepting deliveries. Missing: {missing}.",
+    )
+
 # Burncost commission taken on each independent-driver delivery payout (net of
 # the fee before it reaches the driver). Kept at 0 by default so no driver is
 # charged until this rate is deliberately configured; payout runs land in the
@@ -1016,6 +1033,11 @@ async def driver_list_offers(
         return []
     if profile.status != "active":
         return []
+    # No photo set -> no offers. Returning an empty list (rather than an error)
+    # keeps the driver dashboard's normal polling silent; the UI separately shows
+    # the "add vehicle photos" banner from the profile payload.
+    if not profile.vehicle_photos_complete:
+        return []
 
     result = await db.execute(
         select(DeliveryJob)
@@ -1040,6 +1062,7 @@ async def driver_accept_offer(
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, detail="You are offline. Turn on availability to accept deliveries.")
     if profile.status != "active":
         raise HTTPException(http_status.HTTP_403_FORBIDDEN, detail="Driver account is not active.")
+    _require_vehicle_photos(profile)
 
     # Drivers may hold only one active job at a time.
     active = await db.execute(

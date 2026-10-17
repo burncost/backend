@@ -1553,6 +1553,18 @@ ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS bank_account_number VARCHAR
 ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS bank_account_name VARCHAR(255);
 ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS bank_code VARCHAR(10);
 
+-- 50.7 driver_profiles vehicle onboarding photos (front/back/left/right)
+-- Additive only: five NULLABLE columns on the existing table, so a fresh install
+-- that already ran an earlier copy of this file converges on the same schema as
+-- `alembic upgrade 20261023_driver_vehicle_photos`. Each photo column stores the
+-- URL of an already-normalised image (<= 0.5 MB, longest edge 1920 px); no image
+-- bytes live in the database. No column is altered or dropped.
+ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS vehicle_photo_front VARCHAR(1000);
+ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS vehicle_photo_back VARCHAR(1000);
+ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS vehicle_photo_left VARCHAR(1000);
+ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS vehicle_photo_right VARCHAR(1000);
+ALTER TABLE driver_profiles ADD COLUMN IF NOT EXISTS vehicle_photos_updated_at TIMESTAMP;
+
 -- =============================================================
 -- 51. ORDERS promo_discount (flat Naira promo amount)
 -- =============================================================

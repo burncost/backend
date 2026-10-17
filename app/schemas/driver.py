@@ -1,6 +1,6 @@
 """Driver schemas (Phase 2 - driver self-onboarding & identity API)."""
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict, List
 from uuid import UUID
 from datetime import datetime
 
@@ -21,6 +21,14 @@ class DriverProfileOut(BaseModel):
     vehicle_plate: Optional[str] = None
     vehicle_capacity: Optional[str] = None
     license_no: Optional[str] = None
+
+    # Vehicle onboarding photos: one stored URL per angle (front/back/left/right).
+    # `vehicle_photos_complete` is the server-side gate the driver UI and the
+    # accept-offer endpoint both read, so the rule cannot drift between them.
+    vehicle_photos: Dict[str, Optional[str]] = {}
+    vehicle_photos_complete: bool = False
+    missing_vehicle_photos: List[str] = []
+    vehicle_photos_updated_at: Optional[datetime] = None
 
     default_address: Optional[str] = None
     default_city: Optional[str] = None

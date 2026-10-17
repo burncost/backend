@@ -194,6 +194,16 @@ class Settings(BaseSettings):
     ALLOWED_DOCUMENT_EXTENSIONS: List[str] = [
         ".dwg", ".dxf", ".rvt", ".ifc", ".pdf", ".xlsx", ".docx"
     ]
+
+    # ── Driver vehicle photos (onboarding gate) ─────────────────────────────
+    # Every vehicle photo is normalised before storage so the stored file never
+    # exceeds 0.5 MB. 0.5 MB is the *output* budget; the incoming upload may be
+    # larger (up to MAX_VEHICLE_PHOTO_UPLOAD_BYTES) because it is downscaled
+    # first. 1920 px on the longest edge keeps plates/body panels legible.
+    VEHICLE_PHOTO_MAX_BYTES: int = 500 * 1024            # 512,000 bytes
+    VEHICLE_PHOTO_MAX_EDGE: int = 1920                   # longest edge, px
+    VEHICLE_PHOTO_MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
+    VEHICLE_PHOTO_ANGLES: List[str] = ["front", "back", "left", "right"]
     
     # BigQuery
     BIGQUERY_PROJECT_ID: Optional[str] = None

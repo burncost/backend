@@ -61,6 +61,17 @@ class DriverProfile(Base):
     vehicle_capacity = Column(String(100))
     license_no = Column(String(100))
 
+    # Vehicle photo set captured during onboarding: one image per angle, enough
+    # to see the full vehicle (front, back and both sides). Each column stores
+    # the stored (already normalised to <= 0.5 MB) image URL. All nullable so a
+    # driver can onboard progressively and existing rows are unaffected; the
+    # delivery gate below requires all four before any job can be accepted.
+    vehicle_photo_front = Column(String(1000))
+    vehicle_photo_back = Column(String(1000))
+    vehicle_photo_left = Column(String(1000))
+    vehicle_photo_right = Column(String(1000))
+    vehicle_photos_updated_at = Column(DateTime)
+
     # Default / operating location (city + state for MVP matching; coords kept for later).
     default_address = Column(String(500))
     default_city = Column(String(100))
@@ -104,6 +115,31 @@ class DriverProfile(Base):
             and self.bank_account_number
             and self.bank_account_name
         )
+
+    @property
+    def vehicle_photos(self) -> dict:
+        """The four onboarding angles mapped to their stored URLs (None = missing)."""
+        return {
+            "front": self.vehicle_photo_front,
+            "back": self.vehicle_photo_back,
+            "left": self.vehicle_photo_left,
+            "right": self.vehicle_photo_right,
+        }
+
+    @property
+    def missing_vehicle_photos(self) -> list:
+        """Angles still awaiting an upload, in the canonical front/back/left/right order."""
+        return [angle for angle, url in self.vehicle_photos.items() if not url]
+
+    @property
+    def vehicle_photos_complete(self) -> bool:
+        """True once the full vehicle has been documented (delivery gate).
+
+        One photo each for front, back and both sides - enough for a vendor or
+        admin to identify the vehicle. Computed so it cannot drift from the
+        columns it describes.
+        """
+        return not self.missing_vehicle_photos
 
     def __repr__(self) -> str:
         return f"<DriverProfile id={self.id} status={self.status}>"
