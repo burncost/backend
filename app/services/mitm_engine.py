@@ -131,6 +131,12 @@ class MITMEngine:
     generates MITM flags, and scores confidence.
     """
 
+    # `_material_line` is a module-level helper, but the material take-off
+    # call sites in `_compute_derived_quantities` use `self._material_line(...)`.
+    # Bind it on the class so those calls resolve (they raised AttributeError
+    # on every BOQ generation after the helper was moved out of the class).
+    _material_line = staticmethod(_material_line)
+
     def __init__(self, price_service: Optional[PriceService] = None):
         self.price_service = price_service or PriceService()
 
