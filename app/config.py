@@ -204,6 +204,14 @@ class Settings(BaseSettings):
     VEHICLE_PHOTO_MAX_EDGE: int = 1920                   # longest edge, px
     VEHICLE_PHOTO_MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
     VEHICLE_PHOTO_ANGLES: List[str] = ["front", "back", "left", "right"]
+
+    # ── Vendor business image ───────────────────────────────────────────────
+    # Same byte-budget contract as vehicle photos: the incoming file may be up
+    # to 10 MB, but the stored JPEG is capped at 400 KB / 1200 px (plenty for
+    # the 800x800 display the UI uses).
+    VENDOR_IMAGE_MAX_BYTES: int = 400 * 1024
+    VENDOR_IMAGE_MAX_EDGE: int = 1200
+    VENDOR_IMAGE_MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
     
     # BigQuery
     BIGQUERY_PROJECT_ID: Optional[str] = None

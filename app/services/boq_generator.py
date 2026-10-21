@@ -17,7 +17,7 @@ from app.schemas.boq import BOQGenerationRequest
 from app.services.boq_file_parser import group_items_by_element, parse_boq_file
 from app.services.mitm_engine import MITMEngine
 from app.services.price_service import DB_SOURCES, PriceService, PriceTruthService
-from app.services.demand_broadcast_service import broadcast_boq_demand
+from app.services.demand_broadcast_service import broadcast_boq_demand, material_demand_lines
 from app.services.gemini_client import get_gemini_client
 from app.config import settings
 
@@ -685,7 +685,7 @@ class BOQGenerator:
         for the broadcast. Best-effort: any failure is logged and reported as an
         empty summary so a BOQ run never fails over demand broadcasting.
         """
-        empty = {"alerts_created": 0, "bids_opened": 0, "notified": 0}
+        empty = {"alerts_created": 0, "alerts_updated": 0, "bids_opened": 0, "notified": 0}
         if not lines or not requested_by:
             return empty
         if self.pg_db is not None:
@@ -1463,10 +1463,36 @@ class BOQGenerator:
                 "quantities and rates were kept."
             ]
 
+        # A regenerated bill has no take-off engine behind it, so the lines a
+        # vendor can actually help with are the ones the verification could not
+        # price. Broadcast them exactly like a parameter-generated bill so the
+        # regeneration path stops being a dead end for demand.
+        demand_lines = [
+            {
+                "description": line.get("description", ""),
+                "quantity": line.get("quantity", 0),
+                "unit": line.get("unit", ""),
+                "city": city,
+            }
+            for line in line_items
+            if not line.get("rate") and float(line.get("quantity") or 0) > 0
+        ]
+        demand_summary = {"alerts_created": 0, "alerts_updated": 0, "bids_opened": 0}
+        if demand_lines:
+            demand_summary = await self._broadcast_demand(
+                demand_lines,
+                project_title=title,
+                city=city,
+                requested_by=user_id,
+            )
+
         return {
             "boq_id": new_id,
             "record_type": "verification",
             "status": "regenerated",
+            "demand_alerts_created": demand_summary["alerts_created"],
+            "demand_alerts_updated": demand_summary.get("alerts_updated", 0),
+            "bid_threads_opened": demand_summary["bids_opened"],
             "regenerated_boq": {
                 "project_title": title,
                 "regenerated_at": now.isoformat(),
@@ -1769,7 +1795,14 @@ Return ONLY valid JSON with this structure:
 
         if user_id:
             project_title = enriched["project_info"]["project_title"]
-            demand_items = out_of_stock + estimated_items
+            # Every measured material line is broadcast, not just the unpriced
+            # ones: a vendor bid on "8,400 blocks" is what creates competition
+            # even when the catalogue already has a rate for the line.
+            demand_items = (
+                material_demand_lines(enriched.get("derived_quantities"), city)
+                + out_of_stock
+                + estimated_items
+            )
             if demand_items:
                 demand_summary = await self._broadcast_demand(
                     demand_items,
@@ -1780,6 +1813,7 @@ Return ONLY valid JSON with this structure:
                 for item in boq["out_of_stock_items"]:
                     item["vendor_notified"] = True
                 boq["demand_alerts_created"] = demand_summary["alerts_created"]
+                boq["demand_alerts_updated"] = demand_summary.get("alerts_updated", 0)
                 boq["bid_threads_opened"] = demand_summary["bids_opened"]
 
         totals = self.price_service.recalculate_totals(boq["elements"])
@@ -1836,6 +1870,12 @@ Return ONLY valid JSON with this structure:
                 "The AI BOQ omitted these element groups: "
                 f"{', '.join(missing_groups)} - review before issuing the bill."
             )
+        # Per-item material take-off: the purchasable lines behind the bill.
+        # Also the source of the vendor demand broadcast (Phase 2), so the
+        # numbers a vendor is asked to bid on always match the bill.
+        boq["material_takeoff"] = (
+            (enriched.get("derived_quantities") or {}).get("material_counts") or []
+        )
         # Quantity provenance: how much of the bill the engine measured itself.
         boq["quantity_provenance"] = {
             "python": quantity_stats["applied"],
@@ -2207,8 +2247,14 @@ Return ONLY valid JSON with this exact structure:
         ext_blocks = derived.get("external_blocks_225mm", total_area * 20)
         int_blocks = derived.get("internal_blocks_150mm", total_area * 12)
         roof_area = derived.get("roof_slope_area_m2", total_area * 1.3)
-        door_count = sum(len(f["openings"]["doors"]) for f in enriched["floors"])
-        window_count = sum(len(f["openings"]["windows"]) for f in enriched["floors"])
+        # Opening *units*, not opening types: a floor with one door spec but a
+        # count of 6 still needs six doors hung.
+        door_count = int(derived.get("doors_total_nr") or 0) or sum(
+            int(d.get("count") or 1) for f in enriched["floors"] for d in f["openings"]["doors"]
+        )
+        window_count = int(derived.get("windows_total_nr") or 0) or sum(
+            int(w.get("count") or 1) for f in enriched["floors"] for w in f["openings"]["windows"]
+        )
         floor_finish_area = derived.get("floor_finish_area_m2", total_area)
         wall_finish_area = derived.get("wall_finish_area_m2", wall_area)
         ext_wall_area = wall_area * 0.3

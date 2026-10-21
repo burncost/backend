@@ -96,6 +96,29 @@ def _payment_method_from_channel(channel: Optional[str]) -> PaymentMethod:
         return PaymentMethod.CARD
 
 
+def _gateway_amount(value) -> Optional[float]:
+    """Coerce a gateway-reported amount to float (None when absent/unparseable).
+
+    Gateways report major units (Naira) on verification, so this is compared
+    directly against ``order.total_amount`` (also Naira) - never divided.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _amounts_disagree(gateway_amount: Optional[float], order_amount: float) -> bool:
+    """True when the gateway-confirmed amount is not the order total.
+
+    Gateways report Naira on verification, so both sides are compared in the
+    major unit. A one-kobo tolerance absorbs float noise.
+    """
+    return gateway_amount is not None and abs(gateway_amount - order_amount) > 0.01
+
+
 async def _apply_payment_side_effects(db, order) -> None:
     """Apply the stock/vendor effects of a confirmed payment.
 
@@ -602,6 +625,7 @@ async def verify_payment(
         # cannot be mapped, so the response below reports the truth instead of
         # echoing the gateway's "paid" for an order we never settled.
         order = None
+        amount_mismatch = False
         if reference.startswith("BURNCOST-"):
             order_number = _order_number_from_reference(reference)
             if order_number:
@@ -610,6 +634,31 @@ async def verify_payment(
                 )
                 order = order_result.scalar_one_or_none()
                 if order and order.payment_status != PaymentStatus.COMPLETED:
+                    # Reconcile the gateway amount before settling. The webhooks
+                    # already do this; the client-return path must too, otherwise
+                    # a checkout initialised with the wrong unit (or a tampered
+                    # request) would confirm an order it never paid for.
+                    gateway_amount = _gateway_amount(result.get("amount"))
+                    # Mock mode reports a fixed ₦100,000 regardless of the order;
+                    # never let that placeholder block a local checkout.
+                    is_mock_provider = str(result.get("provider") or "").lower() == "mock"
+                    amount_mismatch = (
+                        not is_mock_provider
+                        and _amounts_disagree(gateway_amount, float(order.total_amount))
+                    )
+                    if amount_mismatch:
+                        await record_fraud_flag(
+                            db,
+                            alert_type="Payment Manipulation",
+                            description=f"Verified amount ₦{gateway_amount} differs from order total ₦{float(order.total_amount)} for {order.order_number}.",
+                            amount=float(order.total_amount),
+                            user_id=str(order.user_id),
+                        )
+                        logger.warning(
+                            "Verify amount mismatch for %s: gateway=%s order=%s",
+                            order.order_number, gateway_amount, float(order.total_amount),
+                        )
+                if order and order.payment_status != PaymentStatus.COMPLETED and not amount_mismatch:
                     order.payment_status = PaymentStatus.COMPLETED
                     order.status = "confirmed"
                     if not order.payment_method:

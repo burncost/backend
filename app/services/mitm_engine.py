@@ -5,6 +5,7 @@ computes derived quantities, and scores confidence.
 from typing import Dict, Any, List, Optional, Tuple
 import math
 import logging
+import re
 
 from app.schemas.boq import (
     BOQGenerationRequest, ProjectInfoInput, FloorInput,
@@ -61,6 +62,18 @@ ROOF_TRUSS_SPACING_M = 0.9
 ROOF_PURLIN_SPACING_M = 0.9
 ROOF_TIMBER_CUT_ALLOWANCE = 0.15
 
+# Roof sheet / tile coverage used by the material take-off. Nigerian longspan is
+# sold in ~0.55m effective-width sheets; roofing tiles are packed ~10 pieces/m².
+ROOF_SHEET_COVER_M2 = 0.55 * 3.6  # one standard 0.55m x 3.6m longspan sheet
+ROOF_TILE_PIECES_PER_M2: Dict[str, float] = {
+    "stone_coated_tiles": 10.0,
+    "concrete_tiles": 10.0,
+    "zinc": 10.0,
+}
+# Wall tiles are almost always 300x600mm; a box of eight covers 1.44 m².
+WALL_TILE_BOX_COVERAGE_M2 = 1.44
+WALL_TILE_LABEL = "300x600mm"
+
 # Substructure assumptions used by the foundation option table.
 STRIP_FOOTING_WIDTH_M = 0.6
 WORKING_SPACE_M = 0.3
@@ -90,6 +103,26 @@ ACCURACY_CAPS: Dict[str, Dict[str, float]] = {
         "pricing": 0.70, "completeness": 0.60,
     },
 }
+
+
+def _slug(value: Any) -> str:
+    """Stable lowercase key fragment: 'Sliding Glass' -> 'sliding_glass'."""
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_") or "other"
+
+
+def _material_line(key: str, description: str, quantity: Any, unit: str, category: str) -> Dict[str, Any]:
+    """One purchasable take-off row; quantities are never negative."""
+    try:
+        qty = max(float(quantity or 0), 0.0)
+    except (TypeError, ValueError):
+        qty = 0.0
+    return {
+        "material_key": key,
+        "description": description,
+        "quantity": round(qty, 2) if unit in ("m", "m2", "m3", "kg") else round(qty),
+        "unit": unit,
+        "category": category,
+    }
 
 
 class MITMEngine:
@@ -335,6 +368,135 @@ class MITMEngine:
         foundation_options = self._foundation_options(total_area, total_perimeter, sub)
         foundation = foundation_options["A_strip_footing"]
 
+        # ── Material take-off lines (what a vendor actually supplies) ─────────
+        # One stable row per purchasable material so the same numbers drive the
+        # bill, the demand broadcast and the vendor match. Keys never change;
+        # only quantities do.
+        floor_finish = enriched.get("finishes", {}).get("floor_finish", "")
+        floor_tile_size_mm = 400 if "400x400" in floor_finish else DEFAULT_TILE_SIZE_MM
+        floor_tiles_measured = floor_finish not in ("screed", "terrazzo", "marble")
+        if floor_tiles_measured:
+            floor_tile_boxes = math.ceil(
+                floor_tiles_m2 / TILE_BOX_COVERAGE_M2[floor_tile_size_mm]
+            )
+        else:
+            floor_tile_boxes = 0
+
+        material_counts: List[Dict[str, Any]] = [
+            self._material_line(
+                "blocks_225", "9-inch sandcrete block (225mm)", ext_blocks, "nr", "blocks"
+            ),
+            self._material_line(
+                "blocks_150", "6-inch sandcrete block (150mm)", int_blocks, "nr", "blocks"
+            ),
+        ]
+        if floor_tiles_measured:
+            material_counts.append(
+                self._material_line(
+                    f"floor_tiles_{floor_tile_size_mm}",
+                    f"Floor tiles {floor_tile_size_mm}x{floor_tile_size_mm}mm",
+                    floor_tile_boxes,
+                    "box",
+                    "finishes",
+                )
+            )
+        if enriched.get("finishes", {}).get("wet_areas_tiled", True):
+            material_counts.append(
+                self._material_line(
+                    "wall_tiles_300x600",
+                    f"Wall tiles {WALL_TILE_LABEL}",
+                    math.ceil(wall_tiles_m2 / WALL_TILE_BOX_COVERAGE_M2),
+                    "box",
+                    "finishes",
+                )
+            )
+
+        covering = roof.get("roof_covering", "")
+        if covering == "aluminium_longspan":
+            material_counts.append(
+                self._material_line(
+                    "roof_sheets_longspan",
+                    "Longspan aluminium roofing sheets",
+                    math.ceil(roof_covering_m2 / ROOF_SHEET_COVER_M2),
+                    "nr",
+                    "roofing",
+                )
+            )
+        elif covering in ROOF_TILE_PIECES_PER_M2:
+            material_counts.append(
+                self._material_line(
+                    f"roof_tiles_{covering.rsplit('_', 1)[0]}",
+                    f"{covering.replace('_', ' ').title()} roofing tiles",
+                    math.ceil(roof_covering_m2 * ROOF_TILE_PIECES_PER_M2[covering]),
+                    "nr",
+                    "roofing",
+                )
+            )
+        material_counts.extend([
+            self._material_line(
+                "roof_trusses", "Roof trusses (timber)", roof_truss_count, "nr", "roofing"
+            ),
+            self._material_line(
+                "roof_purlins", "Roof purlins (timber)", roof_purlin_m, "m", "roofing"
+            ),
+            self._material_line(
+                "roof_rafters", "Roof rafters (timber)", roof_rafter_m, "m", "roofing"
+            ),
+        ])
+
+        # Openings: aggregate counts per type *and* in total. The bill used to
+        # count opening types (one row per distinct size), which under-ordered
+        # every door and window.
+        doors_by_type: Dict[tuple, Dict[str, Any]] = {}
+        windows_by_type: Dict[tuple, Dict[str, Any]] = {}
+        for f in floors:
+            for kind, bucket in (("door", doors_by_type), ("window", windows_by_type)):
+                for opening in f["openings"][f"{kind}s"]:
+                    key = (
+                        opening.get("type") or kind,
+                        float(opening.get("width_m") or 0),
+                        float(opening.get("height_m") or 0),
+                    )
+                    row = bucket.setdefault(
+                        key,
+                        {
+                            "type": key[0],
+                            "width_m": key[1],
+                            "height_m": key[2],
+                            "count": 0,
+                        },
+                    )
+                    row["count"] += int(opening.get("count") or 1)
+
+        doors_total = sum(row["count"] for row in doors_by_type.values())
+        windows_total = sum(row["count"] for row in windows_by_type.values())
+        for row in doors_by_type.values():
+            material_counts.append(
+                self._material_line(
+                    f"doors_{_slug(row['type'])}",
+                    f"Door - {row['type']} ({row['width_m']:g}x{row['height_m']:g}m)",
+                    row["count"],
+                    "nr",
+                    "openings",
+                )
+            )
+        for row in windows_by_type.values():
+            material_counts.append(
+                self._material_line(
+                    f"windows_{_slug(row['type'])}",
+                    f"Window - {row['type']} ({row['width_m']:g}x{row['height_m']:g}m)",
+                    row["count"],
+                    "nr",
+                    "openings",
+                )
+            )
+        material_counts.append(
+            self._material_line("doors_total", "Doors (all types)", doors_total, "nr", "openings")
+        )
+        material_counts.append(
+            self._material_line("windows_total", "Windows (all types)", windows_total, "nr", "openings")
+        )
+
         return {
             "gross_wall_area_m2": round(gross_wall_area, 2),
             "net_wall_area_m2": round(net_wall_area, 2),
@@ -362,6 +524,12 @@ class MITMEngine:
             "foundation_dpm_m2": foundation["dpm_m2"],
             "foundation_reinforcement_kg": foundation["reinforcement_kg"],
             "foundation_options": foundation_options,
+            "floor_tile_size_mm": floor_tile_size_mm,
+            "doors_total_nr": doors_total,
+            "windows_total_nr": windows_total,
+            "doors_by_type": list(doors_by_type.values()),
+            "windows_by_type": list(windows_by_type.values()),
+            "material_counts": material_counts,
         }
 
     def _calc_foundation_volume(self, area: float, sub: Dict) -> float:

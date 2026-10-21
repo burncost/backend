@@ -7,6 +7,10 @@ class CartItemCreate(BaseModel):
     product_id: UUID
     variant_id: Optional[UUID] = None
     quantity: int = Field(1, ge=1)
+    # Optional accepted negotiation that prices this line. When present the line
+    # is deduped on the agreement (not the product) so a catalogue line and a
+    # negotiated line for the same product can coexist.
+    negotiation_id: Optional[UUID] = None
 
 
 class CartItemUpdate(BaseModel):
@@ -26,6 +30,9 @@ class CartItemResponse(BaseModel):
     base_price: float = 0
     # Agreed private (negotiated) unit price for this buyer; None when no deal.
     negotiation_price: Optional[float] = None
+    # Identifies the single-use agreement behind `negotiation_price`.
+    negotiation_id: Optional[str] = None
+    negotiated_quantity: Optional[int] = None
     quantity: int
     minimum_order_quantity: int
     stock: int

@@ -233,30 +233,28 @@ async def _ensure_shipping_address(
     return address
 
 
-async def _agreed_prices_for_builder(db: AsyncSession, builder_id, product_ids: list) -> dict:
-    """Map product_id -> agreed unit price for this builder's `price_agreed` deals.
+async def negotiated_cart_lines(db: AsyncSession, builder_id, cart_items: list) -> dict:
+    """Map `str(cart_line.negotiation_id)` -> the agreement that prices that line.
 
-    Strictly scoped to the builder who is a party to the negotiation, so an agreed
-    price only ever auto-applies to that builder's own checkout. Returns the most
-    recently agreed price per product; products without an agreement are absent.
+    Agreed prices are per-transaction, not per-product: a line is priced by the
+    negotiation it was seeded from, only for the buyer who agreed it, only while
+    the agreement is unused (`agreed_order_id IS NULL`). A price agreed last month
+    therefore cannot discount today's catalogue order.
     """
-    if not product_ids:
+    ids = {getattr(ci, "negotiation_id", None) for ci in cart_items}
+    ids.discard(None)
+    if not ids:
         return {}
     rows = (await db.execute(
-        select(Negotiation)
-        .where(
+        select(Negotiation).where(
+            Negotiation.id.in_(ids),
             Negotiation.builder_id == builder_id,
             Negotiation.status == "price_agreed",
             Negotiation.agreed_price.isnot(None),
-            Negotiation.product_id.in_(list(product_ids)),
+            Negotiation.agreed_order_id.is_(None),
         )
-        .order_by(Negotiation.agreed_at.asc().nulls_first())
     )).scalars().all()
-    agreed: dict = {}
-    for n in rows:
-        if n.product_id is not None and n.agreed_price is not None:
-            agreed[n.product_id] = float(n.agreed_price)
-    return agreed
+    return {str(n.id): n for n in rows}
 
 
 ### Create order from cart
@@ -286,11 +284,11 @@ async def create_order(
     order_items = []
     subtotal = 0.0
 
-    # Two-party negotiated final price: only auto-applies for this builder (the
-    # party who agreed it) and overrides the catalogue price below.
-    agreed_prices = await _agreed_prices_for_builder(
-        db, user_id, [ci.product_id for ci in cart_items]
-    )
+    # Two-party negotiated price: only the line seeded from an accepted
+    # negotiation is priced, and only until that agreement has been checked out
+    # once. Catalogue lines keep their normal price.
+    negotiated = await negotiated_cart_lines(db, user_id, cart_items)
+    used_negotiations = []
 
     for cart_item in cart_items:
         product_result = await db.execute(
@@ -310,7 +308,15 @@ async def create_order(
                 detail=f"Product '{product.name}' is not available for purchase."
             )
 
-        if product.quantity < cart_item.quantity:
+        # Quantity is capped at the agreed quantity: a negotiation for 500 blocks
+        # cannot be used to buy 5,000 at the negotiated rate.
+        line_quantity = cart_item.quantity
+        agreement = negotiated.get(str(cart_item.negotiation_id)) if cart_item.negotiation_id else None
+        if agreement is not None and agreement.quantity:
+            line_quantity = min(line_quantity, int(float(agreement.quantity) or line_quantity))
+            used_negotiations.append(agreement)
+
+        if product.quantity < line_quantity:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Insufficient stock for '{product.name}'. Available: {product.quantity}."
@@ -318,11 +324,10 @@ async def create_order(
 
         base_price = float(product.base_price)
         unit_price = float(product.discount_price or product.base_price)
-        # Agreed negotiation price (builder-only) overrides the catalogue price.
-        if product.id in agreed_prices:
-            unit_price = agreed_prices[product.id]
-        item_savings = round((base_price - unit_price) * cart_item.quantity, 2)
-        total_price = unit_price * cart_item.quantity
+        # The accepted negotiation price prices this line only.
+        if agreement is not None and agreement.agreed_price is not None:
+            unit_price = float(agreement.agreed_price)
+        total_price = unit_price * line_quantity
         subtotal += total_price
 
         order_items.append({
@@ -331,7 +336,7 @@ async def create_order(
             "vendor_id": product.vendor_id,
             "product_name": product.name,
             "sku": product.sku,
-            "quantity": cart_item.quantity,
+            "quantity": line_quantity,
             "unit_price": unit_price,
             "total_price": total_price,
             "base_price": base_price,
@@ -464,6 +469,12 @@ async def create_order(
     )
     db.add(order)
     await db.flush()  # Get order.id
+
+    # Burn each accepted agreement exactly once. Guarded by the read filter above
+    # (`agreed_order_id IS NULL`), so a second checkout cannot reuse the price.
+    for agreement in used_negotiations:
+        if agreement.agreed_order_id is None:
+            agreement.agreed_order_id = order.id
 
     # Create order items
     for item_data in order_items:

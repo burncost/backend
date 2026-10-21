@@ -15,6 +15,7 @@ from app.models.vendor import Vendor
 from app.models.product import Product
 from app.models.negotiation import Negotiation, NegotiationCounterOffer, NegotiationAuditEntry
 from app.models.notification import Notification
+from app.services import demand_broadcast_service as demand_broadcast
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -185,6 +186,12 @@ def _offer_dict(c: NegotiationCounterOffer, base_price=None) -> dict:
         "discount_percent": pct if pct is not None else float(c.discount_percent or 0),
         "final_price": float(c.final_price) if c.final_price is not None else None,
         "note": c.note,
+        # Catalogue product attached to this message (vendor product picker) and
+        # the snapshot taken at offer time, so the buyer sees exactly what was
+        # offered even after the vendor edits their catalogue.
+        "product_id": str(c.product_id) if getattr(c, "product_id", None) else None,
+        "product": getattr(c, "product_snapshot", None),
+        "created_at": c.created_at.isoformat() if getattr(c, "created_at", None) else None,
     }
 
 
@@ -215,6 +222,10 @@ def _neg_dict(n: Negotiation, base_price=None) -> dict:
         "agreed_price": float(n.agreed_price) if n.agreed_price is not None else None,
         "agreed_at": n.agreed_at.isoformat() if n.agreed_at else None,
         "agreed_by": n.agreed_by,
+        # Set once the agreement priced an order: the price is spent and the
+        # buyer can no longer seed a cart line from it.
+        "agreed_order_id": str(n.agreed_order_id) if getattr(n, "agreed_order_id", None) else None,
+        "demand_alert_id": str(n.demand_alert_id) if getattr(n, "demand_alert_id", None) else None,
         "counter_offers": [_offer_dict(c, base_price) for c in n.counter_offers],
     }
 
@@ -368,6 +379,9 @@ async def send_counter_offer(negotiation_id: UUID, payload: dict, current_user=D
     # counter-proposals from either side (prevents re-opening an agreed deal).
     if n.status == "price_agreed":
         raise HTTPException(400, "Final price already agreed")
+    # ...and a spent agreement (already priced an order) is final forever.
+    if getattr(n, "agreed_order_id", None) is not None:
+        raise HTTPException(400, "This agreement has already been checked out")
 
     if action == "propose_price":
         # Propose an absolute per-unit final price for the counterparty to accept.
@@ -384,20 +398,35 @@ async def send_counter_offer(negotiation_id: UUID, payload: dict, current_user=D
             if implied is not None:
                 dp = implied
         n.status = "price_proposed"
-        db.add(NegotiationCounterOffer(
-            negotiation_id=n.id, offered_by=side,
-            discount_percent=dp if dp is not None else n.requested_discount,
-            final_price=fp_val, note=note,
-        ))
+        attached_product = payload.get("product_id") if side == "supplier" else None
+        if attached_product:
+            # The vendor quoted a catalogue product: one row carries the price AND
+            # the product snapshot, so the buyer can accept and buy it directly.
+            try:
+                await demand_broadcast.attach_product_to_negotiation(
+                    db, n,
+                    vendor_id=vendor.id,
+                    product_id=UUID(str(attached_product)),
+                    price=fp_val,
+                    note=note,
+                    side=side,
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            await db.flush()
+        else:
+            # No product_id means "keep whatever was attached before": a plain
+            # price counter must never silently clear the product on the deal.
+            db.add(NegotiationCounterOffer(
+                negotiation_id=n.id, offered_by=side,
+                discount_percent=dp if dp is not None else n.requested_discount,
+                final_price=fp_val, note=note,
+            ))
     elif action == "accept_price":
         # Only the counterparty of the last proposer may accept (strictly the two
         # parties of this negotiation - the guard above already rejected others).
-        last = (await db.execute(
-            sa_select(NegotiationCounterOffer)
-            .where(NegotiationCounterOffer.negotiation_id == n.id)
-            .order_by(NegotiationCounterOffer.created_at.desc())
-            .limit(1)
-        )).scalar_one_or_none()
+        # The newest *priced* entry is the live offer; chat notes are ignored.
+        last = await demand_broadcast.latest_priced_offer(db, n.id)
         if last is None or last.final_price is None:
             raise HTTPException(400, "No final price has been proposed yet")
         if last.offered_by == side:
@@ -406,6 +435,22 @@ async def send_counter_offer(negotiation_id: UUID, payload: dict, current_user=D
         n.agreed_at = datetime.utcnow()
         n.agreed_by = side
         n.status = "price_agreed"
+        # Keyframe: the proposal may have attached a catalogue product; a plain
+        # counter keeps the existing attachment rather than clearing it.
+        if getattr(last, "product_id", None) is not None:
+            n.product_id = last.product_id
+        # A bid thread belongs to a demand broadcast: agreeing here also closes
+        # the broadcast and rejects the competing vendors, so a demand can never
+        # be "agreed" in one thread and still open in another.
+        if getattr(n, "demand_alert_id", None) is not None:
+            from app.models.demand_alert import DemandAlert
+            alert = (await db.execute(
+                sa_select(DemandAlert).where(DemandAlert.id == n.demand_alert_id)
+            )).scalar_one_or_none()
+            if alert is not None and (alert.status or "") != "agreed":
+                await demand_broadcast.mark_demand_agreed(
+                    db, alert, n, price=float(last.final_price), accepted_by=side
+                )
         # `counter_offer` is a percentage column (see `_neg_dict` + the console
         # analytics): keep the agreed naira in `agreed_price` only, otherwise the
         # row renders "11000%". The % is the one the agreed naira implies.
@@ -452,3 +497,60 @@ async def send_counter_offer(negotiation_id: UUID, payload: dict, current_user=D
     # ...and tell the party who did not act, so both sides see the loop progress.
     await _notify_counterparty(db, row, side, action, payload)
     return _neg_dict(row, base_price)
+
+
+@router.post("/{negotiation_id}/attach-product")
+async def attach_product(
+    negotiation_id: UUID,
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vendor attaches one of their catalogue products to an existing negotiation.
+
+    Sending `price` in the same call also proposes that per-unit figure, so the
+    buyer can accept the product and its price together. Without a price the
+    attachment is informational and the thread's price negotiation continues.
+    """
+    n = (await db.execute(
+        select(Negotiation).where(Negotiation.id == negotiation_id)
+    )).scalars().first()
+    if n is None:
+        raise HTTPException(404, "Negotiation not found")
+    vendor = (await db.execute(
+        select(Vendor).where(Vendor.user_id == current_user.id)
+    )).scalars().first()
+    if vendor is None or vendor.id != n.supplier_id:
+        raise HTTPException(403, "Only the supplier in this negotiation can attach a product")
+    if n.status == "price_agreed" or n.agreed_order_id is not None:
+        raise HTTPException(400, "This negotiation is already settled")
+
+    try:
+        product_id = UUID(str(payload.get("product_id")))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "A valid product_id is required")
+
+    try:
+        offer = await demand_broadcast.attach_product_to_negotiation(
+            db, n,
+            vendor_id=vendor.id,
+            product_id=product_id,
+            price=payload.get("price"),
+            note=payload.get("note", ""),
+            side="supplier",
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if payload.get("price") is not None:
+        n.status = "price_proposed"
+
+    await db.commit()
+    row = (await db.execute(
+        select(Negotiation)
+        .options(selectinload(Negotiation.supplier), selectinload(Negotiation.counter_offers))
+        .where(Negotiation.id == n.id)
+    )).scalar_one()
+    return {
+        "offer_id": str(offer.id),
+        "negotiation": _neg_dict(row, await _base_price(db, n.product_id)),
+    }

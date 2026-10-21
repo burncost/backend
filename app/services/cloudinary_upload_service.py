@@ -14,12 +14,15 @@ cloudinary.config(
 )
 
 
-async def upload_image_to_cloudinary(file: UploadFile) -> str:
-    """Upload an image file to Cloudinary and return the secure URL."""
+async def upload_image_to_cloudinary(content: bytes) -> str:
+    """Upload already-normalised image bytes to Cloudinary and return the secure URL.
+
+    ``content`` must be the output of ``app.utils.image_processing.normalize_image``
+    - the byte budget and EXIF stripping happen there, not here.
+    """
     try:
-        contents = await file.read()
         result = cloudinary.uploader.upload(
-            contents,
+            content,
             folder="vendor_images",
             resource_type="image",
             transformation=[

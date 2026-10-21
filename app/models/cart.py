@@ -16,6 +16,13 @@ class CartItem(Base):
     variant_id = Column(UUID(as_uuid=True))
     quantity = Column(Integer, nullable=False, default=1)
     price_at_addition = Column(Numeric(15, 2), nullable=False)
+    # Set when the line came from an accepted negotiation. The agreed price is
+    # applied to this line only, capped at the negotiated quantity, and the
+    # negotiation is stamped with `agreed_order_id` at checkout so the same
+    # agreement can never price a second order.
+    negotiation_id = Column(
+        UUID(as_uuid=True), ForeignKey("negotiations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

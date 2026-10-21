@@ -281,11 +281,15 @@ async def delete_product(
 async def list_my_products(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    # Optional search so the vendor product picker (bid attachment) can find a
+    # product by name/sku without downloading the whole catalogue.
+    search: str | None = Query(None, max_length=200),
     current_vendor: dict = Depends(get_current_vendor),
     db: AsyncSession = Depends(get_db)
 ):
     filters = ProductFilter(
         vendor_id=UUID(current_vendor["id"]),
+        search=search or None,
         sort_by="created_at",
         sort_order="desc"
     )

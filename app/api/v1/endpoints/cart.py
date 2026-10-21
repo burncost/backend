@@ -11,10 +11,11 @@ from app.models.product import Product, ProductImage
 from app.models.vendor import Vendor
 from app.api.deps import get_current_user
 from app.schemas.cart import CartItemCreate, CartItemUpdate, CartResponse, CartItemResponse
-# Single source of truth for builder-scoped agreed prices, so the cart quotes
+from app.models.negotiation import Negotiation
+# Single source of truth for per-transaction agreed prices, so the cart quotes
 # exactly what `orders.create` will charge. orders.py does not import this module,
 # so there is no import cycle.
-from app.api.v1.endpoints.orders import _agreed_prices_for_builder
+from app.api.v1.endpoints.orders import negotiated_cart_lines
 
 import logging
 from app.models.user import User
@@ -38,11 +39,9 @@ async def get_cart(
     )
     items = result.scalars().all()
 
-    # Builder-scoped agreed negotiation prices: the cart must quote the figure
-    # checkout will actually charge, never the bare catalogue price.
-    agreed_prices = await _agreed_prices_for_builder(
-        db, user_id, [item.product_id for item in items]
-    )
+    # Per-line agreed prices: the cart must quote the figure checkout will
+    # actually charge, never the bare catalogue price.
+    negotiated = await negotiated_cart_lines(db, user_id, items)
 
     # Vendor of each line, in ONE query (never per-item): the cart shows the real
     # supplier name and only offers "Negotiate" for vendors that opted in.
@@ -112,9 +111,19 @@ async def get_cart(
             "vendor_open_to_negotiate": open_to_negotiate,
             "unit_price": float(item.price_at_addition),
             "base_price": float(product.base_price) if product else 0,
-            # Agreed private price for this buyer (None when there is no deal):
-            # `orders.create` applies the same override, so the cart can show it.
-            "negotiation_price": agreed_prices.get(item.product_id),
+            # Agreed price for THIS line (None when there is no deal):
+            # `orders.create` applies the same per-line override.
+            "negotiation_price": (
+                float(negotiated[str(item.negotiation_id)].agreed_price)
+                if getattr(item, "negotiation_id", None) and str(item.negotiation_id) in negotiated
+                else None
+            ),
+            "negotiation_id": str(item.negotiation_id) if getattr(item, "negotiation_id", None) else None,
+            "negotiated_quantity": (
+                int(float(negotiated[str(item.negotiation_id)].quantity or 0)) or None
+                if getattr(item, "negotiation_id", None) and str(item.negotiation_id) in negotiated
+                else None
+            ),
             "quantity": item.quantity,
             "minimum_order_quantity": product.minimum_order_quantity if product else 1,
             "stock": product.quantity if product else 0,
@@ -167,31 +176,78 @@ async def add_to_cart(
             detail="Product is not available for purchase"
         )
 
-    # Check if item already in cart
-    existing_result = await db.execute(
-        select(CartItem).where(
-            CartItem.user_id == user_id,
-            CartItem.product_id == cart_in.product_id,
-            CartItem.variant_id == cart_in.variant_id
+    # Optional accepted-negotiation pricing for this line.
+    negotiation = None
+    if cart_in.negotiation_id is not None:
+        negotiation = (await db.execute(
+            select(Negotiation).where(
+                Negotiation.id == cart_in.negotiation_id,
+                Negotiation.builder_id == user_id,
+                Negotiation.status == "price_agreed",
+                Negotiation.agreed_price.isnot(None),
+                Negotiation.agreed_order_id.is_(None),
+            )
+        )).scalars().first()
+        if negotiation is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="That negotiated price is not available (already used or not yours)",
+            )
+        # The agreed line must be the product the deal is for - otherwise a buyer
+        # could price any catalogue item at another item's negotiated rate.
+        if negotiation.product_id is not None and negotiation.product_id != cart_in.product_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="That negotiated price belongs to a different product",
+            )
+
+    # Check if item already in cart. A negotiated line is deduped on the
+    # agreement, and a plain line is matched NULL-safely on variant_id (SQL `=`
+    # never matches NULL, which used to create a duplicate row per add).
+    if negotiation is not None:
+        existing_result = await db.execute(
+            select(CartItem).where(
+                CartItem.user_id == user_id,
+                CartItem.negotiation_id == negotiation.id,
+            )
         )
-    )
-    existing = existing_result.scalar_one_or_none()
+    else:
+        variant_clause = (
+            CartItem.variant_id.is_(None)
+            if cart_in.variant_id is None
+            else CartItem.variant_id == cart_in.variant_id
+        )
+        existing_result = await db.execute(
+            select(CartItem).where(
+                CartItem.user_id == user_id,
+                CartItem.product_id == cart_in.product_id,
+                variant_clause,
+            )
+        )
+    existing = existing_result.scalars().first()
 
     if existing:
-        # Update quantity
-        existing.quantity += cart_in.quantity
+        # Update quantity (never above the negotiated quantity)
+        quantity = existing.quantity + cart_in.quantity
+        if negotiation is not None and negotiation.quantity:
+            quantity = min(quantity, int(float(negotiation.quantity)))
+        existing.quantity = quantity
         await db.commit()
         await db.refresh(existing)
         logger.info(f"Updated cart item {existing.id} quantity to {existing.quantity}")
         return {"message": "Cart item quantity updated", "item_id": str(existing.id)}
     else:
         # Create new cart item
+        quantity = cart_in.quantity
+        if negotiation is not None and negotiation.quantity:
+            quantity = min(quantity, int(float(negotiation.quantity)))
         cart_item = CartItem(
             user_id=user_id,
             product_id=cart_in.product_id,
             variant_id=cart_in.variant_id,
-            quantity=cart_in.quantity,
+            quantity=quantity,
             price_at_addition=float(product.discount_price or product.base_price),
+            negotiation_id=negotiation.id if negotiation is not None else None,
         )
         db.add(cart_item)
         await db.commit()
@@ -254,3 +310,100 @@ async def remove_cart_item(
     await db.delete(cart_item)
     await db.commit()
     return None
+
+
+### Seed the cart from an accepted negotiation (per-transaction price)
+@router.post("/from-negotiation/{negotiation_id}", status_code=status.HTTP_201_CREATED)
+async def add_negotiated_line(
+    negotiation_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add the agreed product to the buyer's cart at the agreed price.
+
+    One accepted agreement produces one priced cart line. The product comes from
+    the negotiation itself (or the newest snapshot on its thread), so the buyer
+    never has to find the right catalogue item, and the quantity is capped at the
+    negotiated quantity. The line is refused once the agreement has been checked
+    out (`agreed_order_id`), which is what makes the price single-use.
+    """
+    from app.models.negotiation import NegotiationCounterOffer
+
+    negotiation = (await db.execute(
+        select(Negotiation).where(
+            Negotiation.id == negotiation_id,
+            Negotiation.builder_id == current_user.id,
+            Negotiation.status == "price_agreed",
+            Negotiation.agreed_price.isnot(None),
+            Negotiation.agreed_order_id.is_(None),
+        )
+    )).scalars().first()
+    if negotiation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No usable agreement for this negotiation (not yours, unused or already checked out)",
+        )
+
+    product_id = negotiation.product_id
+    if product_id is None:
+        snapshot_offer = (await db.execute(
+            select(NegotiationCounterOffer)
+            .where(
+                NegotiationCounterOffer.negotiation_id == negotiation.id,
+                NegotiationCounterOffer.product_id.isnot(None),
+            )
+            .order_by(NegotiationCounterOffer.created_at.desc())
+            .limit(1)
+        )).scalars().first()
+        product_id = snapshot_offer.product_id if snapshot_offer else None
+    if product_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This agreement has no catalogue product attached to buy",
+        )
+
+    product = (await db.execute(
+        select(Product).where(Product.id == product_id)
+    )).scalars().first()
+    if product is None or product.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The agreed product is no longer available",
+        )
+
+    quantity = max(1, int(float(negotiation.quantity or 1)))
+    existing = (await db.execute(
+        select(CartItem).where(
+            CartItem.user_id == current_user.id,
+            CartItem.negotiation_id == negotiation.id,
+        )
+    )).scalars().first()
+    if existing is not None:
+        existing.quantity = quantity
+        existing.price_at_addition = float(product.discount_price or product.base_price)
+        await db.commit()
+        await db.refresh(existing)
+        return {
+            "message": "Negotiated line updated",
+            "item_id": str(existing.id),
+            "quantity": existing.quantity,
+            "negotiation_price": float(negotiation.agreed_price),
+        }
+
+    cart_item = CartItem(
+        user_id=current_user.id,
+        product_id=product.id,
+        variant_id=None,
+        quantity=quantity,
+        price_at_addition=float(product.discount_price or product.base_price),
+        negotiation_id=negotiation.id,
+    )
+    db.add(cart_item)
+    await db.commit()
+    await db.refresh(cart_item)
+    return {
+        "message": "Negotiated line added to cart",
+        "item_id": str(cart_item.id),
+        "quantity": cart_item.quantity,
+        "negotiation_price": float(negotiation.agreed_price),
+    }

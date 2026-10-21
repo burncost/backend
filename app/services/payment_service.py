@@ -224,7 +224,10 @@ class PaymentService:
     ) -> Dict[str, Any]:
         """Initialize Monnify Standard Checkout (hosted redirect).
 
-        Amount is sent in minor units (kobo) per Monnify docs: kobo = Naira * 100.
+        Amount is sent in MAJOR units (Naira, 2dp) per Monnify docs — unlike
+        Paystack, which expects kobo. Sending `amount * 100` here made every
+        Monnify checkout 100x the order total (BC-20261016-LKS2I5 showed
+        NGN 6,429,703.00 for a NGN 64,297.03 order).
         """
         try:
             import base64
@@ -255,7 +258,7 @@ class PaymentService:
                         "Content-Type": "application/json",
                     },
                     json={
-                        "amount": int(round(float(amount) * 100)),  # kobo
+                        "amount": round(float(amount), 2),  # Naira (major units)
                         "customerName": (email or "Buyer").split("@")[0],
                         "customerEmail": email,
                         "paymentReference": reference,
@@ -273,6 +276,12 @@ class PaymentService:
                 tx_ref = init_body.get("transactionReference") or reference
 
                 if checkout_url:
+                    # Audit the exact major-unit amount handed to the gateway so a
+                    # unit regression (this bug) is visible in the logs.
+                    logger.info(
+                        "Monnify checkout initialized: reference=%s amount=NGN %.2f",
+                        reference, float(amount),
+                    )
                     return {
                         "success": True,
                         "authorization_url": checkout_url,

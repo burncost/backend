@@ -5,7 +5,7 @@ Powers the Negotiation Center admin pages (Phase 2).
 from sqlalchemy import (
     Column, String, DateTime, Numeric, Integer, Boolean, ForeignKey, Text, Index
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -46,6 +46,12 @@ class Negotiation(Base):
     agreed_price = Column(Numeric(15, 2), nullable=True)
     agreed_at = Column(DateTime, nullable=True)
     agreed_by = Column(String(20), nullable=True)  # builder / supplier (who accepted)
+    # Set once the agreement has been checked out. An agreed price is
+    # per-transaction: it prices the cart line that carries `negotiation_id`
+    # exactly once and never discounts a later order.
+    agreed_order_id = Column(
+        UUID(as_uuid=True), ForeignKey("orders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     admin_note = Column(Text)
     flagged = Column(Boolean, default=False)
     suspended = Column(Boolean, default=False)
@@ -88,6 +94,11 @@ class NegotiationCounterOffer(Base):
     # Additive + nullable: existing rows read back NULL.
     final_price = Column(Numeric(15, 2), nullable=True)
     note = Column(Text)
+    # Catalogue product the vendor attached to this thread, plus an immutable
+    # snapshot of what was offered (name, price, unit, image, MOQ) so the buyer
+    # still sees the exact product after the vendor edits their catalogue.
+    product_id = Column(UUID(as_uuid=True), ForeignKey("products.id", ondelete="SET NULL"), nullable=True, index=True)
+    product_snapshot = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     negotiation = relationship("Negotiation", back_populates="counter_offers")
