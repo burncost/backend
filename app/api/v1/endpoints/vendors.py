@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, text
+from sqlalchemy import bindparam, select, func, text
 from sqlalchemy.orm import joinedload
 from uuid import UUID
 from typing import Optional
@@ -11,6 +11,7 @@ from app.core.database import get_db
 from app.models.vendor import Vendor
 from app.models.user import User, UserProfile
 from app.models.demand_alert import demand_alert_cutoff
+from app.services.price_service import CITY_TO_STATE, normalize_state
 from app.models.notification import Notification
 from app.models.vendor_draft import VendorDraft
 from app.schemas.vendor import VendorCreate, VendorUpdate, VendorResponse
@@ -500,6 +501,26 @@ async def get_vendor_status(
         "next_step": TIER_NEXT_STEP.get(code, ""),
     }
 
+
+def _alert_cities_for_vendor(vendor: Vendor) -> list[str]:
+    """Alert-city spellings that belong to the vendor's state, not just its town.
+
+    Alerts only carry a city, so the vendor's state ("FCT (Abuja)", "Lagos") is
+    expanded back into every city the location map knows for it. The vendor's own
+    city is kept so an unmapped town still matches its exact spelling.
+    """
+    states = {
+        str(normalize_state(value)).strip().lower()
+        for value in (vendor.state, vendor.city)
+        if value and str(value).strip()
+    }
+    cities = {city for city, state in CITY_TO_STATE.items() if str(state).lower() in states}
+    cities |= states
+    if vendor.city:
+        cities.add(str(vendor.city).strip().lower())
+    return sorted(cities)
+
+
 ### Get demand alerts for vendor (products out of stock that customers want)
 @router.get("/me/demand-alerts")
 async def get_demand_alerts(
@@ -520,18 +541,20 @@ async def get_demand_alerts(
             detail="Vendor profile not found"
         )
 
-    # Fetch demand alerts matching vendor's city. Alerts expire 48h after being
-    # raised, so anything older is excluded here AND from the count (kept in sync so
-    # the "Pending" badge matches the list). City matching is case/whitespace
-    # insensitive because alerts are seeded with e.g. "Abuja" while a vendor may have
-    # stored "abuja " - an exact match silently hid every alert from those vendors.
+    # Demand alerts are matched on the vendor's STATE, not its exact town: an
+    # Abuja broadcast is relevant to every FCT vendor (Wuse, Garki, Gwarinpa...)
+    # and a Lagos one to Ikeja/Lekki alike. Alerts stay city-keyed, so the vendor's
+    # state is expanded into the cities the location map knows for it. Matching is
+    # case/whitespace insensitive because a stored "abuja " used to hide every
+    # alert from that vendor.
     cutoff = demand_alert_cutoff()
+    alert_cities = _alert_cities_for_vendor(vendor)
     count_stmt = text("""
         SELECT COUNT(*) FROM demand_alerts
-        WHERE LOWER(TRIM(city)) = LOWER(TRIM(:city))
+        WHERE LOWER(TRIM(city)) IN :cities
           AND status = 'pending' AND created_at >= :cutoff
-    """)
-    count_result = await db.execute(count_stmt, {"city": vendor.city, "cutoff": cutoff})
+    """).bindparams(bindparam("cities", expanding=True))
+    count_result = await db.execute(count_stmt, {"cities": alert_cities, "cutoff": cutoff})
     total = count_result.scalar() or 0
 
     data_stmt = text("""
@@ -539,13 +562,13 @@ async def get_demand_alerts(
             id, item_description, city, quantity_needed, unit,
             project_title, requested_by, status, created_at
         FROM demand_alerts
-        WHERE LOWER(TRIM(city)) = LOWER(TRIM(:city))
+        WHERE LOWER(TRIM(city)) IN :cities
           AND status = 'pending' AND created_at >= :cutoff
         ORDER BY created_at DESC
         OFFSET :offset LIMIT :limit
-    """)
+    """).bindparams(bindparam("cities", expanding=True))
     data_result = await db.execute(data_stmt, {
-        "city": vendor.city,
+        "cities": alert_cities,
         "cutoff": cutoff,
         "offset": (page - 1) * page_size,
         "limit": page_size,

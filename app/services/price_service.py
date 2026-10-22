@@ -130,11 +130,24 @@ CITY_TO_STATE = {
 }
 
 
+# Canonical spellings that name a state rather than a city. The app's own
+# dropdowns store "FCT (Abuja)" while material_rates (and every demand alert
+# raised from the BOQ pipeline) uses "FCT"/"Abuja"; without these aliases an
+# FCT vendor never matched an Abuja alert.
+STATE_ALIASES = {
+    "fct": "FCT",
+    "fct abuja": "FCT",
+    "federal capital territory": "FCT",
+}
+
+
 def normalize_state(city):
     """Map a colloquial city/state name to the value in material_rates.state."""
     if not city:
         return city
-    return CITY_TO_STATE.get(city.lower().strip(), city)
+    # "FCT (Abuja)" -> "fct": the bracket is a clarification, not the identity.
+    key = re.sub(r"\s+", " ", re.sub(r"\([^)]*\)", " ", str(city))).strip().lower()
+    return CITY_TO_STATE.get(key) or STATE_ALIASES.get(key) or city
 
 
 # ─────────────────────────────────────────
