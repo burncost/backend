@@ -50,7 +50,7 @@ async def validate_promo(
                 message="You've already used this promo code the maximum number of times",
             )
 
-    if promo.expires_at and promo.expires_at < datetime.utcnow():
+    if promo.expires_at and promo.expires_at <= datetime.utcnow():
         return PromoValidateResponse(valid=False, discount_amount=0, message="This promo code has expired")
 
     amount = float(promo.discount_amount)

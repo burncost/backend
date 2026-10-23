@@ -292,6 +292,10 @@ def _advance_order_status(order: Order, target: str) -> None:
         order.status = "delivered"
         order.delivered_at = datetime.utcnow()
         order.payment_status = "completed"
+        # Policy: the inspection window starts on verified delivery and the
+        # escrow is held until it expires (auto-release task settles it).
+        from app.services import escrow_service as _escrow
+        _escrow.stamp_inspection_window(order)
 
 
 def _write_job_event(

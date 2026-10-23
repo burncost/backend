@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from typing import Literal, Optional, List
 from uuid import UUID
 from datetime import datetime
@@ -66,6 +66,16 @@ class PromoCodeResponse(BaseModel):
     scope_id: Optional[UUID] = None
     expires_at: Optional[datetime] = None
     created_at: datetime
+
+    # Derived, never stored: true once `expires_at` has passed. Keeps every
+    # listing (`/promos/my`, `/admin/promos`) honest - the row stays visible so
+    # its owner can extend the date, but it must not read as Active. Uses the
+    # same `<= now` boundary as `promo_service.failure_reason`, so the badge and
+    # checkout can never disagree.
+    @computed_field
+    @property
+    def is_expired(self) -> bool:
+        return self.expires_at is not None and self.expires_at <= datetime.utcnow()
 
     class Config:
         from_attributes = True

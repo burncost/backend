@@ -119,6 +119,45 @@ def _amounts_disagree(gateway_amount: Optional[float], order_amount: float) -> b
     return gateway_amount is not None and abs(gateway_amount - order_amount) > 0.01
 
 
+async def _cancel_duplicate_drafts(db, order, items) -> int:
+    """Cancel the buyer's other unpaid drafts for this exact basket.
+
+    A double-clicked checkout (or a retry that raced the first request) can
+    leave a second PENDING_PAYMENT order for the same items. Once one twin is
+    paid the other can never legitimately be paid, so keeping it would show a
+    phantom "pending payment" order on the dashboard forever.
+    """
+    # Imported lazily: orders.py is the owner of the draft lifecycle helpers and
+    # importing it at module level would tie the two routers together.
+    from app.api.v1.endpoints.orders import _DRAFT_STATUSES, _cancel_draft
+
+    fingerprint = tuple(sorted((str(i.product_id), int(i.quantity)) for i in items))
+    if not fingerprint:
+        return 0
+
+    rows = await db.execute(
+        select(Order)
+        .options(selectinload(Order.items))
+        .where(
+            Order.user_id == order.user_id,
+            Order.id != order.id,
+            Order.status.in_([s.value for s in _DRAFT_STATUSES]),
+        )
+    )
+    cancelled = 0
+    for other in rows.scalars().all():
+        if other.id == order.id:
+            continue
+        other_fp = tuple(sorted((str(i.product_id), int(i.quantity)) for i in other.items))
+        if other_fp != fingerprint:
+            continue
+        await _cancel_draft(
+            db, other, f"Duplicate checkout superseded by paid order {order.order_number}"
+        )
+        cancelled += 1
+    return cancelled
+
+
 async def _apply_payment_side_effects(db, order) -> None:
     """Apply the stock/vendor effects of a confirmed payment.
 
@@ -165,6 +204,10 @@ async def _apply_payment_side_effects(db, order) -> None:
                  f"and its funds are held in escrow."),
         link="/escrow",
     )
+
+    # Any unpaid twin for the same basket can no longer be paid - retire it so
+    # the dashboard shows this paid order only.
+    await _cancel_duplicate_drafts(db, order, items)
 
 
 ### List payments for the current user

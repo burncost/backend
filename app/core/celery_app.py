@@ -12,6 +12,7 @@ celery_app = Celery(
         "app.tasks.boq_generation_tasks",
         "app.tasks.analytics_tasks",
         "app.tasks.newsletter_tasks",
+        "app.tasks.escrow_tasks",
     ]
 )
 
@@ -34,6 +35,12 @@ celery_app.conf.beat_schedule = {
     "send-price-of-day-daily": {
         "task": "send_price_of_day_newsletter",
         "schedule": crontab(hour=7, minute=0),
+    },
+    # Dispute-resolution policy: release held escrow once the inspection
+    # window has expired (the task itself re-checks every guard).
+    "auto-release-expired-escrows": {
+        "task": "auto_release_expired_escrows",
+        "schedule": crontab(minute="*/15"),
     },
 }
 

@@ -56,6 +56,10 @@ async def accrue_order(db: AsyncSession, order_id: UUID):
     cap = (await db.execute(select(PaymentCapture).where(PaymentCapture.order_id == order_id))).scalar_one_or_none()
     if not cap:
         return {"ok": False, "reason": "No capture recorded for this order", "order_id": str(order_id)}
+    # A refunded order (dispute resolution) must never accrue into a payout.
+    from app.services import refund_service
+    if await refund_service.has_refund(db, order_id):
+        return {"ok": False, "reason": "Order has a refund instruction", "order_id": str(order_id)}
     order = (await db.execute(
         select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
     )).scalar_one_or_none()

@@ -420,16 +420,19 @@ async def admin_list_orders(
     result = await db.execute(query)
     orders = result.scalars().all()
 
-    # Escrow status mapping based on payment + delivery lifecycle
+    # Escrow status mapping based on the inspection window + release stamp.
     def _escrow_status(o: Order) -> str:
-        if o.payment_status == "refunded":
+        if o.payment_status in ("refunded", "partially_refunded"):
             return "Refund Requested"
+        if o.status == "cancelled":
+            return "Refund Requested"
+        if o.escrow_released_at:
+            return "Funds Released"
+        if o.status == "delivered":
+            # Held for the 48h inspection window before the auto-release.
+            return "Inspection Window"
         if o.payment_status == "completed":
-            if o.status in ("delivered", "refunded"):
-                return "Funds Released"
             return "Payment Held"
-        if o.status == "cancelled" and o.payment_status == "completed":
-            return "Refund Requested"
         return "Payment Held"
 
     return {
@@ -451,6 +454,8 @@ async def admin_list_orders(
                 "created_at": o.created_at.isoformat() if o.created_at else None,
                 "estimated_delivery_date": o.estimated_delivery_date.isoformat() if o.estimated_delivery_date else None,
                 "delivered_at": o.delivered_at.isoformat() if o.delivered_at else None,
+                "auto_release_at": o.auto_release_at.isoformat() if o.auto_release_at else None,
+                "escrow_released_at": o.escrow_released_at.isoformat() if o.escrow_released_at else None,
             }
             for o in orders
         ],

@@ -43,6 +43,7 @@ from app.models.category import Category
 from app.services import pricing_service as _pricing
 from app.services import runtime_settings as _runtime_settings
 from app.services import settlement_service as _settlement_service
+from app.services import escrow_service as _escrow
 from app.crud import promo as promo_crud
 from app.services import promo_service
 
@@ -96,6 +97,9 @@ def _generate_order_number() -> str:
 _DRAFT_STATUSES = (OrderStatus.PENDING_PAYMENT, OrderStatus.PAYMENT_FAILED)
 _DRAFT_TTL = timedelta(hours=24)          # auto-expire abandoned drafts
 _SUPERSEDE_AFTER = timedelta(minutes=5)   # cancel older drafts on re-checkout
+# A repeat POST right after the cart was cleared (retry or lost race) is the
+# same checkout, so its draft is echoed back instead of failing on an empty cart.
+_CHECKOUT_REPLAY_WINDOW = timedelta(minutes=2)
 
 
 async def _release_promo(db: AsyncSession, order: Order) -> None:
@@ -156,6 +160,83 @@ async def _supersede_older_drafts(db: AsyncSession, user_id) -> int:
         await _cancel_draft(db, order, "Superseded by a newer checkout")
         superseded += 1
     return superseded
+
+
+def _cart_fingerprint(items) -> tuple:
+    """Identity of a basket as (product_id, quantity) pairs, order-insensitive.
+
+    Accepts either the new checkout's ``order_items`` dicts or persisted
+    ``OrderItem`` rows, so a stored draft can be compared with the cart it was
+    built from.
+    """
+    pairs = []
+    for item in items:
+        product_id = item["product_id"] if isinstance(item, dict) else item.product_id
+        quantity = item["quantity"] if isinstance(item, dict) else item.quantity
+        pairs.append((str(product_id), int(quantity)))
+    return tuple(sorted(pairs))
+
+
+def _normalise_promo(code: Optional[str]) -> Optional[str]:
+    return code.strip().upper() if code else None
+
+
+async def _find_reusable_draft(
+    db: AsyncSession, user_id, fingerprint: tuple, promo_code: Optional[str] = None
+) -> Optional[Order]:
+    """Return this user's unpaid draft for the exact same basket, if any.
+
+    Checkout used to blind-insert an order on every call, so a double-clicked
+    (or retried) request minted two order ids for one cart. A matching unpaid
+    draft is the same checkout intent - reuse it instead of stacking a row.
+    """
+    if not fingerprint:
+        return None
+    rows = await db.execute(
+        select(Order)
+        .options(selectinload(Order.items))
+        .where(
+            Order.user_id == user_id,
+            Order.status.in_([s.value for s in _DRAFT_STATUSES]),
+            Order.payment_status != PaymentStatus.COMPLETED,
+        )
+        .order_by(Order.created_at.desc())
+    )
+    wanted_promo = _normalise_promo(promo_code)
+    for order in rows.scalars().all():
+        # Re-checked in Python: the query already filters, but a caller/test
+        # double must never hand back an order that is no longer a draft.
+        if order.status not in _DRAFT_STATUSES:
+            continue
+        if order.payment_status == PaymentStatus.COMPLETED:
+            continue
+        if _cart_fingerprint(order.items) != fingerprint:
+            continue
+        # A different promo is a different total, so it must not be reused.
+        if _normalise_promo(getattr(order, "promo_code", None)) != wanted_promo:
+            continue
+        return order
+    return None
+
+
+async def _find_recent_draft(db: AsyncSession, user_id, window: timedelta) -> Optional[Order]:
+    """Most recent unpaid draft created inside ``window``, if any.
+
+    The cart is emptied as soon as a draft is created, so a checkout request
+    that lost the race (or a client retry after a timeout) finds an empty cart.
+    That is a repeat of the same checkout, not a new, empty one.
+    """
+    cutoff = datetime.utcnow() - window
+    rows = await db.execute(
+        select(Order)
+        .where(
+            Order.user_id == user_id,
+            Order.status.in_([s.value for s in _DRAFT_STATUSES]),
+            Order.created_at >= cutoff,
+        )
+        .order_by(Order.created_at.desc())
+    )
+    return rows.scalars().first()
 
 
 async def _resolve_shipping_address(
@@ -268,6 +349,12 @@ async def create_order(
 ):
     user_id = current_user.id
 
+    # Serialise same-user checkouts. Without this a double-clicked "Proceed to
+    # Checkout" let both requests read the same cart before either cleared it,
+    # producing two order ids for one basket. The second request now waits for
+    # the first to commit and then sees the emptied cart.
+    await db.execute(select(User.id).where(User.id == user_id).with_for_update())
+
     # Fetch cart items with product details
     cart_result = await db.execute(
         select(CartItem).where(CartItem.user_id == user_id)
@@ -275,6 +362,36 @@ async def create_order(
     cart_items = cart_result.scalars().all()
 
     if not cart_items:
+        recent = await _find_recent_draft(db, user_id, _CHECKOUT_REPLAY_WINDOW)
+        if recent is not None:
+            # The first request already created and committed this draft. Echo
+            # its id so a double submit / timeout retry cannot error out and
+            # cannot mint a second order.
+            replay_missing = []
+            replay_phone = (details.shipping_phone if details else None) or current_user.phone_number
+            if not replay_phone:
+                replay_missing.append("phone")
+            replay_location = None
+            if details is not None:
+                replay_location = details.shipping_address or ", ".join(
+                    p for p in [details.shipping_city, details.shipping_state] if p
+                ) or None
+            if not replay_location and current_user.profile:
+                replay_location = current_user.profile.location
+            if not replay_location:
+                replay_missing.append("address")
+            requires_verification = not bool(current_user.email_verified)
+            logger.info(f"Checkout replay returned draft {recent.order_number} for user {user_id}")
+            return {
+                "success": True,
+                "message": "Existing checkout reused",
+                "order_id": str(recent.id),
+                "order_number": recent.order_number,
+                "total_amount": float(recent.total_amount or 0),
+                "requires_completion": bool(replay_missing) or requires_verification,
+                "missing_fields": replay_missing,
+                "requires_verification": requires_verification,
+            }
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Your cart is empty. Add items before placing an order."
@@ -384,7 +501,6 @@ async def create_order(
                 promo, order_items, per_user_ok=per_user_ok
             )
             if reason is None:
-                promo.current_uses += 1
                 promo_applied = {
                     "code": promo.code,
                     "discount_amount": float(promo.discount_amount),
@@ -450,6 +566,44 @@ async def create_order(
     # Keep the draft flow from piling up: expire stale drafts and cancel any
     # older unpaid draft a previous checkout left behind (the phantom order bug).
     await _expire_stale_drafts(db, user_id)
+
+    # Idempotency: the same basket + promo means this is a repeat of the
+    # checkout that just created a draft (double click, retry, or a second tab).
+    # Reuse that draft so the buyer cannot end up with two order ids - one paid,
+    # one stuck on "pending payment".
+    existing = await _find_reusable_draft(
+        db, user_id, _cart_fingerprint(order_items),
+        promo_code=promo_applied["code"] if promo_applied else None,
+    )
+    if existing is not None:
+        if resolved_address is not None:
+            existing.shipping_address_id = resolved_address.id
+        if details is not None:
+            if details.shipping_phone:
+                current_user.phone_number = details.shipping_phone
+            loc = ", ".join(p for p in [details.shipping_city, details.shipping_state] if p) or (details.shipping_address or "")
+            if loc and current_user.profile:
+                current_user.profile.location = loc
+        awaiting_refresh = existing
+        await db.commit()
+        await db.refresh(awaiting_refresh)
+        logger.info(f"Checkout reused existing draft {awaiting_refresh.order_number} for user {user_id}")
+        return {
+            "success": True,
+            "message": "Existing checkout reused",
+            "order_id": str(awaiting_refresh.id),
+            "order_number": awaiting_refresh.order_number,
+            "total_amount": float(awaiting_refresh.total_amount or 0),
+            "requires_completion": bool(missing_fields) or requires_verification,
+            "missing_fields": missing_fields,
+            "requires_verification": requires_verification,
+        }
+
+    # The promo counter is bumped at order creation, not payment. This runs only
+    # for a genuinely new order so the reuse branch above never burns a use.
+    if promo_applied:
+        promo.current_uses += 1
+
     await _supersede_older_drafts(db, user_id)
 
     # Create the order
@@ -924,6 +1078,16 @@ async def get_order_detail(
         "delivery_location": delivery_location,
         "estimated_delivery": order.estimated_delivery_date.isoformat() if order.estimated_delivery_date else None,
         "created_at": order.created_at.isoformat() if order.created_at else None,
+        # Dispute-resolution policy: the buyer must see when the hold expires.
+        "payment_status": order.payment_status.value if order.payment_status else "",
+        "delivered_at": order.delivered_at.isoformat() if order.delivered_at else None,
+        "inspection_window_hours": order.inspection_window_hours or 48,
+        "auto_release_at": order.auto_release_at.isoformat() if order.auto_release_at else None,
+        "escrow_released_at": order.escrow_released_at.isoformat() if order.escrow_released_at else None,
+        "inspection_extension_requested_at": (
+            order.inspection_extension_requested_at.isoformat()
+            if order.inspection_extension_requested_at else None
+        ),
     }
 
 
@@ -1045,6 +1209,8 @@ async def confirm_delivery(
         order.status = "delivered"
         order.delivered_at = datetime.utcnow()
         order.payment_status = "completed"
+        # Policy: funds stay held for the inspection window, not released now.
+        _escrow.stamp_inspection_window(order)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1058,6 +1224,49 @@ async def confirm_delivery(
 
     logger.info(f"Order {order_id} delivery confirmed by user {current_user.id}")
     return {"message": "Delivery confirmed", "order_id": order_id}
+
+
+### Inspection window (dispute-resolution policy): one buyer extension request
+@router.post("/{order_id}/inspection-extension")
+async def request_inspection_extension(
+    order_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Extend the escrow hold by one window (+24h by default).
+
+    The policy allows the buyer a single extension while the funds are still
+    held; the request is honoured immediately so the auto-release clock cannot
+    fire while the buyer is still inspecting.
+    """
+    try:
+        uid = UUID(order_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid order ID")
+
+    order = (await db.execute(select(Order).where(Order.id == uid))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if str(order.user_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Only the order buyer can request an extension")
+    if order.escrow_released_at:
+        raise HTTPException(status_code=400, detail="Funds for this order have already been released")
+    if not order.auto_release_at:
+        raise HTTPException(status_code=400, detail="This order is not in its inspection window")
+    if order.inspection_extension_requested_at:
+        raise HTTPException(status_code=400, detail="An inspection extension has already been requested")
+    if order.auto_release_at <= datetime.utcnow():
+        raise HTTPException(status_code=400, detail="The inspection window has already closed")
+
+    hours = _escrow.extension_hours()
+    order.inspection_extension_requested_at = datetime.utcnow()
+    order.auto_release_at = order.auto_release_at + timedelta(hours=hours)
+    await db.commit()
+    return {
+        "order_id": order_id,
+        "auto_release_at": order.auto_release_at.isoformat(),
+        "extended_hours": hours,
+    }
 
 
 async def _order_awaiting_receipt_proof(db: AsyncSession, order_id) -> Optional[DeliveryProof]:
@@ -1130,6 +1339,8 @@ async def _finalize_delivery_on_receipt(
     order.status = "delivered"
     order.delivered_at = now
     order.payment_status = "completed"
+    # Policy: funds stay held for the inspection window, not released now.
+    _escrow.stamp_inspection_window(order, now=now)
 
     if proof is not None:
         # Mirror the confirmation into the buyer-facing delivery feed so the
@@ -1149,36 +1360,12 @@ async def _finalize_delivery_on_receipt(
 async def release_order_escrow(background_tasks: BackgroundTasks, order: Order, db: AsyncSession) -> None:
     """Queue the escrow release for every vendor line on a completed order.
 
-    Each vendor line is paid its own line total MINUS that line's vendor-borne
-    share of the platform margin (`pricing_service.vendor_margins_by_item`). The
-    buyer was only ever charged the *client* share at checkout, so without this
-    deduction the platform would be paying out its own margin. The buyer's
-    shipping fee is not part of any vendor line and is settled to the driver.
-
-    Shared so an order finalised outside the buyer's own confirmation (the admin
-    accept-on-behalf escalation) settles the vendors identically.
+    Thin delegate to `app.services.escrow_service`, which owns the dispute /
+    refund / inspection-window guard so no caller can pay a vendor while a
+    dispute is open. The per-line math (line total MINUS the vendor-borne share
+    of the platform margin) lives there too.
     """
-    try:
-        deductions = await _pricing.vendor_margins_by_item(db, order.items)
-    except Exception as exc:  # a pricing recompute must never block a release
-        logger.error(f"Vendor margin recompute failed for order {order.order_number}: {exc}")
-        deductions = {}
-
-    for index, item in enumerate(order.items):
-        if not item.vendor_id:
-            continue
-        gross = _pricing.f2(item.total_price)
-        deduction = min(_pricing.f2(deductions.get(_pricing.item_key(item, index), 0)), gross)
-        background_tasks.add_task(
-            _release_escrow_to_vendor,
-            vendor_id=str(item.vendor_id),
-            order_number=order.order_number,
-            # Only the net leaves escrow; the retained margin stays on the platform.
-            amount=round(gross - deduction, 2),
-            gross_amount=gross,
-            platform_deduction=deduction,
-            db_session=db,
-        )
+    return await _escrow.release_order_escrow(background_tasks, order, db)
 
 
 # Phase 11: escrow/transfer safety limits.

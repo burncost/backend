@@ -83,6 +83,16 @@ class Order(Base):
     driver_phone = Column(String(20))
     estimated_delivery_date = Column(DateTime)
     delivered_at = Column(DateTime)
+    # ── Dispute-resolution spine (see Frontend/src/app/content/legal) ───────
+    # Funds are held for `inspection_window_hours` counted from verified
+    # delivery, then the Celery auto-release task settles the vendor lines.
+    inspection_window_hours = Column(Integer, default=48, server_default="48")
+    auto_release_at = Column(DateTime, index=True)
+    # Stamped once the vendor lines have actually been queued/paid out. Also
+    # the idempotency key for the auto-release task.
+    escrow_released_at = Column(DateTime)
+    # One buyer-requested extension per order (policy: +24h on request).
+    inspection_extension_requested_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

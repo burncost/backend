@@ -295,6 +295,16 @@ class Settings(BaseSettings):
     PAYOUT_PRIMARY_GATEWAY: str = "paystack"
     PAYOUT_BACKUP_GATEWAY: str = "monnify"
 
+    # ── Disputes / delivery inspection window ───────────────────────────────
+    # Published dispute-resolution policy: funds stay in escrow for a 48-hour
+    # inspection window counted from verified delivery, then auto-release.
+    # A buyer may request one extension; an admin decides whether to grant it.
+    INSPECTION_WINDOW_HOURS: int = 48
+    INSPECTION_EXTENSION_HOURS: int = 24
+    # Technical-inspection hold (cl. 3C/7-9) is still an admin-handled process;
+    # the figure is documented here so the manual step has one source of truth.
+    TECHNICAL_INSPECTION_HOLD_BUSINESS_DAYS: int = 7
+
     class Config:
         env_file = ".env"
         case_sensitive = True
