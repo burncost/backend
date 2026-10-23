@@ -46,10 +46,12 @@ from app.models.delivery_rating import DeliveryRating
 from app.models.driver_earnings import DriverEarnings
 from app.models.notification import Notification
 from app.models.order import Order, OrderItem
+from app.models.product import ProductImage
 from app.models.vendor import Vendor
 from app.models.vendor_address import VendorAddress
 from app.services.geo_providers import (
     GeoUnavailable,
+    driving_route,
     reverse_place,
     search_places,
     snap_to_road,
@@ -199,9 +201,15 @@ def _job_dict(job: DeliveryJob, order_number: Optional[str] = None, proof: Optio
         "pickup_city": job.pickup_city,
         "pickup_state": job.pickup_state,
         "pickup_address": job.pickup_address,
+        # Pins travel with the job so the driver can open a one-tap navigation
+        # deep link without a second tracking round-trip.
+        "pickup_lat": float(job.pickup_lat) if job.pickup_lat is not None else None,
+        "pickup_lng": float(job.pickup_lng) if job.pickup_lng is not None else None,
         "dropoff_city": job.dropoff_city,
         "dropoff_state": job.dropoff_state,
         "dropoff_address": job.dropoff_address,
+        "dropoff_lat": float(job.dropoff_lat) if job.dropoff_lat is not None else None,
+        "dropoff_lng": float(job.dropoff_lng) if job.dropoff_lng is not None else None,
         "driver_name": job.driver_name,
         "driver_phone": job.driver_phone,
         "delivery_fee": float(job.delivery_fee or 0),
@@ -372,6 +380,8 @@ _GEO_CACHE_TTL = 600.0  # seconds a resolved query stays warm
 _GEO_CACHE_MAX = 500    # hard cap so a cache cannot grow unbounded
 _geo_cache: Dict[str, Tuple[float, List[dict]]] = {}
 _geo_rev_cache: Dict[str, Tuple[float, Any]] = {}
+# Routes API answers keyed by "origin->destination" (same TTL/cap as the rest).
+_job_route_cache: Dict[str, Tuple[float, dict]] = {}
 
 
 def _cache_get(store: Dict[str, Any], key: str):
@@ -2298,6 +2308,54 @@ async def track_job(
     return await _job_tracking_payload(db, job_id, current_user)
 
 
+async def _job_goods(db: AsyncSession, order_id) -> List[dict]:
+    """The goods travelling in this job, with a thumbnail per line.
+
+    Buyers, vendors and drivers all need to know *what* is in the parcel, not
+    just where it is going. Two queries (items, then their images) keep this
+    free of N+1 lookups; a product without an image simply has `image_url`
+    set to None so the line still shows up in the manifest.
+    """
+    items = (
+        await db.execute(
+            select(OrderItem)
+            .where(OrderItem.order_id == order_id)
+            .order_by(OrderItem.created_at)
+        )
+    ).scalars().all()
+    if not items:
+        return []
+
+    product_ids = [i.product_id for i in items if i.product_id]
+    images: Dict[str, str] = {}
+    if product_ids:
+        rows = (
+            await db.execute(
+                select(ProductImage)
+                .where(ProductImage.product_id.in_(product_ids))
+                # Primary first, then whatever the vendor ordered them in, so
+                # the thumbnail is stable rather than arbitrary.
+                .order_by(ProductImage.is_primary.desc(), ProductImage.display_order.asc())
+            )
+        ).scalars().all()
+        for img in rows:
+            images.setdefault(str(img.product_id), img.image_url)
+
+    return [
+        {
+            "id": str(i.id),
+            "product_name": i.product_name,
+            "sku": i.sku,
+            "quantity": i.quantity,
+            "unit_price": float(i.unit_price or 0),
+            "total_price": float(i.total_price or 0),
+            "status": i.vendor_status.value if hasattr(i.vendor_status, "value") else i.vendor_status,
+            "image_url": images.get(str(i.product_id)),
+        }
+        for i in items
+    ]
+
+
 async def _job_tracking_payload(db: AsyncSession, job_id: UUID, current_user) -> dict:
     """Authorize the caller and build the live-tracking payload for a job.
 
@@ -2360,6 +2418,8 @@ async def _job_tracking_payload(db: AsyncSession, job_id: UUID, current_user) ->
         },
         # Breadcrumb trail (oldest first) for the polyline on the live map.
         "trail": await _job_trail(db, job.id),
+        # What is actually in the parcel (buyer / vendor / driver manifest).
+        "goods": await _job_goods(db, job.order_id),
         # Manual update feed (driver/vendor), shown alongside the live map.
         "events": job_events,
         # Buyer-safe proof (photo + verdict) + compact gate summary.
@@ -2398,6 +2458,43 @@ async def job_trail(
     """The recorded position breadcrumbs for one job (oldest first)."""
     await _job_tracking_payload(db, job_id, current_user)  # ownership check
     return {"job_id": str(job_id), "points": await _job_trail(db, job_id, max(1, min(limit, 500)))}
+
+
+@router.get("/jobs/{job_id}/route")
+async def job_route(
+    job_id: UUID,
+    current_user = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Road route (encoded polyline) + ETA from a job's pickup to its drop-off.
+
+    Routes API is billed per request and a fixed origin/destination pair never
+    changes, so results are cached exactly like the geocoding proxy. Key-less
+    deployments get a 503 and the map simply keeps drawing the breadcrumbs.
+    """
+    payload = await _job_tracking_payload(db, job_id, current_user)  # ownership check
+    pickup, dropoff = payload.get("pickup") or {}, payload.get("dropoff") or {}
+    coords = (pickup.get("lat"), pickup.get("lng"), dropoff.get("lat"), dropoff.get("lng"))
+    if any(c is None for c in coords):
+        raise HTTPException(
+            http_status.HTTP_400_BAD_REQUEST,
+            detail="This job has no pinned pickup/drop-off point.",
+        )
+
+    cache_key = (
+        f"{round(coords[0], 4)},{round(coords[1], 4)}"
+        f"->{round(coords[2], 4)},{round(coords[3], 4)}"
+    )
+    route = _cache_get(_job_route_cache, cache_key)
+    if route is None:
+        route = await driving_route((coords[0], coords[1]), (coords[2], coords[3]))
+        if not route:
+            raise HTTPException(
+                http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Road route preview is not configured on this deployment.",
+            )
+        _cache_put(_job_route_cache, cache_key, route)
+    return {"job_id": str(job_id), **route}
 
 
 @router.get("/jobs/{job_id}/stream")

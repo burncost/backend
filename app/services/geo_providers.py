@@ -36,6 +36,7 @@ PHOTON_SEARCH_URL = "https://photon.komoot.io/api/"
 OSRM_NEAREST_URL = "https://router.project-osrm.org/nearest/v1/driving"
 GOOGLE_PLACES_URL = "https://places.googleapis.com/v1/places:searchText"
 GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+GOOGLE_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 
 USER_AGENT = "BurnCostLogistics/1.0 (delivery address search)"
 TIMEOUT = 8.0
@@ -374,4 +375,107 @@ async def snap_to_road(lat: float, lng: float) -> Optional[dict]:
             "distance_m": float(waypoints[0].get("distance") or 0.0),
         }
     except (TypeError, ValueError):
+        return None
+
+
+# ── Road route + ETA (Google Routes API) ────────────────────────────────
+
+def _duration_seconds(value: Any) -> Optional[float]:
+    """Parse a proto3 duration string (``"1500s"``) into seconds.
+
+    Routes API reports durations as ``"<seconds>s"`` rather than the legacy
+    Directions ``{"value": 1500}`` object, so the unit is all there is to strip.
+    """
+    if value is None:
+        return None
+    try:
+        return float(str(value).strip().rstrip("s"))
+    except (TypeError, ValueError):
+        return None
+
+
+def google_route_to_dict(raw: Any) -> Optional[dict]:
+    """Map a Routes API ``computeRoutes`` payload onto the small shape our UI needs.
+
+    Kept pure so the mapping is unit-tested without HTTP. Routes answers HTTP
+    200 with an empty ``routes`` list when there is no drivable path (an island,
+    say), so the check lives here rather than in the HTTP helper.
+    """
+    routes = (raw or {}).get("routes") or []
+    route = (routes[0] if routes else None) or {}
+    polyline = (route.get("polyline") or {}).get("encodedPolyline")
+    if not polyline:
+        return None
+    # `duration` already accounts for traffic when routingPreference was
+    # TRAFFIC_AWARE; `staticDuration` is the free-flow estimate. The two differ
+    # only when Google actually had traffic data for the corridor.
+    duration_s = _duration_seconds(route.get("duration"))
+    static_s = _duration_seconds(route.get("staticDuration"))
+    try:
+        return {
+            "polyline": polyline,
+            "distance_km": round(float(route.get("distanceMeters") or 0) / 1000.0, 2),
+            # A route under a minute still reads better as "1 min" than "0".
+            "duration_min": max(1, round((duration_s or 0.0) / 60.0)),
+            "traffic_aware": (
+                static_s is not None and duration_s is not None and duration_s != static_s
+            ),
+            # Routes returns coordinates, not address text; the keys stay so the
+            # response shape seen by the UI does not change.
+            "start_address": None,
+            "end_address": None,
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+async def google_driving_route(origin: tuple, destination: tuple) -> Optional[dict]:
+    """Routes API ``computeRoutes`` call between two ``(lat, lng)`` pairs."""
+    key = getattr(settings, "GOOGLE_MAPS_API_KEY", None)
+    if not key:
+        return None
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": key,
+        # Mandatory - omitting the field mask is a 400. Only the fields the map
+        # renders, which keeps the billed SKU minimal.
+        "X-Goog-FieldMask": (
+            "routes.duration,routes.staticDuration,"
+            "routes.distanceMeters,routes.polyline.encodedPolyline"
+        ),
+    }
+
+    def waypoint(pair: tuple) -> Dict[str, Any]:
+        return {"location": {"latLng": {"latitude": pair[0], "longitude": pair[1]}}}
+
+    body: Dict[str, Any] = {
+        "origin": waypoint(origin),
+        "destination": waypoint(destination),
+        "travelMode": "DRIVE",
+        # Traffic-aware ETA where Google has data. No departureTime is sent, so
+        # the route is always computed for "now".
+        "routingPreference": "TRAFFIC_AWARE",
+        "polylineQuality": "OVERVIEW",
+        "regionCode": "NG",
+        "languageCode": "en",
+        "units": "METRIC",
+    }
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        resp = await client.post(GOOGLE_ROUTES_URL, json=body, headers=headers)
+        resp.raise_for_status()
+        raw = resp.json()
+    return google_route_to_dict(raw)
+
+
+async def driving_route(origin: tuple, destination: tuple) -> Optional[dict]:
+    """Road route + ETA between two pins, or ``None`` when unavailable.
+
+    Routing is billed per request, so it stays off entirely without a key; the
+    caller degrades to the recorded breadcrumb trail instead of erroring.
+    """
+    if not google_enabled():
+        return None
+    try:
+        return await google_driving_route(origin, destination)
+    except Exception:  # noqa: BLE001 - advisory only, the trail still draws
         return None
