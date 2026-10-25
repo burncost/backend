@@ -1115,6 +1115,14 @@ async def get_boq(
         # them raw so the preview/report can render the parsed items.
         doc = await db["boq_verifications"].find_one({"_id": ObjectId(boq_id)})
         if doc:
+            # An upload is private to the account that uploaded it. Legacy rows
+            # saved before ownership was recorded stay readable (no owner).
+            owner = doc.get("uploadedBy")
+            if owner and str(owner) != str(current_user.id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not your BOQ",
+                )
             doc["_id"] = str(doc["_id"])
             doc["title"] = doc.get("filename") or "Uploaded BOQ"
             doc["source"] = "verification"
@@ -1574,6 +1582,12 @@ async def preview_boq_cart(
     fill their on-device cart and signed-in shoppers their account cart - the same
     path the marketplace and chat already use.
 
+    `boq_id` may point at a generated bill or at a bill uploaded for verification
+    (`boq_verifications`); verification documents already carry `elements[].items`
+    with `item_code/description/unit/quantity`, so they resolve without reshaping.
+    A verification upload is only orderable by its uploader - guest uploads are
+    never stored, so those rows always have an owner and require a signed-in user.
+
     Vendors are gated on being active/verified with enough stock for the required
     quantity; among those, a supplier rated 3.5+ is preferred and the cheapest
     landed cost wins, with the next best offers returned as alternates.
@@ -1586,19 +1600,41 @@ async def preview_boq_cart(
                 detail="Provide either boq_id or the boq payload.",
             )
         doc = await BOQRepository(db).get_by_id(request.boq_id)
-        if not doc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="BOQ not found",
-            )
-        # A stored bill is only resolvable by the account that owns it.
-        owner = doc.get("createdBy")
-        if current_user is not None and owner and str(owner) != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not your BOQ",
-            )
-        boq = doc.get("boqData") or doc
+        if doc:
+            # A stored bill is only resolvable by the account that owns it.
+            owner = doc.get("createdBy")
+            if current_user is not None and owner and str(owner) != str(current_user.id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not your BOQ",
+                )
+            boq = doc.get("boqData") or doc
+        else:
+            # Bills uploaded for verification live in their own collection.
+            from bson import ObjectId
+
+            verification = None
+            if ObjectId.is_valid(request.boq_id):
+                verification = await db["boq_verifications"].find_one(
+                    {"_id": ObjectId(request.boq_id)}
+                )
+            if not verification:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="BOQ not found",
+                )
+            if current_user is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Sign in to order from an uploaded bill.",
+                )
+            owner = verification.get("uploadedBy")
+            if owner and str(owner) != str(current_user.id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not your BOQ",
+                )
+            boq = verification
 
     service = BOQCartService(pg_db)
     try:

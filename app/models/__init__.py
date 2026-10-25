@@ -41,6 +41,9 @@ from app.models.quotation import Quotation, QuotationLineItem
 from app.models.refund import Refund
 from app.models.product_favorite import ProductFavorite
 from app.models.blog_post import BlogPost
+from app.models.newsletter_template import NewsletterTemplate
+from app.models.newsletter_campaign import NewsletterCampaign
+from app.models.newsletter_recipient import NewsletterRecipient
 
 __all__ = [
     "User",
@@ -109,4 +112,7 @@ __all__ = [
     "QuotationLineItem",
     "ProductFavorite",
     "BlogPost",
+    "NewsletterTemplate",
+    "NewsletterCampaign",
+    "NewsletterRecipient",
 ]

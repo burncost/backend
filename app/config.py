@@ -196,6 +196,23 @@ class Settings(BaseSettings):
     # Pagination
     DEFAULT_PAGE_SIZE: int = 20
     MAX_PAGE_SIZE: int = 100
+
+    # ── Newsletter campaigns (admin console) ────────────────────────────────
+    # Hard ceiling on recipients for a single campaign. A mis-typed segment or a
+    # pasted address list must never mail the whole vendor base by accident.
+    NEWSLETTER_MAX_RECIPIENTS: int = 5000
+    # Recipients claimed per batch, and how many sends run concurrently inside a
+    # batch. Small on purpose: it keeps the provider under its rate limits and
+    # lets a failed batch retry without double-mailing anyone.
+    NEWSLETTER_BATCH_SIZE: int = 50
+    NEWSLETTER_SEND_CONCURRENCY: int = 5
+    # Attempts per recipient before it is parked as "failed" for a manual retry.
+    NEWSLETTER_MAX_SEND_ATTEMPTS: int = 3
+    # How often the scheduler looks for a campaign whose time has come.
+    NEWSLETTER_SCHEDULE_POLL_SECONDS: int = 60
+    # A queued/sending campaign untouched for this long is considered abandoned
+    # (worker died mid-batch) and is handed back to the sender by the dispatcher.
+    NEWSLETTER_STALE_MINUTES: int = 30
     
     # File Upload
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024

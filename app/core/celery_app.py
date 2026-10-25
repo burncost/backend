@@ -36,6 +36,12 @@ celery_app.conf.beat_schedule = {
         "task": "send_price_of_day_newsletter",
         "schedule": crontab(hour=7, minute=0),
     },
+    # Campaign scheduler: queue due campaigns and hand each to the sender
+    # (idempotent - a tick that overlaps another never double-mails).
+    "send-due-newsletter-campaigns": {
+        "task": "send_due_newsletter_campaigns",
+        "schedule": float(settings.NEWSLETTER_SCHEDULE_POLL_SECONDS),
+    },
     # Dispute-resolution policy: release held escrow once the inspection
     # window has expired (the task itself re-checks every guard).
     "auto-release-expired-escrows": {
@@ -52,4 +58,8 @@ celery_app.conf.task_routes = {
     "app.tasks.analytics_tasks.*": {"queue": "analytics"},
     "app.tasks.newsletter_tasks.*": {"queue": "emails"},
     "send_price_of_day_newsletter": {"queue": "emails"},
+    # Campaign sender + scheduler are named tasks (routes match names, not module
+    # paths), so they need explicit entries to land on the emails queue.
+    "send_newsletter_campaign": {"queue": "emails"},
+    "send_due_newsletter_campaigns": {"queue": "emails"},
 }

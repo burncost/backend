@@ -11,12 +11,13 @@ import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status as http_status, BackgroundTasks
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.email_preference import EmailPreference
+from app.models.newsletter_recipient import NewsletterRecipient
 from app.models.user import User
 from app.services.newsletter_service import NewsletterService, PRICE_OF_DAY_SUBJECT
 from app.services.notification_service import NotificationService
@@ -40,6 +41,27 @@ def _state(pref: EmailPreference) -> dict:
         "opted_in_at": pref.opted_in_at,
         "opted_out_at": pref.opted_out_at,
     }
+
+
+async def _stop_pending_sends(db: AsyncSession, email: str) -> int:
+    """Drop this address from every queued campaign.
+
+    A campaign freezes its audience when it is queued, so an opt-out that arrives
+    afterwards would otherwise still be mailed. Marking the pending rows skipped
+    makes the unsubscribe immediate (the worker also re-checks consent per batch).
+    """
+    address = (email or "").strip().lower()
+    if not address:
+        return 0
+    result = await db.execute(
+        update(NewsletterRecipient)
+        .where(
+            func.lower(NewsletterRecipient.email) == address,
+            NewsletterRecipient.status == "pending",
+        )
+        .values(status="skipped", error="unsubscribed")
+    )
+    return int(result.rowcount or 0)
 
 
 async def _get_or_create(db: AsyncSession, user: User) -> EmailPreference:
@@ -88,6 +110,7 @@ async def set_email_preferences(
     else:
         row.marketing_opt_in = False
         row.opted_out_at = now
+        await _stop_pending_sends(db, row.email or (current_user.email or ""))
     row.updated_at = now
     await db.commit()
     await db.refresh(row)
@@ -146,5 +169,6 @@ async def unsubscribe_by_token(
     row.marketing_opt_in = False
     row.opted_out_at = datetime.utcnow()
     row.updated_at = datetime.utcnow()
+    await _stop_pending_sends(db, row.email)
     await db.commit()
     return {"ok": True, "message": "You have been unsubscribed from marketing emails."}

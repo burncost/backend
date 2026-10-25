@@ -1,0 +1,40 @@
+# API + Celery topology.
+#
+# Three long-lived processes, deliberately separate:
+#   api     - the FastAPI app (gunicorn/uvicorn).
+#   worker  - Celery consumer. It subscribes to every queue, because the escrow
+#             task is unrouted and would otherwise sit in `celery` forever.
+#   beat    - the clock. Without it `send_due_newsletter_campaigns` never fires,
+#             so a scheduled campaign stays `scheduled` and nothing is mailed.
+#
+# Credentials (Aiven Postgres, Redis/Brevo) come from Backend/.env, which is not
+# committed; copy .env.example and fill it in before `docker compose up`.
+services:
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "8080:8080"
+    command: >
+      sh -c "gunicorn -k uvicorn.workers.UvicornWorker app.main:app
+      --bind 0.0.0.0:${PORT:-8080} --timeout 120"
+    restart: unless-stopped
+
+  worker:
+    build: .
+    env_file: .env
+    command: >
+      celery -A app.core.celery_app worker
+      -Q emails,documents,boq,analytics,celery
+      --loglevel=info
+    restart: unless-stopped
+
+  beat:
+    build: .
+    env_file: .env
+    # Schedule file is ephemeral: a fresh beat simply re-reads beat_schedule.
+    command: >
+      celery -A app.core.celery_app beat
+      --loglevel=info --schedule=/tmp/celerybeat-schedule
+    restart: unless-stopped
+
