@@ -2391,6 +2391,23 @@ async def _job_tracking_payload(db: AsyncSession, job_id: UUID, current_user) ->
     job_events = await _job_events(db, job.id)
     proof = await _load_job_proof(db, job.id)
 
+    latest_location = {
+        "lat": float(driver.current_lat) if driver and driver.current_lat is not None else None,
+        "lng": float(driver.current_lng) if driver and driver.current_lng is not None else None,
+        "recorded_at": driver.current_location_updated_at if driver else None,
+    } if driver else None
+
+    # Straight-line distance the driver still has to cover. The road route + ETA
+    # live on `/route` (pickup -> drop-off); this is the one number that moves on
+    # every heartbeat, so the buyer, vendor and driver portals all render it next
+    # to the map from this single field. None until the driver shares a position.
+    remaining_km = _haversine_km(
+        latest_location["lat"] if latest_location else None,
+        latest_location["lng"] if latest_location else None,
+        job.dropoff_lat,
+        job.dropoff_lng,
+    )
+
     return {
         "job_id": str(job.id),
         "job_number": job.job_number,
@@ -2401,11 +2418,10 @@ async def _job_tracking_payload(db: AsyncSession, job_id: UUID, current_user) ->
             "name": driver.full_name if driver else None,
             "phone": driver.phone if driver else None,
         },
-        "latest_location": {
-            "lat": float(driver.current_lat) if driver and driver.current_lat is not None else None,
-            "lng": float(driver.current_lng) if driver and driver.current_lng is not None else None,
-            "recorded_at": driver.current_location_updated_at if driver else None,
-        } if driver else None,
+        "latest_location": latest_location,
+        # Live progress readout shared by all three portals.
+        "distance_to_dropoff_km": remaining_km,
+        "near_dropoff": bool(remaining_km is not None and remaining_km <= 0.5),
         "pickup": {
             "lat": float(job.pickup_lat) if job.pickup_lat is not None else None,
             "lng": float(job.pickup_lng) if job.pickup_lng is not None else None,
