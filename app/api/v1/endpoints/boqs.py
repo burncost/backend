@@ -796,6 +796,11 @@ def _mask_verification_for_guest(result: Dict[str, Any]) -> Dict[str, Any]:
         if analysis.get(key) is not None:
             analysis[key] = _mask_amount(float(analysis[key] or 0))
     analysis["flagged_items"] = (analysis.get("flagged_items") or [])[:_GUEST_DISCREPANCY_LIMIT]
+    # The audit trail repeats the whole bill (every description, quantity and
+    # rate) and its source URLs. It is a paid-detail artefact, so it is removed
+    # entirely for anonymous callers.
+    analysis.pop("audit", None)
+    result.pop("audit", None)
     result["analysis"] = analysis
 
     # The arithmetic report restates every element total and the contract sum.

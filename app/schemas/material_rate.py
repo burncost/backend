@@ -35,6 +35,13 @@ class MaterialRateUpdate(BaseModel):
 class MaterialRateResponse(MaterialRateBase):
     id: UUID
     verified_at: Optional[datetime] = None
+    # Provenance (see alembic 20261026_material_rate_provenance). A provisional
+    # row was observed online and must be shown as unverified.
+    source_url: Optional[str] = None
+    confidence: Optional[Decimal] = None
+    is_provisional: bool = False
+    observed_at: Optional[datetime] = None
+    lookup_key: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

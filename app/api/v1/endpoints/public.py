@@ -1,11 +1,13 @@
 """Public (unauthenticated) endpoints for the marketing/landing experience."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, union_all, literal_column
+from sqlalchemy import func, select, union_all, literal_column
 
 from app.core.database import get_db
+from app.models.blog_post import BlogPost
 from app.models.product import Review
 from app.models.vendor_review import VendorReview
+from app.services.blog_service import post_to_dict
 
 import logging
 
@@ -93,3 +95,61 @@ async def list_testimonials(
     except Exception as e:  # pragma: no cover - defensive for public endpoint
         logger.error(f"Failed to load public testimonials: {str(e)}")
         return {"total": 0, "testimonials": []}
+
+
+# ── Blog (public reads) ─────────────────────────────────────────────────────
+# Only published posts are visible; drafts are an admin-only concept.
+
+@router.get("/blog")
+async def list_public_blog_posts(
+    limit: int = Query(20, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    tag: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        query = select(BlogPost).where(BlogPost.status == "published")
+        if tag:
+            query = query.where(BlogPost.tags.ilike(f"%{tag}%"))
+
+        total = (await db.execute(
+            select(func.count()).select_from(query.subquery())
+        )).scalar() or 0
+        rows = (await db.execute(
+            query.order_by(BlogPost.published_at.desc().nullslast(), BlogPost.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )).scalars().all()
+
+        return {
+            "total": total,
+            "posts": [post_to_dict(p, include_content=False) for p in rows],
+        }
+    except Exception as e:  # pragma: no cover - a public page must not break
+        logger.error("Failed to load public blog posts: %s", e)
+        return {"total": 0, "posts": []}
+
+
+@router.get("/blog/{slug}")
+async def get_public_blog_post(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+):
+    post = (await db.execute(
+        select(BlogPost).where(
+            BlogPost.slug == slug,
+            BlogPost.status == "published",
+        )
+    )).scalar_one_or_none()
+    if post is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
+
+    # View count is best-effort: a failed counter must never block the read.
+    try:
+        post.view_count = int(post.view_count or 0) + 1
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.warning("Blog view count update failed for %s: %s", slug, exc)
+
+    return post_to_dict(post)

@@ -4,6 +4,7 @@ from sqlalchemy import select, func
 from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
+from datetime import datetime
 
 from app.core.database import get_db, get_mongodb
 from app.models.material_rate import MaterialRate, MaterialRateHistory, PriceTrend
@@ -40,6 +41,13 @@ def _to_mongo_doc(rate: MaterialRate) -> dict:
         "rate": float(rate.current_price),
         "state": rate.state,
         "isActive": True,
+        # Provenance travels with the copy: a cached online rate must not become
+        # "database-verified" merely by being mirrored into MongoDB.
+        "source": rate.source,
+        "source_url": rate.source_url,
+        "confidence": float(rate.confidence) if rate.confidence is not None else None,
+        "is_provisional": bool(rate.is_provisional),
+        "observed_at": rate.observed_at.isoformat() if rate.observed_at else None,
     }
 
 
@@ -67,6 +75,7 @@ async def list_material_rates(
     state: Optional[str] = Query(None),
     material_name: Optional[str] = Query(None),
     supplier_id: Optional[UUID] = Query(None),
+    is_provisional: Optional[bool] = Query(None, description="Filter cached online (provisional) rates"),
     sort_by: str = Query("material_name", regex="^(material_name|current_price|state|created_at)$"),
     sort_order: str = Query("asc", regex="^(asc|desc)$"),
     db: AsyncSession = Depends(get_db)
@@ -81,6 +90,8 @@ async def list_material_rates(
         query = query.where(MaterialRate.material_name.ilike(f"%{material_name}%"))
     if supplier_id:
         query = query.where(MaterialRate.supplier_id == supplier_id)
+    if is_provisional is not None:
+        query = query.where(MaterialRate.is_provisional.is_(is_provisional))
 
     # Count total
     count_query = select(func.count()).select_from(query.subquery())
@@ -183,6 +194,16 @@ async def update_material_rate(
 
     for field, value in update_data.items():
         setattr(rate, field, value)
+
+    # A human edit promotes a cached online observation into a verified rate:
+    # clear the provisional flag and stamp when it was confirmed. Without this a
+    # reviewed row would keep being excluded from verified counts forever.
+    if rate.is_provisional:
+        rate.is_provisional = False
+        if update_data.get("verified_at") is None:
+            rate.verified_at = datetime.utcnow()
+        if not update_data.get("source"):
+            rate.source = "manual"
 
     await db.commit()
     await db.refresh(rate)

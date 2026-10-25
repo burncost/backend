@@ -1,4 +1,14 @@
-from sqlalchemy import Column, String, DateTime, Numeric, ForeignKey, Text, Enum as SQLEnum
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    Enum as SQLEnum,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -32,8 +42,20 @@ class MaterialRate(Base):
     trend = Column(SQLEnum(PriceTrend, native_enum=False, length=10,
                            values_callable=lambda e: [m.value for m in e]),
                    default=PriceTrend.STABLE)
-    source = Column(String(50), default="manual")  # "manual", "api", "scraped"
+    source = Column(String(50), default="manual")  # "manual", "api", "scraped", "online_market", "online_average"
     verified_at = Column(DateTime)
+    # ── Provenance (online write-back) ─────────────────────────────────────
+    # A rate fetched from the open web is stored so the next BOQ run can reuse
+    # it, but it is marked provisional: `verified_at` stays NULL and no surface
+    # counts it as a verified database rate. An admin editing the row promotes
+    # it (is_provisional=False, verified_at=now).
+    source_url = Column(Text)
+    confidence = Column(Numeric(4, 3))
+    is_provisional = Column(Boolean, nullable=False, default=False, server_default=text("false"), index=True)
+    observed_at = Column(DateTime)
+    # sha1(normalize(product_name)|unit|state) - the natural key used to update
+    # a previously cached online price instead of inserting a duplicate.
+    lookup_key = Column(String(64), unique=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

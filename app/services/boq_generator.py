@@ -19,6 +19,7 @@ from app.services.mitm_engine import MITMEngine
 from app.services.price_service import DB_SOURCES, PriceService, PriceTruthService
 from app.services.demand_broadcast_service import broadcast_boq_demand, material_demand_lines
 from app.services.gemini_client import get_gemini_client
+from app.services.online_rate_writeback import persist_rate_observation
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -514,6 +515,11 @@ def _verification_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
     net_variance = round(adjusted_total - original_total, 2)
     net_variance_pct = round((net_variance / original_total * 100), 2) if original_total else 0.0
     unverified = int(analysis.get("unverified_count") or 0)
+    # A provisional reference (a cached/just-fetched online price) prices the line
+    # but is not a curated DB rate, so it is reported separately and never
+    # counted as verified.
+    provisional = int(analysis.get("provisional_count") or 0)
+    db_verified = max(0, len(verified_items) - unverified - provisional)
 
     # Why lines went unverified matters to the reader: "no comparable rate in the
     # catalogue" is a coverage gap, "unit mismatch" is a data-quality signal.
@@ -531,6 +537,8 @@ def _verification_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "total_items_checked": len(verified_items),
+        "verified_count": db_verified,
+        "provisional_count": provisional,
         "overpriced_count": overpriced,
         "underpriced_count": underpriced,
         "fair_count": fair,
@@ -544,10 +552,72 @@ def _verification_summary(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "summary_note": (
             f"Checked {len(verified_items)} items against {analysis.get('city', 'Abuja')} "
             f"market rates: {overpriced} overpriced, {underpriced} underpriced, "
-            f"{fair} within range, {unverified} with no comparable rate."
+            f"{fair} within range, {unverified} with no comparable rate"
+            + (
+                f"; {provisional} priced from a provisional online reference and excluded "
+                "from the verified count."
+                if provisional else "."
+            )
         ),
     }
 
+
+
+# ── Reproducible rate audit ────────────────────────────────────────────────
+#
+# A verification result must be reviewable line by line: which catalogue entry
+# (or online reference) produced the market rate, how confident it was, where it
+# came from, and whether it counted as verified. The audit trail is stored inside
+# the verification record so a later download or a regeneration can be traced
+# back to the exact evidence - no re-run required, no hidden re-pricing.
+
+def _build_verification_audit(analysis: Dict[str, Any], city: str) -> Dict[str, Any]:
+    """Snapshot the evidence behind every line of a verification pass."""
+    items: List[Dict[str, Any]] = []
+    source_counts: Dict[str, int] = {}
+    sources: set = set()
+
+    for entry in analysis.get("verified_items") or []:
+        source = entry.get("price_source") or "none"
+        source_counts[source] = source_counts.get(source, 0) + 1
+        if entry.get("source_url"):
+            sources.add(entry["source_url"])
+        items.append({
+            "description": entry.get("description") or "",
+            "element_name": entry.get("element_name"),
+            "unit": entry.get("unit") or "",
+            "quantity": entry.get("quantity") or 0,
+            "quoted_rate": entry.get("quoted_rate") or 0,
+            "market_rate": entry.get("market_rate"),
+            "matched_product": entry.get("market_rate_product"),
+            "match_reason": entry.get("match_reason") or "matched",
+            "status": entry.get("status") or "unverified",
+            "price_source": entry.get("price_source"),
+            "price_basis": entry.get("price_basis"),
+            "verified": bool(entry.get("verified")),
+            "is_provisional": bool(entry.get("is_provisional")),
+            "confidence": entry.get("confidence"),
+            "source_url": entry.get("source_url"),
+            "deviation_pct": entry.get("deviation_pct"),
+        })
+
+    return {
+        "version": 1,
+        "generated_at": datetime.utcnow().isoformat(),
+        "city": city,
+        "verified_count": int(analysis.get("verified_count") or 0),
+        "provisional_count": int(analysis.get("provisional_count") or 0),
+        "unverified_count": int(analysis.get("unverified_count") or 0),
+        "source_counts": source_counts,
+        "source_urls": sorted(sources),
+        "pricing_policy": (
+            "Curated database rates (vendor catalogue and material_rates) are the "
+            "only rates counted as verified. Online market and online average "
+            "figures are provisional: they complete the estimate, are cached for "
+            "reuse, and are never reported as verified."
+        ),
+        "items": items,
+    }
 
 
 # ── Phase 5: regenerate an uploaded bill on accept ─────────────────────────
@@ -607,6 +677,8 @@ def _reprice_lines(
                 if revised
                 else "Already within range of the verified rate."
             )
+            if match.get("is_provisional"):
+                note += " Provisional online reference - confirm with a supplier."
         else:
             rate = quoted_rate
             rate_source = "quoted"
@@ -622,6 +694,11 @@ def _reprice_lines(
             "adjusted_rate": rate,
             "amount": round(quantity * rate, 2),
             "rate_source": rate_source,
+            "price_source": rate_source,
+            "is_provisional": bool(match.get("is_provisional")) if match else False,
+            "verified": bool(match.get("verified")) if match else False,
+            "source_url": match.get("source_url") if match else None,
+            "confidence": match.get("confidence") if match else None,
             "quantity_source": "upload",
             "original_rate": quoted_rate,
             "original_amount": quoted_amount,
@@ -1115,12 +1192,14 @@ class BOQGenerator:
                 return f"{context} {description}".strip() if context else description
 
             distinct: List[str] = []
+            distinct_units: Dict[str, Optional[str]] = {}
             seen_descriptions: Dict[str, None] = {}
             for item in parsed_items:
                 key = _lookup_text(item).lower()
                 if key and key not in seen_descriptions:
                     seen_descriptions[key] = None
                     distinct.append(_lookup_text(item))
+                    distinct_units[key] = item.get("unit")
 
             lookup_targets = distinct[:_MAX_RATE_LOOKUPS]
             # Verified DB rates only. `get_rate` would fall back to an online
@@ -1129,9 +1208,42 @@ class BOQGenerator:
             price_truth = PriceTruthService(self.price_service)
             gate = asyncio.Semaphore(_MAX_CONCURRENT_RATE_LOOKUPS)
 
-            async def _verified_rate(description: str):
+            async def _lookup_rate(description: str, unit: Optional[str]):
+                """DB-verified rate first, then a provisional online reference.
+
+                The fallback exists because a bill routinely contains materials
+                our catalogue does not carry; leaving those lines blank made the
+                whole check look inconclusive. A web-observed price is persisted
+                back to `material_rates` as provisional (see
+                `online_rate_writeback`) so the next run is cheaper - and it is
+                always excluded from the verified count.
+                """
                 async with gate:
-                    return await price_truth.get_verified_rate(description, city)
+                    db_rate = await price_truth.get_verified_rate(description, city)
+                if db_rate:
+                    return db_rate
+
+                live = None
+                try:
+                    live = await self.price_service.get_online_market_rate(
+                        description, city, unit
+                    )
+                except Exception as exc:  # non-fatal: fall through to the reference
+                    logger.warning("Live online price lookup failed for %r: %s", description, exc)
+                if live:
+                    await persist_rate_observation(
+                        live, description=description, city=city, unit=unit
+                    )
+                    return live
+
+                reference = self.price_service.engine.get_online_average_rate(
+                    description, city, unit
+                )
+                if reference:
+                    await persist_rate_observation(
+                        reference, description=description, city=city, unit=unit
+                    )
+                return reference
 
             # Bounded batches: dispatch the targets in chunks instead of
             # gathering the whole list at once, so a 300-line bill holds at most
@@ -1141,7 +1253,8 @@ class BOQGenerator:
             for start in range(0, len(lookup_targets), _RATE_LOOKUP_CHUNK):
                 batch = lookup_targets[start:start + _RATE_LOOKUP_CHUNK]
                 lookups.extend(await asyncio.gather(*[
-                    _verified_rate(description) for description in batch
+                    _lookup_rate(description, distinct_units.get(description.lower()))
+                    for description in batch
                 ]))
             rate_by_description = {
                 description.strip().lower(): result
@@ -1175,11 +1288,27 @@ class BOQGenerator:
                     deviation = (
                         abs(rate - market_rate) / market_rate * 100 if market_rate > 0 else 0
                     )
+                    price_source = (
+                        db_rate.get("source")
+                        or db_rate.get("price_source")
+                        or "database"
+                    )
+                    # A provisional reference is usable for the total but is not
+                    # a curated DB rate - it is surfaced, and counted, separately.
+                    is_provisional = bool(db_rate.get("is_provisional")) or (
+                        price_source not in DB_SOURCES
+                    )
                     verified.update({
                         "market_rate": market_rate,
                         "market_rate_city": db_rate.get("city", city),
-                        "market_rate_source": db_rate.get("source", "database"),
+                        "market_rate_source": price_source,
                         "market_rate_product": db_rate.get("product_name"),
+                        "price_source": price_source,
+                        "is_provisional": is_provisional,
+                        "verified": bool(db_rate.get("verified", True)) and not is_provisional,
+                        "confidence": db_rate.get("confidence"),
+                        "source_url": db_rate.get("source_url"),
+                        "price_basis": db_rate.get("price_basis"),
                         "deviation_pct": round(deviation, 1),
                         "status": "inflated" if deviation > 25 else "fair",
                     })
@@ -1196,6 +1325,9 @@ class BOQGenerator:
                         "market_rate": None,
                         "deviation_pct": None,
                         "status": "unverified",
+                        "price_source": None,
+                        "is_provisional": False,
+                        "verified": False,
                     })
                 analysis["verified_items"].append(verified)
 
@@ -1205,10 +1337,22 @@ class BOQGenerator:
                     f"{len(distinct) - len(lookup_targets)} more were checked without a "
                     "comparable rate."
                 )
+            # Verified means "priced by a curated database rate". Lines priced
+            # from a cached/web-observed reference are counted separately so a
+            # provisional figure can never inflate the verified total.
             analysis["verified_count"] = sum(
-                1 for v in analysis["verified_items"] if v["status"] != "unverified"
+                1 for v in analysis["verified_items"]
+                if v["status"] != "unverified" and not v.get("is_provisional")
             )
-            analysis["unverified_count"] = len(analysis["verified_items"]) - analysis["verified_count"]
+            analysis["provisional_count"] = sum(
+                1 for v in analysis["verified_items"]
+                if v["status"] != "unverified" and v.get("is_provisional")
+            )
+            analysis["unverified_count"] = (
+                len(analysis["verified_items"])
+                - analysis["verified_count"]
+                - analysis["provisional_count"]
+            )
             analysis["stated"] = parsed.get("stated", {})
             analysis["warnings"] = warnings
             analysis["arithmetic"] = arithmetic = _arithmetic_report(
@@ -1220,6 +1364,7 @@ class BOQGenerator:
                     "uploaded BOQ - see the arithmetic report."
                 )
             analysis.update(_verification_summary(analysis))
+            analysis["audit"] = _build_verification_audit(analysis, city)
 
             # Close the gap the upload path used to have: unpriced lines are
             # broadcast to vendors so they can bid with real prices. Only for a
@@ -1423,6 +1568,29 @@ class BOQGenerator:
             "total_contract_sum": totals["total_contract_sum"],
         }
 
+        # Audit-driven regeneration: the new bill records exactly which evidence
+        # priced it, so a reviewer can reproduce the figures from the source
+        # verification without re-running the market lookup.
+        source_audit = (verification.get("analysis") or {}).get("audit") or {}
+        regeneration_audit = {
+            "source_verification_id": str(verification["_id"]),
+            "regenerated_at": now.isoformat(),
+            "regenerated_by": user_id,
+            "items_reused": sum(
+                1 for line in line_items
+                if line.get("rate_source") and line.get("rate_source") != "quoted"
+            ),
+            "items_kept_quoted": sum(
+                1 for line in line_items if line.get("rate_source") == "quoted"
+            ),
+            "provisional_lines": sum(1 for line in line_items if line.get("is_provisional")),
+            "source_counts": source_audit.get("source_counts") or {},
+            "source_urls": source_audit.get("source_urls") or [],
+            "verified_count": source_audit.get("verified_count"),
+            "provisional_count": source_audit.get("provisional_count"),
+            "pricing_policy": source_audit.get("pricing_policy"),
+        }
+
         inserted = await self.db["boqs"].insert_one({
             "projectId": "",
             "boqNumber": f"BOQ-{now.strftime('%Y%m%d%H%M%S')}",
@@ -1434,6 +1602,8 @@ class BOQGenerator:
             "city": city,
             "elements": elements,
             "summary": summary,
+            "audit": regeneration_audit,
+            "auditTrail": source_audit.get("items") or [],
             "createdBy": user_id,
             "createdAt": now,
             "updatedAt": now,
@@ -1448,6 +1618,7 @@ class BOQGenerator:
                 "decidedBy": user_id,
                 "decidedAt": now,
                 "regeneratedBoqId": new_id,
+                "regenerationAudit": regeneration_audit,
                 "updatedAt": now,
             }},
         )
@@ -1490,6 +1661,7 @@ class BOQGenerator:
             "boq_id": new_id,
             "record_type": "verification",
             "status": "regenerated",
+            "audit": regeneration_audit,
             "demand_alerts_created": demand_summary["alerts_created"],
             "demand_alerts_updated": demand_summary.get("alerts_updated", 0),
             "bid_threads_opened": demand_summary["bids_opened"],

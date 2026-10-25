@@ -40,6 +40,7 @@ from app.models.payment_capture import PaymentCapture
 from app.models.quotation import Quotation, QuotationLineItem
 from app.models.refund import Refund
 from app.models.product_favorite import ProductFavorite
+from app.models.blog_post import BlogPost
 
 __all__ = [
     "User",
@@ -107,4 +108,5 @@ __all__ = [
     "Quotation",
     "QuotationLineItem",
     "ProductFavorite",
+    "BlogPost",
 ]

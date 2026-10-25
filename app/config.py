@@ -157,6 +157,14 @@ class Settings(BaseSettings):
     ONLINE_PRICE_SEARCH_MAX_PER_RUN: int = 12
     # How long a fetched online price may be reused (in-process + MongoDB).
     ONLINE_PRICE_SEARCH_CACHE_HOURS: int = 168
+    # ── Online price write-back (material_rates persistence) ────────────────
+    # An online price found for a line the database could not price is cached
+    # back into `material_rates` as a PROVISIONAL row, so the next BOQ run does
+    # not have to hit the network again. Provisional rows never count as
+    # verified and are never allowed to overwrite a curated/manual rate.
+    ONLINE_PRICE_WRITEBACK_ENABLED: bool = True
+    # Confidence floor (0-1) before a fetched price is persisted.
+    ONLINE_PRICE_WRITEBACK_MIN_CONFIDENCE: float = 0.4
 
     # ── Proof of delivery (geotagged live-photo gate) ──────────────────────
     # A driver's photo proof must be fresh (captured within this many minutes)

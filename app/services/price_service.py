@@ -174,6 +174,11 @@ class DBProduct:
     discount_price: Optional[float] = None
     vendor_id: Optional[str] = None
     in_stock: Optional[int] = None
+    # Provenance for rates cached back from the open web: provisional means the
+    # row is usable for pricing but must never be reported as DB-verified.
+    is_provisional: bool = False
+    source_url: Optional[str] = None
+    confidence: Optional[float] = None
 
 
 # ─────────────────────────────────────────
@@ -592,19 +597,31 @@ class PriceTruthService:
 
     @staticmethod
     def _provenance(product: DBProduct) -> Dict[str, Any]:
-        """Build a price-passport-style provenance payload."""
+        """Build a price-passport-style provenance payload.
+
+        A rate cached back from the open web keeps its provenance and is never
+        marked verified: a BOQ audit must be able to see that the figure is
+        indicative, not a curated market rate.
+        """
+        provisional = bool(product.is_provisional)
         return {
             "rate": product.unit_price,
             "unit": product.unit,
             "product_name": product.name,
             "product_code": product.product_code,
-            "price_source": "database",
-            "source": "database",
-            "verified": True,
-            "confidence": 1.0,
+            "price_source": "database" if not provisional else (product.price_source or "online_market"),
+            "source": "database" if not provisional else (product.price_source or "online_market"),
+            "verified": not provisional,
+            "is_provisional": provisional,
+            "confidence": product.confidence if provisional and product.confidence is not None else 1.0,
             "city": product.city,
             "supplier_id": product.supplier,
             "last_verified_at": product.last_updated or None,
+            "source_url": product.source_url if provisional else None,
+            "price_basis": (
+                "Cached online price - indicative, confirm with supplier"
+                if provisional else "Verified database rate"
+            ),
         }
 
 
@@ -675,7 +692,12 @@ class PriceService:
                     city=r.state or "Abuja",
                     supplier=str(r.supplier_id) if r.supplier_id else None,
                     last_updated=str(r.updated_at or ""),
-                    price_source="material_rate",
+                    price_source=(r.source or "material_rate"),
+                    is_provisional=bool(getattr(r, "is_provisional", False)),
+                    source_url=getattr(r, "source_url", None),
+                    confidence=(
+                        float(r.confidence) if getattr(r, "confidence", None) is not None else None
+                    ),
                 )
                 products[code] = p
             logger.info(f"Loaded {len(products)} prices from PostgreSQL material_rates")
@@ -706,6 +728,10 @@ class PriceService:
                     supplier=doc.get("supplier"),
                     brand=doc.get("brand"),
                     last_updated=str(doc.get("last_updated", "")),
+                    price_source=doc.get("source") or doc.get("price_source") or "database",
+                    is_provisional=bool(doc.get("is_provisional", False)),
+                    source_url=doc.get("source_url"),
+                    confidence=doc.get("confidence"),
                 )
                 products[p.product_code] = p
             logger.info(f"Loaded {len(products)} products from MongoDB material_rates")
@@ -1108,17 +1134,28 @@ class PriceService:
                     matching_product = await self._search_by_keywords(words[:4], city)
 
         if matching_product:
-            item["db_price_matched"] = True
+            # A rate cached back from the open web is provisional: it is in our
+            # table but it is not a curated DB rate, so it must never be tagged
+            # "database" or reported as a matched/verified price.
+            provisional = bool(matching_product.is_provisional)
+            item["db_price_matched"] = not provisional
+            if provisional:
+                item["is_provisional"] = True
+                item["price_source"] = matching_product.price_source or "online_market"
+                item["price_basis"] = "Cached online price - indicative, confirm with supplier"
+                item["source_url"] = matching_product.source_url
+                item["confidence"] = matching_product.confidence
             item["db_product_name"] = matching_product.name
             item["db_product_code"] = matching_product.product_code
             item["db_unit_price"] = matching_product.unit_price
             item["out_of_stock"] = False
             # A catalogue hit keeps its own label ("product_discount" /
             # "product_catalogue") so a discounted vendor price is visible as
-            # such; a material_rates hit stays "database".
+            # such; a material_rates hit stays "database" unless it is provisional.
             db_label = (
                 matching_product.price_source
                 if matching_product.price_source in ("product_discount", "product_catalogue")
+                or provisional
                 else "database"
             )
             # Quantity provenance - preserve existing label (user/drawing/ai),

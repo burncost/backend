@@ -43,6 +43,7 @@ from app.api.v1.endpoints import (
     admin_delivery_proofs,
     admin_demand,
     admin_promos,
+    admin_blog,
     reports,
     ai,
     projects,
@@ -92,6 +93,7 @@ api_router.include_router(admin_settlements.router, prefix="/admin", tags=["Admi
 api_router.include_router(admin_delivery_proofs.router, prefix="/admin", tags=["Admin Delivery Proofs"])
 api_router.include_router(admin_demand.router, prefix="/admin", tags=["Admin Demand Broadcasts"])
 api_router.include_router(admin_promos.router, prefix="/admin", tags=["Admin Promotions"])
+api_router.include_router(admin_blog.router, prefix="/admin", tags=["Admin Blog"])
 api_router.include_router(negotiations.router, prefix="/negotiations", tags=["Negotiations"])
 api_router.include_router(disputes.router, prefix="/disputes", tags=["Disputes"])
 api_router.include_router(demand_alerts.router, prefix="/demand-alerts", tags=["Demand Alerts"])
