@@ -324,9 +324,10 @@ class AuthService:
                         availability=False,
                     ))
 
-                # Auto-create token usage / grant signup bonus.
+                # Auto-create token usage / apply the role's signup grant
+                # (builders/vendors start at zero).
                 token_service = TokenService(db)
-                await token_service.grant_signup_tokens(str(user.id))
+                await token_service.grant_signup_tokens(str(user.id), role)
                 created = True
             else:
                 # Update last_login for an existing/returning user.

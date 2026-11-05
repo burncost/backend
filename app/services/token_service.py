@@ -49,6 +49,19 @@ TOKEN_COSTS: Dict[str, int] = {
 FREE_TIER_MONTHLY_TOKENS = 2
 SIGNUP_FREE_TOKENS = 100
 
+# Builders are stored as `customer`. These roles start with an empty wallet;
+# drivers keep the existing signup grant because they do not generate BOQs.
+SIGNUP_BONUS_EXEMPT_ROLES = {"customer", "vendor"}
+
+
+def signup_bonus_for_role(role: str) -> int:
+    """Return the signup token grant for a role (0 for builders and vendors)."""
+    role_value = getattr(role, "value", role)
+    if str(role_value or "").strip().lower() in SIGNUP_BONUS_EXEMPT_ROLES:
+        return 0
+    return SIGNUP_FREE_TOKENS
+
+
 # Server-side chat message limits per tier (Phase 8)
 CHAT_MESSAGE_LIMITS = {
     "anonymous": 20,      # per month per IP
@@ -401,18 +414,26 @@ class TokenService:
 
     # ── Signup bonus ─────────────────────────────────────────────────────────
 
-    async def grant_signup_tokens(self, user_id: str) -> TokenUsage:
-        """Grant free tokens to a new user on sign up."""
+    async def grant_signup_tokens(self, user_id: str, role: str) -> TokenUsage:
+        """Create the token wallet and apply the role's signup grant.
+
+        Builders (``customer``) and vendors start at zero; other signup roles
+        keep the existing free-token grant.
+        """
         usage = await self.get_or_create_usage(user_id)
-        usage.balance = SIGNUP_FREE_TOKENS
-        usage.lifetime_purchased += SIGNUP_FREE_TOKENS
+        bonus = signup_bonus_for_role(role)
+        if bonus <= 0:
+            return usage
+
+        usage.balance = bonus
+        usage.lifetime_purchased += bonus
 
         transaction = TokenTransaction(
             user_id=user_id,
             transaction_type=TransactionType.PURCHASE.value,
-            amount=SIGNUP_FREE_TOKENS,
+            amount=bonus,
             balance_after=usage.balance,
-            description=f"Free signup bonus: {SIGNUP_FREE_TOKENS} tokens",
+            description=f"Free signup bonus: {bonus} tokens",
         )
         self.db.add(transaction)
         await self.db.commit()

@@ -552,9 +552,10 @@ async def register(
         full_name = user.profile.first_name if user and user.profile else user_in.email.split('@')[0]
         user_role = user.role.value if user.role else "customer"
         
-        # Grant free signup tokens (does 2 more commits)
+        # Create the token wallet and apply the role's signup grant
+        # (builders/vendors start at zero; does 2 more commits for drivers).
         token_service = TokenService(db)
-        await token_service.grant_signup_tokens(user_id)
+        await token_service.grant_signup_tokens(user_id, user_role)
         
         # Send welcome and verification emails in background
         notification_service = NotificationService()
