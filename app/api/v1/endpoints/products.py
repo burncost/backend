@@ -76,7 +76,8 @@ async def list_products(
         filters=filters,
         page=page,
         page_size=page_size,
-        only_verified=True
+        only_verified=True,
+        marketplace_visible=True,
     )
     
     return result

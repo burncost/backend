@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_
 from sqlalchemy.orm import joinedload
 
-from app.models.product import Product, ProductImage
+from app.models.product import Product, ProductImage, ProductStatus
 from app.models.category import Category
 from app.models.brand import Brand
 from app.models.vendor import Vendor
@@ -136,12 +136,19 @@ class ProductService:
         page_size: int = 20,
         only_verified: bool = False,
         relaxed_category: bool = False,
+        marketplace_visible: bool = False,
     ) -> Dict[str, Any]:
         """Get products with filtering, search, and pagination using real DB queries.
 
         When `only_verified=True`, only products belonging to VERIFIED vendors are
         returned - this is used by the public marketplace so that a pending vendor's
         products stay private (visible only to the vendor themselves via my-products).
+
+        `marketplace_visible=True` additionally hides products that must not appear in
+        the public marketplace: drafts/pending, vendor-hidden (is_featured is the
+        visibility flag used by the supplier forms), and out-of-stock listings. It is
+        scoped to the public listing endpoint so pricing/checkout callers that reuse
+        `only_verified` keep their existing catalogue.
 
         `relaxed_category` is opt-in and used ONLY by the chat tool, as a retry after
         a strict category filter returned nothing. Marketplace requests never set it:
@@ -178,6 +185,16 @@ class ProductService:
         if only_verified:
             query = query.join(Vendor, Vendor.id == Product.vendor_id).where(
                 Vendor.verification_status.notin_(["suspended", "deactivated", "rejected"])
+            )
+
+        # Public marketplace visibility gate: drafts/pending products, products the
+        # vendor hid (is_featured is the product visibility flag on the supplier
+        # forms), and out-of-stock products must never be listed.
+        if marketplace_visible:
+            query = query.where(
+                Product.status == ProductStatus.ACTIVE,
+                Product.is_featured == True,  # noqa: E712 - SQL expression, not a bool
+                Product.quantity > 0,
             )
 
         # Apply filters
