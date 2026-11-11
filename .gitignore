@@ -6,6 +6,10 @@
 .env.production
 .env.*.local
 .clineignore
+.cline/
+.clinerules/
+.pytest_cache/
+.vscode
 
 create_db.py
 google_creds.json

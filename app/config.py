@@ -237,6 +237,18 @@ class Settings(BaseSettings):
     VENDOR_IMAGE_MAX_BYTES: int = 400 * 1024
     VENDOR_IMAGE_MAX_EDGE: int = 1200
     VENDOR_IMAGE_MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
+
+    # ── Product photos (vendor slides) ──────────────────────────────────────
+    # Up to two vendor photos per product; the platform category image is always
+    # slide 1.  Stored JPEG is capped at 500 KB / 1920 px so every card slide
+    # stays fast on mobile while retaining quality and colour metadata.
+    PRODUCT_IMAGE_MAX_BYTES: int = 500 * 1024
+    PRODUCT_IMAGE_MAX_EDGE: int = 1920
+    PRODUCT_IMAGE_MIN_EDGE: int = 900
+    PRODUCT_IMAGE_MAX_UPLOAD_BYTES: int = 25 * 1024 * 1024
+    PRODUCT_IMAGE_MAX_COUNT: int = 2
+    # Strip GPS EXIF from product photos so vendor locations are not published.
+    PHOTO_STRIP_GPS: bool = True
     
     # BigQuery
     BIGQUERY_PROJECT_ID: Optional[str] = None

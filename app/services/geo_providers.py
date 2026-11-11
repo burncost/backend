@@ -47,8 +47,12 @@ class GeoUnavailable(RuntimeError):
 
 
 def google_enabled() -> bool:
-    """Google Places/Geocoding is opt-in: set GOOGLE_MAPS_API_KEY to switch on."""
-    return bool(getattr(settings, "GOOGLE_MAPS_API_KEY", None))
+    """Google Places/Geocoding is opt-in: set GOOGLE_MAPS_API_KEY to switch on.
+
+    A blank/whitespace value (common in a copied ``.env``) counts as unset so the
+    key-less providers stay in charge instead of sending requests with an empty key.
+    """
+    return bool((getattr(settings, "GOOGLE_MAPS_API_KEY", None) or "").strip())
 
 
 # ── Pure mapping helpers (unit-tested without a network) ────────────────

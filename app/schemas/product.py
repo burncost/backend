@@ -30,8 +30,34 @@ class ProductBase(BaseModel):
     height: Optional[Decimal] = None
 
 
+# ── Image / specification sub-schemas ──────────────────────────────────────
+
+class ProductImageOut(BaseModel):
+    id: UUID
+    image_url: str
+    alt_text: Optional[str] = None
+    display_order: int
+    is_primary: bool
+
+    class Config:
+        from_attributes = True
+
+
+class ProductSpecIn(BaseModel):
+    spec_name: str = Field(..., min_length=1, max_length=255)
+    spec_value: str = Field(..., min_length=1)
+    display_order: int = 0
+
+
+class ProductSpecOut(ProductSpecIn):
+    id: UUID
+
+    class Config:
+        from_attributes = True
+
+
 class ProductCreate(ProductBase):
-    pass
+    specifications: Optional[List[ProductSpecIn]] = None
 
 
 class ProductUpdate(BaseModel):
@@ -43,12 +69,19 @@ class ProductUpdate(BaseModel):
     # Write-only convenience: Product has no brand_name column, the endpoint
     # resolves this to brand_id so an edit can change a product's brand.
     brand_name: Optional[str] = None
+    # Editable identity/stock fields. Lengths mirror the columns; minimum_order_quantity
+    # matches ProductBase. No min_length on sku so a legacy short SKU submitted
+    # unchanged by the edit form is not rejected.
+    sku: Optional[str] = Field(None, max_length=100)
+    unit_of_measure: Optional[str] = Field(None, max_length=50)
+    minimum_order_quantity: Optional[int] = Field(None, ge=1)
     base_price: Optional[Decimal] = None
     discount_price: Optional[Decimal] = None
     quantity: Optional[int] = None
     quality: Optional[str] = Field(None, max_length=50)
     status: Optional[str] = None
     is_featured: Optional[bool] = None
+    specifications: Optional[List[ProductSpecIn]] = None
 
 
 class ProductResponse(ProductBase):
@@ -72,6 +105,8 @@ class ProductResponse(ProductBase):
     is_verified: bool
     created_at: datetime
     updated_at: datetime
+    images: List[ProductImageOut] = []
+    specifications: List[ProductSpecOut] = []
 
     class Config:
         from_attributes = True

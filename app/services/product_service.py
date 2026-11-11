@@ -6,15 +6,18 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, and_
-from sqlalchemy.orm import joinedload
+from sqlalchemy import select, func, or_, and_, delete
+from sqlalchemy.orm import joinedload, selectinload
 
-from app.models.product import Product, ProductImage, ProductStatus
+from app.models.product import Product, ProductImage, ProductSpecification, ProductStatus
 from app.models.category import Category
 from app.models.brand import Brand
 from app.models.vendor import Vendor
 from app.schemas.product import ProductCreate, ProductUpdate, ProductFilter, ProductResponse
 from app.crud import product as product_crud
+from app.config import settings
+from app.utils.image_processing import normalize_image, ImageTooLarge, UnsupportedImage
+from app.utils.storage import StorageService
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +180,9 @@ class ProductService:
             Category, Product.category_id == Category.id
         ).outerjoin(
             Brand, Product.brand_id == Brand.id
+        ).options(
+            selectinload(Product.images),
+            selectinload(Product.specifications),
         )
 
         # Marketplace gate: only surface products from verified vendors.
@@ -298,11 +304,15 @@ class ProductService:
         }
 
     async def get_product_by_id(self, product_id: UUID) -> Optional[Dict[str, Any]]:
-        """Get a single product by ID with category info."""
+        """Get a single product by ID with category info, images and specs."""
         result = await self.db.execute(
             select(Product, Category.name, Category.division, Category.material_type, Brand.name)
             .join(Category, Product.category_id == Category.id)
             .outerjoin(Brand, Product.brand_id == Brand.id)
+            .options(
+                selectinload(Product.images),
+                selectinload(Product.specifications),
+            )
             .where(Product.id == product_id)
         )
         row = result.first()
@@ -348,6 +358,10 @@ class ProductService:
         product_data["vendor_id"] = vendor_id
         product_data["slug"] = self._generate_slug(product_data["name"])
 
+        # Pull specifications out before constructing the ORM row - they live in
+        # a child table, not on Product itself.
+        specifications = product_data.pop("specifications", None) or []
+
         # Resolve brand_name to brand_id if provided: the supplier forms send a
         # brand_id whenever the catalogue holds the brand, so this only covers a
         # brand that is genuinely new (or a client that still sends a name).
@@ -373,19 +387,72 @@ class ProductService:
 
         product = Product(**product_data)
         self.db.add(product)
+        await self.db.flush()  # get product.id without committing yet
+
+        # Upsert specifications in display_order order.
+        for idx, spec in enumerate(specifications):
+            if not spec.spec_value.strip():
+                continue  # skip blank spec rows
+            self.db.add(ProductSpecification(
+                product_id=product.id,
+                spec_name=spec.spec_name.strip(),
+                spec_value=spec.spec_value.strip(),
+                display_order=spec.display_order if spec.display_order is not None else idx,
+            ))
+
         await self.db.commit()
         await self.db.refresh(product)
         return product
 
     async def update_product(self, product_id: UUID, product_in: ProductUpdate) -> Optional[Product]:
-        """Update an existing product."""
+        """Update an existing product.
+
+        Mirrors ``PUT /products/{id}``: scalars are applied as-is, ``brand_name``
+        resolves to ``brand_id``, ``specifications`` replace their child rows
+        (never assigned onto the relationship, which would raise on flush), and a
+        colliding ``sku`` raises ``ValueError`` rather than an IntegrityError.
+        """
         product = await product_crud.get(self.db, id=product_id)
         if not product:
             return None
 
         update_data = product_in.model_dump(exclude_unset=True)
+        specs_provided = "specifications" in update_data
+        update_data.pop("specifications", None)
+
+        # Product has no brand_name column: resolve the write-only name to the FK.
+        brand_name = update_data.pop("brand_name", None)
+        if brand_name and not update_data.get("brand_id"):
+            update_data["brand_id"] = await self.resolve_brand_id(brand_name)
+
+        # sku is unique across products.
+        new_sku = update_data.get("sku")
+        if new_sku and new_sku != product.sku:
+            clash = await product_crud.get_by_sku(self.db, sku=new_sku)
+            if clash and clash.id != product.id:
+                raise ValueError(
+                    f"A product with SKU '{new_sku}' already exists. Please use a different SKU."
+                )
+
         for field, value in update_data.items():
             setattr(product, field, value)
+
+        # Replace child rows; an empty array clears them, omitting leaves them.
+        if specs_provided:
+            await self.db.execute(
+                delete(ProductSpecification).where(
+                    ProductSpecification.product_id == product.id
+                )
+            )
+            for idx, spec in enumerate(product_in.specifications or []):
+                if not (spec.spec_value or "").strip():
+                    continue
+                self.db.add(ProductSpecification(
+                    product_id=product.id,
+                    spec_name=spec.spec_name.strip(),
+                    spec_value=spec.spec_value.strip(),
+                    display_order=spec.display_order if spec.display_order is not None else idx,
+                ))
 
         await self.db.commit()
         await self.db.refresh(product)
@@ -407,27 +474,107 @@ class ProductService:
             product.view_count = (product.view_count or 0) + 1
             await self.db.commit()
 
+    async def _existing_image_count(self, product_id: UUID) -> int:
+        result = await self.db.execute(
+            select(func.count(ProductImage.id)).where(ProductImage.product_id == product_id)
+        )
+        return result.scalar() or 0
+
     async def upload_product_images(
         self, product_id: UUID, files: List
     ) -> List[Dict[str, Any]]:
-        """Upload images for a product."""
-        images = []
-        for i, file in enumerate(files):
-            # In production, upload to cloud storage and get URL
-            image = ProductImage(
-                product_id=product_id,
-                image_url=f"/uploads/{file.filename}",
-                is_primary=(i == 0),
-                display_order=i,
-            )
-            self.db.add(image)
-            images.append(image)
+        """Upload (normalise + store) vendor photos for a product.
 
-        await self.db.commit()
-        return [
-            {"id": str(img.id), "url": img.image_url, "is_primary": img.is_primary}
-            for img in images
-        ]
+        Enforces ``PRODUCT_IMAGE_MAX_COUNT`` vendor slides per product
+        (the platform category image is slide 1, stored separately as the
+        category default). Every photo is normalised through
+        :func:`normalize_image` with the product byte budget so no stored
+        image exceeds ``PRODUCT_IMAGE_MAX_BYTES``.
+        """
+        max_count = settings.PRODUCT_IMAGE_MAX_COUNT
+        existing = await self._existing_image_count(product_id)
+        if existing + len(files) > max_count:
+            raise ValueError(
+                f"At most {max_count} vendor photos per product "
+                f"({existing} already uploaded)."
+            )
+
+        storage = StorageService()
+        folder = f"products/{product_id}"
+        uploaded_urls: List[str] = []
+        images: List[ProductImage] = []
+
+        try:
+            # Determine the next display_order after existing rows.
+            max_order_result = await self.db.execute(
+                select(func.coalesce(func.max(ProductImage.display_order), -1))
+                .where(ProductImage.product_id == product_id)
+            )
+            next_order = (max_order_result.scalar() or -1) + 1
+
+            for i, file in enumerate(files):
+                # Gate: reject oversized uploads before decoding (mirrors
+                # drivers.py upload pattern).
+                content = await file.read(settings.PRODUCT_IMAGE_MAX_UPLOAD_BYTES + 1)
+                if len(content) > settings.PRODUCT_IMAGE_MAX_UPLOAD_BYTES:
+                    raise ValueError(
+                        f"{file.filename or 'image'}: file is larger than "
+                        f"{settings.PRODUCT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+                    )
+
+                try:
+                    normalized = normalize_image(
+                        content,
+                        max_bytes=settings.PRODUCT_IMAGE_MAX_BYTES,
+                        max_edge=settings.PRODUCT_IMAGE_MAX_EDGE,
+                        min_edge=settings.PRODUCT_IMAGE_MIN_EDGE,
+                        preserve_metadata=True,
+                    )
+                except UnsupportedImage as exc:
+                    raise ValueError(
+                        f"{file.filename or 'image'}: {exc}"
+                    ) from exc
+                except ImageTooLarge as exc:
+                    raise ValueError(
+                        f"{file.filename or 'image'}: {exc}"
+                    ) from exc
+
+                url = await storage.upload_file(
+                    file=normalized,
+                    folder=folder,
+                    filename=f"{uuid.uuid4().hex}.jpg",
+                )
+                uploaded_urls.append(url)
+
+                image = ProductImage(
+                    product_id=product_id,
+                    image_url=url,
+                    alt_text=file.filename or "Product photo",
+                    is_primary=False,  # platform category image is slide 1
+                    display_order=next_order + i,
+                )
+                self.db.add(image)
+                images.append(image)
+
+            await self.db.commit()
+            for img in images:
+                await self.db.refresh(img)
+
+            return [
+                {"id": str(img.id), "url": img.image_url, "is_primary": img.is_primary}
+                for img in images
+            ]
+
+        except Exception:
+            # Never leave orphaned storage objects or a half-applied row behind
+            # when a later file in the batch fails validation.
+            await self.db.rollback()
+            for url in uploaded_urls:
+                try:
+                    await storage.delete_file(url)
+                except Exception:  # best-effort cleanup only
+                    pass
+            raise
 
     def _generate_slug(self, name: str) -> str:
         """Generate a URL-friendly slug from a name."""

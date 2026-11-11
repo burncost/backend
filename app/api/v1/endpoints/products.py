@@ -1,6 +1,6 @@
 from fastapi import Response, APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
@@ -15,7 +15,7 @@ from app.schemas.product import (
     ProductFilter
 )
 from app.schemas.review import ProductReviewsResponse
-from app.models.product import Product
+from app.models.product import Product, ProductImage, ProductSpecification
 from app.models.category import Category
 from app.models.brand import Brand
 from app.models.product import Review
@@ -89,22 +89,61 @@ async def get_product(
     product_id: UUID,
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(
-        select(Product, Category.name, Category.division, Category.material_type, Brand.name)
-        .join(Category, Product.category_id == Category.id)
-        .outerjoin(Brand, Product.brand_id == Brand.id)
-        .where(Product.id == product_id)
-    )
-
-    row = result.first()
-    if not row:
+    product_service = ProductService(db)
+    product = await product_service.get_product_by_id(product_id)
+    if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Product not found"
         )
 
-    product, category_name, category_division, category_material_type, brand_name = row
-    
+    # Fetch vendor details
+    vendor_name = None
+    vendor_email = None
+    vendor_location = None
+    vendor_result = await db.execute(
+        select(Vendor, User, UserProfile)
+        .join(User, Vendor.user_id == User.id)
+        .outerjoin(UserProfile, User.id == UserProfile.user_id)
+        .where(Vendor.id == product["vendor_id"])
+    )
+    vendor_row = vendor_result.first()
+    if vendor_row:
+        vendor, user, profile = vendor_row
+        vendor_name = vendor.business_name
+        vendor_email = user.email
+        vendor_location = profile.location if profile and profile.location else f"{vendor.city}, {vendor.state}"
+    else:
+        # No vendor found for this product - treat as unavailable publicly.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found"
+        )
+
+    # Marketplace detail gate: only verified vendors' products are public, so a
+    # pending vendor's product URL stays hidden (they still see it via my-products).
+    if (vendor.verification_status or "") in ("suspended", "deactivated", "rejected"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found"
+        )
+
+    # Increment view count
+    await product_service.increment_view_count(product_id)
+
+    return ProductService._coerce_product_dict({
+        **product,
+        "category": product.get("category"),
+        "category_division": product.get("category_division"),
+        "category_material_type": product.get("category_material_type"),
+        "brand_name": product.get("brand_name"),
+        "vendor_name": vendor_name,
+        "vendor_email": vendor_email,
+        "vendor_location": vendor_location,
+        "vendor_open_to_negotiate": bool(vendor.open_to_negotiate),
+        "images": product.get("images", []),
+        "specifications": product.get("specifications", []),
+    })
     # Fetch vendor details
     vendor_name = None
     vendor_email = None
@@ -220,21 +259,58 @@ async def update_product(
         product_service = ProductService(db)
         update_data = product_in.model_dump(exclude_unset=True)
 
+        # specifications live in a child table, not on Product: keep them out of the
+        # scalar setattr loop below (assigning a list of dicts to the relationship
+        # would blow up on flush) and rewrite the rows further down instead.
+        specs_provided = "specifications" in update_data
+        update_data.pop("specifications", None)
+
         # brand_name is write-only (Product has no brand_name column): resolve it to
         # brand_id so an edit can actually change the product's brand.
         brand_name = update_data.pop("brand_name", None)
         if brand_name and not update_data.get("brand_id"):
             update_data["brand_id"] = await product_service.resolve_brand_id(brand_name)
         
-        if not update_data:
+        if not update_data and not specs_provided:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No fields provided for update"
             )
+
+        # sku is unique across products: catch a collision here so a rename returns
+        # a clear 400 instead of an opaque IntegrityError -> 500.
+        new_sku = update_data.get("sku")
+        if new_sku and new_sku != product.sku:
+            clash = await product_crud.get_by_sku(db, sku=new_sku)
+            if clash and clash.id != product.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"A product with SKU '{new_sku}' already exists. Please use a different SKU."
+                )
         
         # Apply updates
         for field, value in update_data.items():
             setattr(product, field, value)
+
+        # Replace specification rows when the client sent a specifications array.
+        # An empty array clears them (the vendor removed every spec row); omitting
+        # the key leaves the stored specs untouched. Blank values are skipped, the
+        # same rule create_product applies.
+        if specs_provided:
+            await db.execute(
+                delete(ProductSpecification).where(
+                    ProductSpecification.product_id == product.id
+                )
+            )
+            for idx, spec in enumerate(product_in.specifications or []):
+                if not (spec.spec_value or "").strip():
+                    continue
+                db.add(ProductSpecification(
+                    product_id=product.id,
+                    spec_name=spec.spec_name.strip(),
+                    spec_value=spec.spec_value.strip(),
+                    display_order=spec.display_order if spec.display_order is not None else idx,
+                ))
         
         await db.commit()
         await db.refresh(product)
@@ -324,12 +400,56 @@ async def upload_product_images(
         )
     
     product_service = ProductService(db)
-    images = await product_service.upload_product_images(
-        product_id=product_id,
-        files=files
-    )
+    try:
+        images = await product_service.upload_product_images(
+            product_id=product_id,
+            files=files
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc)
+        )
     
     return {"images": images}
+
+
+### Delete a product image
+@router.delete("/{product_id}/images/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_product_image(
+    product_id: UUID,
+    image_id: UUID,
+    current_vendor: dict = Depends(get_current_vendor),
+    db: AsyncSession = Depends(get_db)
+):
+    product = await product_crud.get(db, id=product_id)
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found"
+        )
+    
+    # Check ownership
+    if str(product.vendor_id) != current_vendor["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to delete images for this product"
+        )
+    
+    product_service = ProductService(db)
+    image = await db.get(ProductImage, image_id)
+    if not image or image.product_id != product_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product image not found"
+        )
+    
+    storage = StorageService()
+    await storage.delete_file(image.image_url)
+    
+    await db.delete(image)
+    await db.commit()
+    return None
 
 
 @router.post("/cat-id", status_code=status.HTTP_200_OK)

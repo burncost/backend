@@ -62,9 +62,25 @@ def _flatten(img: Image.Image) -> Image.Image:
     return img.convert("RGB")
 
 
-def _encode(img: Image.Image, quality: int) -> bytes:
+def _encode(
+    img: Image.Image,
+    quality: int,
+    *,
+    exif: Optional[bytes] = None,
+    icc: Optional[bytes] = None,
+) -> bytes:
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True, progressive=True)
+    save_kwargs = dict(
+        format="JPEG",
+        quality=quality,
+        optimize=True,
+        progressive=True,
+    )
+    if exif is not None:
+        save_kwargs["exif"] = exif
+    if icc is not None:
+        save_kwargs["icc_profile"] = icc
+    img.save(buf, **save_kwargs)
     return buf.getvalue()
 
 
@@ -73,14 +89,27 @@ def normalize_image(
     *,
     max_bytes: Optional[int] = None,
     max_edge: Optional[int] = None,
+    preserve_metadata: bool = False,
+    min_edge: Optional[int] = None,
 ) -> bytes:
     """Downscale + re-encode ``content`` to a JPEG of at most ``max_bytes``.
 
     Raises ``UnsupportedImage`` when the bytes are not a supported image and
     ``ImageTooLarge`` when even the readability floor cannot fit the budget.
+
+    When ``preserve_metadata`` is True the EXIF blob (orientation already
+    normalised by Pillow) and the ICC colour profile are carried through to the
+    output JPEG, so camera make/model, capture date and colour profile survive
+    the byte-budget downscale. GPS tag (34853) is stripped when
+    ``settings.PHOTO_STRIP_GPS`` is true (default) so a vendor's location is not
+    published unintentionally.
+
+    ``min_edge`` overrides the module-level ``MIN_EDGE`` readability floor; the
+    default keeps every caller's existing behaviour unchanged.
     """
     max_bytes = int(max_bytes or settings.VEHICLE_PHOTO_MAX_BYTES)
     max_edge = int(max_edge or settings.VEHICLE_PHOTO_MAX_EDGE)
+    floor = MIN_EDGE if min_edge is None else int(min_edge)
 
     if not content:
         raise UnsupportedImage("Empty file")
@@ -89,8 +118,11 @@ def normalize_image(
         with Image.open(io.BytesIO(content)) as opened:
             if (opened.format or "").upper() not in ALLOWED_FORMATS:
                 raise UnsupportedImage(f"Unsupported image format: {opened.format}")
+            # Capture metadata *before* exif_transpose mutates info.
+            raw_exif = opened.info.get("exif") if preserve_metadata else None
+            icc = opened.info.get("icc_profile") if preserve_metadata else None
             # Apply the camera's EXIF orientation so a portrait photo is not
-            # stored sideways, then strip all metadata (EXIF/GPS) on re-encode.
+            # stored sideways.
             img = ImageOps.exif_transpose(opened)
             img = _flatten(img)
             img.load()  # force decode now; catches truncated/corrupt files here
@@ -104,6 +136,23 @@ def normalize_image(
     if img.width < 1 or img.height < 1:
         raise UnsupportedImage("File is not a valid image")
 
+    # Re-read post-transpose EXIF: orientation tag is now 1 (normalised), the
+    # rest of the blob is intact. Optionally strip GPS so location isn't leaked.
+    exif: Optional[bytes] = None
+    if preserve_metadata and raw_exif is not None:
+        if settings.PHOTO_STRIP_GPS:
+            try:
+                exif_ifd = Image.Exif()
+                exif_ifd.load(raw_exif)
+                exif_ifd.pop(34853, None)  # GPS IFD pointer
+                exif = exif_ifd.tobytes()
+            except Exception:
+                # If we can't parse the EXIF, keep the raw blob rather than
+                # dropping all metadata.
+                exif = raw_exif
+        else:
+            exif = raw_exif
+
     # Never upscale: a small photo is stored at its native size.
     edge = min(max_edge, max(img.width, img.height))
 
@@ -114,13 +163,13 @@ def normalize_image(
             working.thumbnail((edge, edge), Image.LANCZOS)
 
         for quality in QUALITY_STEPS:
-            encoded = _encode(working, quality)
+            encoded = _encode(working, quality, exif=exif, icc=icc)
             if len(encoded) <= max_bytes:
                 return encoded
 
         # Quality floor reached and still too big: shrink and retry.
         next_edge = int(edge * SCALE_STEP)
-        if next_edge < MIN_EDGE:
+        if next_edge < floor:
             raise ImageTooLarge(
                 "Photo could not be reduced below the size limit - try a smaller image"
             )
