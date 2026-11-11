@@ -80,7 +80,6 @@ pytz
 beautifulsoup4
 # webdriver-manager
 fake-useragent
-playwright
 
 # Cloud & Analytics
 google-cloud-bigquery
