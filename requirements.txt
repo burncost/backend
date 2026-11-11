@@ -1,120 +1,125 @@
 # Web Framework
-fastapi
-uvicorn
-starlette
-python-multipart
-gunicorn
+fastapi==0.141.1
+uvicorn==0.52.4
+starlette==1.6.0
+python-multipart==0.0.32
+gunicorn==26.0.0
 
 # Data Validation & Configuration
-pydantic
-pydantic-settings
-email-validator
+pydantic==2.13.5
+pydantic-settings==2.7.1
+email-validator==2.3.0
 
 # Database - PostgreSQL
-sqlalchemy
-asyncpg
-alembic
+# NOTE: the [asyncio] extra pulls `greenlet`, which newer SQLAlchemy lines no
+# longer install by default. Without it `sqlalchemy.ext.asyncio` raises
+# ImportError at worker boot (Cloud Run crash: revision onboard-00052-7gp).
+sqlalchemy[asyncio]==2.0.51
+# Explicit so a future SQLAlchemy bump can never silently drop it again.
+greenlet==3.5.3
+asyncpg==0.31.0
+alembic==1.18.5
 
 # Database - MongoDB
-motor
-pymongo
+motor==3.7.1
+pymongo==4.17.0
 # bson
 
 # Redis & Caching
-redis
+redis==8.0.1
 
 # Celery
-celery
-flower
+celery==5.6.3
+flower==2.0.1
 
 # Security & Authentication
-python-jose
-pwdlib[argon2]
-bcrypt
-cryptography
+python-jose==3.5.0
+pwdlib[argon2]==0.3.0
+bcrypt==5.0.0
+cryptography==49.0.0
 
 # Two-factor authentication (Admin console): TOTP + server-rendered QR codes.
 # qrcode also uses Pillow, which is already required below for image processing.
-pyotp
-qrcode
+pyotp==2.10.0
+qrcode==8.2
 
 # Cloud Storage
-google-cloud-storage
-boto3
-cloudinary
+google-cloud-storage==3.12.0
+boto3==1.43.36
+cloudinary==1.44.3
 
 # HTTP Client
-httpx
-aiohttp
-requests
+httpx==0.28.1
+aiohttp==3.14.1
+requests==2.34.2
 
 # Data Processing
-pandas
-openpyxl
+pandas==3.0.3
+openpyxl==3.1.5
 
 # PDF Processing
-PyPDF2
-pdfplumber
-pdf2image
-pymupdf
+PyPDF2==3.0.1
+pdfplumber==0.11.10
+pdf2image==1.17.0
+pymupdf==1.28.0
 
 # CAD Processing
 # ezdxf
 # aspose-cad
 
 # Image Processing
-Pillow
-opencv-python-headless
-paddlepaddle
-paddleocr
+Pillow==12.2.0
+opencv-python-headless==4.13.0.92
+paddlepaddle==3.3.1
+paddleocr==3.7.0
 
 # Validation
-phonenumbers
+phonenumbers==9.0.33
 
 # Utilities
-python-dotenv
-pytz
+python-dotenv==1.0.0
+pytz==2026.2
 
 # Web Scraping
 # selenium
-beautifulsoup4
+beautifulsoup4==4.15.0
 # webdriver-manager
-fake-useragent
+fake-useragent==2.2.0
 
 # Cloud & Analytics
-google-cloud-bigquery
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
+google-cloud-bigquery==3.42.1
+google-api-python-client==2.198.0
+google-auth-httplib2==0.4.0
+google-auth-oauthlib==1.4.0
 
 # Monitoring
-sentry-sdk
+sentry-sdk==2.63.0
 
 # Testing
-pytest
-pytest-asyncio
-pytest-cov
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
 
 # Code Quality
-black
-flake8
-mypy
+black==26.5.1
+flake8==7.3.0
+mypy==2.1.0
 
-resend
+resend==2.32.2
 
-xlrd
+xlrd==2.0.2
 
-google-genai
-json-repair
+google-genai==2.20.0
+json-repair==0.61.1
 
-anthropic
+anthropic==0.113.0
 
-upstash-redis
+upstash-redis==1.7.0
 
-sib-api-v3-sdk
+sib-api-v3-sdk==7.6.0
 
-sendgrid
+sendgrid==6.12.5
 
 # Document rendering for BOQ export & parsing (Word / PDF)
-reportlab
-python-docx
+reportlab==5.0.1
+python-docx==1.2.0
