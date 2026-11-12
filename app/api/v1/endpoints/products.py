@@ -3,7 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from typing import List, Optional
 from uuid import UUID
-from decimal import Decimal
 
 from app.core.database import get_db
 from app.schemas.product import (
@@ -15,16 +14,15 @@ from app.schemas.product import (
     ProductFilter
 )
 from app.schemas.review import ProductReviewsResponse
-from app.models.product import Product, ProductImage, ProductSpecification
-from app.models.category import Category
-from app.models.brand import Brand
+from app.models.product import ProductImage, ProductSpecification
 from app.models.product import Review
 from app.models.vendor import Vendor
 from app.models.user import User, UserProfile
 from app.crud import product as product_crud
 from app.crud import review as review_crud
 from app.services.product_service import ProductService
-from app.api.deps import get_current_vendor, get_current_user
+from app.utils.storage import StorageService
+from app.api.deps import get_current_vendor
 from app.config import settings
 import logging
 
@@ -145,54 +143,6 @@ async def get_product(
         "vendor_open_to_negotiate": bool(vendor.open_to_negotiate),
         "images": product.get("images", []),
         "specifications": product.get("specifications", []),
-    })
-    # Fetch vendor details
-    vendor_name = None
-    vendor_email = None
-    vendor_location = None
-    vendor_result = await db.execute(
-        select(Vendor, User, UserProfile)
-        .join(User, Vendor.user_id == User.id)
-        .outerjoin(UserProfile, User.id == UserProfile.user_id)
-        .where(Vendor.id == product.vendor_id)
-    )
-    vendor_row = vendor_result.first()
-    if vendor_row:
-        vendor, user, profile = vendor_row
-        vendor_name = vendor.business_name
-        vendor_email = user.email
-        vendor_location = profile.location if profile and profile.location else f"{vendor.city}, {vendor.state}"
-        vendor_image = vendor.business_image
-    else:
-        # No vendor found for this product - treat as unavailable publicly.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Product not found"
-        )
-
-    # Marketplace detail gate: only verified vendors' products are public, so a
-    # pending vendor's product URL stays hidden (they still see it via my-products).
-    if (vendor.verification_status or "") in ("suspended", "deactivated", "rejected"):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Product not found"
-        )
-
-    # Increment view count
-    product_service = ProductService(db)
-    await product_service.increment_view_count(product_id)
-    
-    return ProductService._coerce_product_dict({
-        **product.__dict__,
-        "category": category_name,
-        "category_division": category_division,
-        "category_material_type": category_material_type,
-        "brand_name": brand_name,
-        "vendor_name": vendor_name,
-        "vendor_image": vendor_image,
-        "vendor_email": vendor_email,
-        "vendor_location": vendor_location,
-        "vendor_open_to_negotiate": bool(vendor.open_to_negotiate),
     })
 
 
@@ -463,7 +413,6 @@ async def delete_product_image(
             detail="Not authorized to delete images for this product"
         )
     
-    product_service = ProductService(db)
     image = await db.get(ProductImage, image_id)
     if not image or image.product_id != product_id:
         raise HTTPException(
