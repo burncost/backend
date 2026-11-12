@@ -38,6 +38,10 @@ class CartItemResponse(BaseModel):
     stock: int
     unit_of_measure: str
     image_url: str
+    # All vendor product image URLs for this line, primary first.
+    image_urls: List[str] = []
+    # Vendor's business logo URL (may be null). Never used as a product photo.
+    supplier_image: Optional[str] = None
     # Category name for the storefront's fallback image mapping (additive).
     category_name: Optional[str] = None
     # Category id, used by the cart to scope-check a promo code (additive).

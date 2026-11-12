@@ -44,7 +44,7 @@ async def get_cart(
     negotiated = await negotiated_cart_lines(db, user_id, items)
 
     # Vendor of each line, in ONE query (never per-item): the cart shows the real
-    # supplier name and only offers "Negotiate" for vendors that opted in.
+    # supplier name, logo, and only offers "Negotiate" for vendors that opted in.
     vendor_by_product = {}
     product_ids = [item.product_id for item in items]
     if product_ids:
@@ -53,51 +53,37 @@ async def get_cart(
                 Product.id,
                 Vendor.id,
                 Vendor.business_name,
+                Vendor.business_image,
                 Vendor.open_to_negotiate,
             )
             .join(Vendor, Vendor.id == Product.vendor_id)
             .where(Product.id.in_(product_ids))
         )
-        for product_id, vendor_id, business_name, open_to_negotiate in vendor_result.all():
-            vendor_by_product[product_id] = (vendor_id, business_name, bool(open_to_negotiate))
+        for product_id, vendor_id, business_name, business_image, open_to_negotiate in vendor_result.all():
+            vendor_by_product[product_id] = (vendor_id, business_name, business_image, bool(open_to_negotiate))
 
     cart_items = []
     for item in items:
-        # Fetch product details (eager-load category so the response can carry a
-        # category name for the storefront's image fallback mapping).
+        # Fetch product details with all images (eager-load category + images).
         product_result = await db.execute(
             select(Product)
-            .options(selectinload(Product.category))
+            .options(selectinload(Product.category), selectinload(Product.images))
             .where(Product.id == item.product_id)
         )
         product = product_result.scalar_one_or_none()
 
-        # Vendor (name + negotiation opt-in) resolved from the batch above.
-        vendor_id, vendor_name, open_to_negotiate = vendor_by_product.get(
-            item.product_id, (None, None, False)
+        # Vendor (name + logo + negotiation opt-in) resolved from the batch above.
+        vendor_id, vendor_name, vendor_image, open_to_negotiate = vendor_by_product.get(
+            item.product_id, (None, None, None, False)
         )
 
-        # Fetch primary image
+        # All vendor product image URLs, primary first then display_order.
+        image_urls = []
         image_url = None
-        if product:
-            img_result = await db.execute(
-                select(ProductImage)
-                .where(ProductImage.product_id == product.id, ProductImage.is_primary == True)
-                .limit(1)
-            )
-            primary_img = img_result.scalar_one_or_none()
-            if primary_img:
-                image_url = primary_img.image_url
-            else:
-                # Fallback to first image
-                img_result = await db.execute(
-                    select(ProductImage)
-                    .where(ProductImage.product_id == product.id)
-                    .limit(1)
-                )
-                first_img = img_result.scalar_one_or_none()
-                if first_img:
-                    image_url = first_img.image_url
+        if product and product.images:
+            sorted_imgs = sorted(product.images, key=lambda im: (0 if im.is_primary else 1, im.display_order or 0))
+            image_urls = [im.image_url for im in sorted_imgs if im.image_url]
+            image_url = image_urls[0] if image_urls else None
 
         cart_items.append({
             "id": str(item.id),
@@ -105,6 +91,8 @@ async def get_cart(
             "product_name": product.name if product else "Unknown Product",
             # Real vendor business name when known, else the historical placeholder.
             "supplier_name": vendor_name or "Verified Supplier",
+            # Vendor's business logo (may be null). Never used as a product photo.
+            "supplier_image": vendor_image,
             # Vendor identity + negotiation opt-in, so the line can offer
             # "Negotiate" only where the supplier accepts it.
             "vendor_id": str(vendor_id) if vendor_id else None,
@@ -131,6 +119,8 @@ async def get_cart(
             # Empty string (not a fake path) so the storefront can fall back to
             # the category image mapping instead of a broken /placeholder.png.
             "image_url": image_url or "",
+            # All vendor product image URLs, primary first.
+            "image_urls": image_urls,
             "category_name": (
                 product.category.name
                 if product and product.category

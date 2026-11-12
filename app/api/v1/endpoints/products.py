@@ -113,6 +113,7 @@ async def get_product(
         vendor_name = vendor.business_name
         vendor_email = user.email
         vendor_location = profile.location if profile and profile.location else f"{vendor.city}, {vendor.state}"
+        vendor_image = vendor.business_image
     else:
         # No vendor found for this product - treat as unavailable publicly.
         raise HTTPException(
@@ -138,6 +139,7 @@ async def get_product(
         "category_material_type": product.get("category_material_type"),
         "brand_name": product.get("brand_name"),
         "vendor_name": vendor_name,
+        "vendor_image": vendor_image,
         "vendor_email": vendor_email,
         "vendor_location": vendor_location,
         "vendor_open_to_negotiate": bool(vendor.open_to_negotiate),
@@ -160,6 +162,7 @@ async def get_product(
         vendor_name = vendor.business_name
         vendor_email = user.email
         vendor_location = profile.location if profile and profile.location else f"{vendor.city}, {vendor.state}"
+        vendor_image = vendor.business_image
     else:
         # No vendor found for this product - treat as unavailable publicly.
         raise HTTPException(
@@ -186,6 +189,7 @@ async def get_product(
         "category_material_type": category_material_type,
         "brand_name": brand_name,
         "vendor_name": vendor_name,
+        "vendor_image": vendor_image,
         "vendor_email": vendor_email,
         "vendor_location": vendor_location,
         "vendor_open_to_negotiate": bool(vendor.open_to_negotiate),
@@ -202,21 +206,21 @@ async def create_product(
     try:
         product_service = ProductService(db)
 
-        # Check if SKU already exists
-        existing = await product_crud.get_by_sku(db, sku=product_in.sku)
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"A product with SKU '{product_in.sku}' already exists. Please use a different SKU."
-            )
-        
+        # No duplicate-SKU rejection here: catalog SKUs are shared across
+        # vendors, so the service suffixes the SKU (-2, -3, ...) on collision
+        # and the response carries the SKU that was actually stored.
         product = await product_service.create_product(
             product_in=product_in,
             vendor_id=UUID(current_vendor["id"])
         )
 
         # Return the created product data
-        return {"id": str(product.id), "name": product.name, "slug": product.slug}
+        return {
+            "id": str(product.id),
+            "name": product.name,
+            "slug": product.slug,
+            "sku": product.sku,
+        }
 
     except HTTPException:
         raise
@@ -265,13 +269,17 @@ async def update_product(
         specs_provided = "specifications" in update_data
         update_data.pop("specifications", None)
 
+        # image_url is write-only (Product has no such column): it rewrites the
+        # product's primary ProductImage row below instead of a scalar attribute.
+        image_url = update_data.pop("image_url", None)
+
         # brand_name is write-only (Product has no brand_name column): resolve it to
         # brand_id so an edit can actually change the product's brand.
         brand_name = update_data.pop("brand_name", None)
         if brand_name and not update_data.get("brand_id"):
             update_data["brand_id"] = await product_service.resolve_brand_id(brand_name)
         
-        if not update_data and not specs_provided:
+        if not update_data and not specs_provided and image_url is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No fields provided for update"
@@ -291,6 +299,25 @@ async def update_product(
         # Apply updates
         for field, value in update_data.items():
             setattr(product, field, value)
+
+        # Replace the primary image when the client sent one ("" clears it). This
+        # mirrors ProductService.update so an edit that only changes the SKU image
+        # actually persists; non-primary vendor uploads are left untouched.
+        if image_url is not None:
+            await db.execute(
+                delete(ProductImage).where(
+                    ProductImage.product_id == product.id,
+                    ProductImage.is_primary == True,  # noqa: E712 - SQLAlchemy column
+                )
+            )
+            if str(image_url).strip():
+                db.add(ProductImage(
+                    product_id=product.id,
+                    image_url=str(image_url).strip(),
+                    alt_text=(product.name or "Product image")[:255],
+                    display_order=0,
+                    is_primary=True,
+                ))
 
         # Replace specification rows when the client sent a specifications array.
         # An empty array clears them (the vendor removed every spec row); omitting

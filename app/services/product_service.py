@@ -158,10 +158,9 @@ class ProductService:
         a relaxed (token-OR) category filter is what made "Roofing Systems" list
         plumbing products.
         """
-        # The supplier line under a product title needs the vendor's business name.
-        # It is a correlated scalar subquery (not a joined Vendor) so this stays
-        # valid alongside the optional verified-vendor join below, which would
-        # otherwise collide on the same table.
+        # The supplier line under a product title needs the vendor's business name
+        # and logo URL. Correlated scalar subqueries (not a joined Vendor) so these
+        # stay valid alongside the optional verified-vendor join below.
         vendor_name_subq = (
             select(Vendor.business_name)
             .where(Vendor.id == Product.vendor_id)
@@ -173,9 +172,18 @@ class ProductService:
             .scalar_subquery()
             .label("vendor_name")
         )
+        vendor_image_subq = (
+            select(Vendor.business_image)
+            .where(Vendor.id == Product.vendor_id)
+            .limit(1)
+            .correlate(Product)
+            .scalar_subquery()
+            .label("vendor_image")
+        )
 
         query = select(
-            Product, Category.name, Category.division, Category.material_type, Brand.name, vendor_name_subq
+            Product, Category.name, Category.division, Category.material_type, Brand.name,
+            vendor_name_subq, vendor_image_subq,
         ).join(
             Category, Product.category_id == Category.id
         ).outerjoin(
@@ -284,7 +292,7 @@ class ProductService:
 
         products = []
         for row in rows:
-            product, category_name, category_division, category_material_type, brand_name, vendor_name = row
+            product, category_name, category_division, category_material_type, brand_name, vendor_name, vendor_image = row
             product_dict = {
                 **product.__dict__,
                 "category": category_name,
@@ -292,6 +300,7 @@ class ProductService:
                 "category_material_type": category_material_type,
                 "brand_name": brand_name,
                 "vendor_name": vendor_name,
+                "vendor_image": vendor_image,
             }
             products.append(self._coerce_product_dict(product_dict))
 
@@ -352,6 +361,24 @@ class ProductService:
         await self.db.flush()
         return brand.id
 
+    async def _unique_sku(self, sku: str, max_suffixes: int = 5) -> str:
+        """Return `sku`, or `sku-N` when the catalog SKU is already taken.
+
+        Catalog SKUs are shared by every vendor listing the same product, so a
+        collision is expected rather than an error: suffix -2..-6 and let the
+        create response carry the final SKU back to the form. Exceeding the
+        suffixes raises ``ValueError`` (mapped to HTTP 400 by the endpoint).
+        """
+        candidate = sku
+        for suffix in range(2, max_suffixes + 2):
+            clash = await product_crud.get_by_sku(self.db, sku=candidate)
+            if not clash:
+                return candidate
+            candidate = f"{sku}-{suffix}"
+        raise ValueError(
+            f"SKU '{sku}' is unavailable. Please choose a different SKU."
+        )
+
     async def create_product(self, product_in: ProductCreate, vendor_id: UUID) -> Product:
         """Create a new product listing in the database."""
         product_data = product_in.model_dump(exclude_unset=True)
@@ -361,6 +388,15 @@ class ProductService:
         # Pull specifications out before constructing the ORM row - they live in
         # a child table, not on Product itself.
         specifications = product_data.pop("specifications", None) or []
+
+        # Same for image_url: Product has no such column, so it must be popped
+        # before Product(**product_data) or the create raises -> HTTP 500.
+        image_url = product_data.pop("image_url", None)
+
+        # Listings share catalog SKUs across vendors: suffix a collision instead
+        # of failing the create (the endpoint returns the final SKU).
+        if product_data.get("sku"):
+            product_data["sku"] = await self._unique_sku(product_data["sku"])
 
         # Resolve brand_name to brand_id if provided: the supplier forms send a
         # brand_id whenever the catalogue holds the brand, so this only covers a
@@ -388,6 +424,17 @@ class ProductService:
         product = Product(**product_data)
         self.db.add(product)
         await self.db.flush()  # get product.id without committing yet
+
+        # Catalog image = primary image (slide 1 of the gallery). Vendor uploads
+        # always land after it as non-primary slides.
+        if image_url and str(image_url).strip():
+            self.db.add(ProductImage(
+                product_id=product.id,
+                image_url=str(image_url).strip(),
+                alt_text=(product.name or "Product image")[:255],
+                display_order=0,
+                is_primary=True,
+            ))
 
         # Upsert specifications in display_order order.
         for idx, spec in enumerate(specifications):
@@ -420,6 +467,10 @@ class ProductService:
         specs_provided = "specifications" in update_data
         update_data.pop("specifications", None)
 
+        # image_url is write-only (Product has no such column): it replaces the
+        # product's primary image row below.
+        image_url = update_data.pop("image_url", None)
+
         # Product has no brand_name column: resolve the write-only name to the FK.
         brand_name = update_data.pop("brand_name", None)
         if brand_name and not update_data.get("brand_id"):
@@ -436,6 +487,24 @@ class ProductService:
 
         for field, value in update_data.items():
             setattr(product, field, value)
+
+        # Replace the primary image when the client sent one (empty string just
+        # clears it). Vendor-uploaded slides are non-primary and left untouched.
+        if image_url is not None:
+            await self.db.execute(
+                delete(ProductImage).where(
+                    ProductImage.product_id == product.id,
+                    ProductImage.is_primary == True,  # noqa: E712 - SQLAlchemy column
+                )
+            )
+            if str(image_url).strip():
+                self.db.add(ProductImage(
+                    product_id=product.id,
+                    image_url=str(image_url).strip(),
+                    alt_text=(product.name or "Product image")[:255],
+                    display_order=0,
+                    is_primary=True,
+                ))
 
         # Replace child rows; an empty array clears them, omitting leaves them.
         if specs_provided:

@@ -19,7 +19,7 @@ from app.core.security import get_password_hash
 from app.models.user import User, UserProfile, UserRole
 from app.models.vendor import Vendor
 from app.models.order import Order, OrderItem
-from app.models.product import Product
+from app.models.product import Product, ProductImage
 from app.models.audit_log import AuditLog
 from app.repositories.boq_repository import BOQRepository
 from app.services.risk_service import risk_from_vendor
@@ -53,6 +53,15 @@ class AdminUpdateUser(BaseModel):
     """Payload for suspending/activating/role-changing an admin-tier user."""
     status: Optional[str] = None
     role: Optional[str] = None
+
+
+class AdminProductImageUpdate(BaseModel):
+    """Payload for setting (or clearing) a product's primary image.
+
+    `image_url` is a URL, not a Product column: it is written to the product's
+    primary ProductImage row, which is what the marketplace gallery reads.
+    """
+    image_url: Optional[str] = None
 
 
 def _admin_user_dict(u: User) -> dict:
@@ -466,6 +475,23 @@ async def admin_list_orders(
     }
 
 
+def _primary_image_url(product: Product) -> Optional[str]:
+    """URL of a product's primary image (primary flag first, then display order).
+
+    Product has no `image_url` column: the gallery's lead image is the primary
+    ProductImage row, so admin screens must read it from the relationship.
+    """
+    images = list(getattr(product, "images", None) or [])
+    if not images:
+        return None
+    images.sort(key=lambda img: (
+        0 if getattr(img, "is_primary", False) else 1,
+        getattr(img, "display_order", 0) or 0,
+        str(getattr(img, "id", "")),
+    ))
+    return images[0].image_url or None
+
+
 @router.get("/products")
 async def admin_list_products(
     search: Optional[str] = Query(None),
@@ -475,7 +501,12 @@ async def admin_list_products(
     db: AsyncSession = Depends(get_db),
 ):
     """All products across the marketplace."""
-    query = select(Product).options(selectinload(Product.vendor))
+    query = select(Product).options(
+        selectinload(Product.vendor),
+        # Images power the admin image-management screen; without the eager load
+        # the relationship lazy-loads per row (or blows up on async).
+        selectinload(Product.images),
+    )
     count_query = select(func.count(Product.id))
 
     if search:
@@ -512,6 +543,10 @@ async def admin_list_products(
                 "rating": float(p.rating) if p.rating else 0.0,
                 "review_count": p.review_count,
                 "vendor": p.vendor.business_name if p.vendor else None,
+                # Primary image + how many photos the listing carries, so the admin
+                # image screen can flag "no photo" listings without a second call.
+                "image_url": _primary_image_url(p),
+                "image_count": len(getattr(p, "images", None) or []),
                 "created_at": p.created_at.isoformat() if p.created_at else None,
             }
             for p in products
@@ -520,6 +555,110 @@ async def admin_list_products(
         "page": page,
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size,
+    }
+
+
+@router.patch("/products/{product_id}/image")
+async def admin_set_product_image(
+    product_id: UUID,
+    payload: AdminProductImageUpdate,
+    current_user: dict = Depends(admin_guard),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set or clear a product's primary image.
+
+    A listing's lead image is its primary ProductImage row (Product has no
+    image column), so this either rewrites that row, creates it when the
+    listing has no photo yet, or deletes it on an explicit clear (promoting the
+    next photo, if any, so the gallery never renders an unflagged lead).
+    """
+    image_url = (payload.image_url or "").strip()
+    if image_url:
+        if len(image_url) > 2000:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="image_url is too long (max 2000 characters)",
+            )
+        lowered = image_url.lower()
+        if not (lowered.startswith("http://") or lowered.startswith("https://") or image_url.startswith("/")):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="image_url must be an http(s) URL or a site-relative path",
+            )
+
+    result = await db.execute(
+        select(Product)
+        .options(selectinload(Product.images))
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found",
+        )
+
+    images = sorted(
+        list(getattr(product, "images", None) or []),
+        key=lambda img: (
+            0 if getattr(img, "is_primary", False) else 1,
+            getattr(img, "display_order", 0) or 0,
+            str(getattr(img, "id", "")),
+        ),
+    )
+    primary = images[0] if images else None
+    remaining = images[1:]
+    lead_url = image_url or None
+
+    try:
+        if image_url:
+            if primary is not None:
+                primary.image_url = image_url
+                primary.is_primary = True
+            else:
+                db.add(ProductImage(
+                    product_id=product.id,
+                    image_url=image_url,
+                    is_primary=True,
+                    display_order=0,
+                ))
+        elif primary is not None:
+            # Explicit clear: drop the lead photo so the listing falls back to the
+            # platform category image, and hand the primary flag to the next photo.
+            await db.delete(primary)
+            if remaining:
+                remaining[0].is_primary = True
+                # The gallery now leads with that next photo - report it back so the
+                # admin table does not show a stale thumbnail.
+                lead_url = remaining[0].image_url or None
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        logger.warning("Admin product image update failed for %s: %s", product_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Could not update the product image",
+        )
+
+    logger.info(
+        "Admin %s set image for product %s (%s)",
+        current_user.get("email") or current_user.get("sub"),
+        product_id,
+        "cleared" if not image_url else "updated",
+    )
+
+    # New photo on a listing that had none -> +1; clear -> -1; otherwise unchanged.
+    if image_url and not images:
+        image_count = 1
+    elif image_url:
+        image_count = len(images)
+    else:
+        image_count = len(remaining)
+
+    return {
+        "product_id": str(product.id),
+        "image_url": lead_url,
+        "image_count": image_count,
     }
 
 

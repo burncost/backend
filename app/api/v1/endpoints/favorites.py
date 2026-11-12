@@ -7,6 +7,7 @@ authenticated users.
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
+from typing import List
 from uuid import UUID
 
 from app.core.database import get_db
@@ -19,7 +20,7 @@ from app.models.product_favorite import ProductFavorite
 router = APIRouter()
 
 
-def _fav_product_dict(product: Product, vendor: Vendor, image_url) -> dict:
+def _fav_product_dict(product: Product, vendor: Vendor, image_urls: List[str]) -> dict:
     """Compact product summary the favourites UI needs."""
     return {
         "id": str(product.id),
@@ -27,9 +28,11 @@ def _fav_product_dict(product: Product, vendor: Vendor, image_url) -> dict:
         "price": float(product.discount_price if product.discount_price is not None else product.base_price or 0),
         "base_price": float(product.base_price or 0),
         "unit": product.unit_of_measure or "piece",
-        "image_url": image_url,
+        "image_url": image_urls[0] if image_urls else "",
+        "image_urls": image_urls,
         "vendor_id": str(product.vendor_id) if product.vendor_id else None,
         "vendor_name": vendor.business_name if vendor else None,
+        "vendor_image": vendor.business_image if vendor else None,
         "status": product.status.value if hasattr(product.status, "value") else product.status,
     }
 
@@ -50,13 +53,15 @@ async def list_favorites(
 
     favorites = []
     for fav, product, vendor in rows:
-        image_url = (await db.execute(
-            select(ProductImage.image_url)
-            .where(ProductImage.product_id == product.id)
-            .order_by(ProductImage.is_primary.desc(), ProductImage.display_order.asc())
-            .limit(1)
-        )).scalar_one_or_none()
-        item = _fav_product_dict(product, vendor, image_url)
+        image_urls = [
+            row[0]
+            for row in (await db.execute(
+                select(ProductImage.image_url)
+                .where(ProductImage.product_id == product.id)
+                .order_by(ProductImage.is_primary.desc(), ProductImage.display_order.asc())
+            )).all()
+        ]
+        item = _fav_product_dict(product, vendor, image_urls)
         item["favorite_id"] = str(fav.id)
         item["favorited_at"] = fav.created_at.isoformat() if fav.created_at else None
         favorites.append(item)

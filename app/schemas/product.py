@@ -58,6 +58,9 @@ class ProductSpecOut(ProductSpecIn):
 
 class ProductCreate(ProductBase):
     specifications: Optional[List[ProductSpecIn]] = None
+    # Catalog image for the picked SKU. Not a Product column: the service stores
+    # it as the product's primary ProductImage row (slide 1 of the gallery).
+    image_url: Optional[str] = None
 
 
 class ProductUpdate(BaseModel):
@@ -82,6 +85,8 @@ class ProductUpdate(BaseModel):
     status: Optional[str] = None
     is_featured: Optional[bool] = None
     specifications: Optional[List[ProductSpecIn]] = None
+    # Replaces the product's primary image when set (catalog image for the SKU).
+    image_url: Optional[str] = None
 
 
 class ProductResponse(ProductBase):
