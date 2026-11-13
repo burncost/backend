@@ -3,12 +3,13 @@
 Vendor side:
 - list their fleet drivers
 - create a DeliveryJob for one of their orders: `direct` (auto-accept a chosen
-  driver) or `offer` (published to nearby available drivers)
+  driver, fee stated up front) or `bid` (open/re-open the bid jobs a paid order
+  creates). The old first-come `offer` mode is retired.
 - list / track their dispatches, cancel an open dispatch
 
 Driver side:
-- list open `offer` jobs near their default location (only while online)
-- accept an offer atomically (only one driver can win)
+- bid on open `bid` jobs near their default location (only while online); the
+  buyer picks a bid, so the fee is agreed before payment
 - list their jobs, advance picked_up / delivered
 
 Order sync: job state is mirrored onto the order (driver_name/phone + order
@@ -29,7 +30,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile, status as http_status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -122,8 +123,15 @@ class DriverJobUpdate(BaseModel):
 
 class DispatchCreate(BaseModel):
     order_id: str
-    assignment_type: str = Field(..., pattern="^(direct|offer)$")
+    # The legacy "offer" mode (first-come claim on a fixed fee) is retired: a paid
+    # order opens bid jobs automatically, so delivery is either arranged by bidding
+    # ("bid") or handed to the vendor's own fleet ("direct").
+    assignment_type: str = Field(..., pattern="^(direct|bid)$")
     driver_profile_id: Optional[UUID] = None
+    # Direct fleet assignment must state what the buyer pays the driver: checkout
+    # no longer charges delivery, so there is no fee to inherit from the order.
+    # Bid jobs start unpaid at zero and take their fee from the winning bid/quote.
+    delivery_fee: Optional[float] = Field(None, gt=0, le=500_000)
     pickup_lat: Optional[float] = Field(None, ge=-90, le=90)
     pickup_lng: Optional[float] = Field(None, ge=-180, le=180)
     # (customer may provide pickup coords at dispatch for live tracking)
@@ -213,6 +221,12 @@ def _job_dict(job: DeliveryJob, order_number: Optional[str] = None, proof: Optio
         "driver_name": job.driver_name,
         "driver_phone": job.driver_phone,
         "delivery_fee": float(job.delivery_fee or 0),
+        # Post-confirmation delivery arrangement: whether the buyer has paid this
+        # group's fee, when bidding closes, and the invoice that settled it.
+        "shipping_paid": bool(job.shipping_paid),
+        "shipping_invoice_id": str(job.shipping_invoice_id) if job.shipping_invoice_id else None,
+        "bidding_closes_at": job.bidding_closes_at,
+        "vendor_fee_declined_at": job.vendor_fee_declined_at,
         "accepted_at": job.accepted_at,
         "picked_up_at": job.picked_up_at,
         "delivered_at": job.delivered_at,
@@ -783,6 +797,15 @@ async def vendor_create_dispatch(
     if not await _vendor_owns_order(db, order, vendor_id):
         raise HTTPException(http_status.HTTP_403_FORBIDDEN, detail="This order is not from your catalog.")
 
+    # Delivery is buyer-funded now. Only a direct fleet assignment has to state a
+    # fee up front (checkout no longer collects delivery, so there is nothing to
+    # inherit); bid jobs start at zero and take the winning bid / vendor quote.
+    if payload.assignment_type == "direct" and payload.delivery_fee is None:
+        raise HTTPException(
+            http_status.HTTP_400_BAD_REQUEST,
+            detail="delivery_fee is required: the buyer pays the delivery fee before pickup.",
+        )
+
     # Only dispatch orders that have actually been paid - dispatching an unpaid
     # order would put a driver on the road for money that never arrived.
     paid = order.payment_status.value if hasattr(order.payment_status, "value") else str(order.payment_status or "")
@@ -791,6 +814,37 @@ async def vendor_create_dispatch(
             http_status.HTTP_400_BAD_REQUEST,
             detail="This order isn't paid yet - dispatch becomes available once payment is confirmed.",
         )
+
+    # Post-confirmation bidding. Payment already opened one bid job per vendor
+    # group, so this is the explicit "open it for this order" trigger (re-opening
+    # after a window expired or a quote was declined). The service is idempotent
+    # and fans out per vendor group, exactly like the payment path does.
+    if payload.assignment_type == "bid":
+        from app.services.bid_dispatch_service import create_bid_jobs_for_order
+        created = await create_bid_jobs_for_order(db, order)
+        if not created:
+            raise HTTPException(
+                http_status.HTTP_409_CONFLICT,
+                detail="Delivery options are already open for this order.",
+            )
+        await db.commit()
+        job = (await db.execute(
+            select(DeliveryJob)
+            .options(selectinload(DeliveryJob.order))
+            .where(DeliveryJob.id == created[0].id)
+        )).scalar_one()
+        _notify(db, order.user_id, "Delivery options open",
+                f"Order {order.order_number}: drivers can bid for delivery and your "
+                f"supplier can quote a fee. Choose one, then pay the delivery fee.",
+                "/dashboard/orders")
+        await db.commit()
+        return _job_dict(job, order_number=order.order_number)
+
+    from app.services.bid_dispatch_service import validate_delivery_fee
+    try:
+        delivery_fee = validate_delivery_fee(payload.delivery_fee, estimate=order.shipping_fee or None)
+    except ValueError as exc:
+        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     # No duplicate active dispatch for the same (order, vendor).
     dup = await db.execute(
@@ -857,7 +911,9 @@ async def vendor_create_dispatch(
         dropoff_address=dropoff_address,
         dropoff_lat=dropoff_lat,
         dropoff_lng=dropoff_lng,
-        delivery_fee=Decimal(str(order.shipping_fee or 0)),
+        delivery_fee=delivery_fee,
+        # Never inherit "paid": the buyer settles this fee separately.
+        shipping_paid=False,
     )
 
     assigned_driver = None
@@ -890,6 +946,12 @@ async def vendor_create_dispatch(
         _notify(db, assigned_driver.user_id,
                 "New delivery assignment",
                 f"You have been assigned delivery {job.job_number} for order {order.order_number}. Auto-accepted.")
+    # The buyer must pay this fee before the driver can leave the vendor.
+    _notify(db, order.user_id,
+            "Delivery fee ready",
+            f"Order {order.order_number}: pay ₦{float(delivery_fee):,.2f} delivery to "
+            f"release {job.driver_name or 'your driver'} for pickup.",
+            "/dashboard/orders")
     await db.commit()
 
     return _job_dict(job, order_number=order.order_number)
@@ -1037,93 +1099,10 @@ def _rank_offers(
     return ranked
 
 
-@router.get("/offers")
-async def driver_list_offers(
-    profile: DriverProfile = Depends(get_current_driver_profile),
-    db: AsyncSession = Depends(get_db),
-):
-    """Open delivery offers for the driver's area, best match first (online only)."""
-    if not profile.availability:
-        return []
-    if profile.status != "active":
-        return []
-    # No photo set -> no offers. Returning an empty list (rather than an error)
-    # keeps the driver dashboard's normal polling silent; the UI separately shows
-    # the "add vehicle photos" banner from the profile payload.
-    if not profile.vehicle_photos_complete:
-        return []
-
-    result = await db.execute(
-        select(DeliveryJob)
-        .options(selectinload(DeliveryJob.order))
-        .where(
-            DeliveryJob.status == "available",
-            DeliveryJob.assignment_type == "offer",
-        )
-        .order_by(DeliveryJob.created_at.asc())
-    )
-    jobs = _rank_offers(result.scalars().all(), profile.default_state, profile.default_city)
-    return [_job_dict(j, order_number=(j.order.order_number if j.order else None)) for j in jobs]
-
-
-@router.post("/offers/{job_id}/accept")
-async def driver_accept_offer(
-    job_id: UUID,
-    profile: DriverProfile = Depends(get_current_driver_profile),
-    db: AsyncSession = Depends(get_db),
-):
-    if not profile.availability:
-        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, detail="You are offline. Turn on availability to accept deliveries.")
-    if profile.status != "active":
-        raise HTTPException(http_status.HTTP_403_FORBIDDEN, detail="Driver account is not active.")
-    _require_vehicle_photos(profile)
-
-    # Drivers may hold only one active job at a time.
-    active = await db.execute(
-        select(DeliveryJob.id).where(
-            DeliveryJob.driver_profile_id == profile.id,
-            DeliveryJob.status.in_(_ACTIVE_JOB_STATUSES),
-        )
-    )
-    if active.first():
-        raise HTTPException(http_status.HTTP_409_CONFLICT, detail="You already have an active delivery. Finish it first.")
-
-    # Atomic claim: only the first driver to hit this UPDATE wins.
-    claimed = await db.execute(
-        update(DeliveryJob)
-        .where(
-            DeliveryJob.id == job_id,
-            DeliveryJob.status == "available",
-            DeliveryJob.assignment_type == "offer",
-        )
-        .values(
-            status="accepted",
-            driver_profile_id=profile.id,
-            driver_name=profile.full_name or profile.phone or "",
-            driver_phone=profile.phone or "",
-            accepted_at=datetime.utcnow(),
-        )
-    )
-    if claimed.rowcount != 1:
-        raise HTTPException(http_status.HTTP_409_CONFLICT, detail="This delivery was already taken or is no longer available.")
-
-    result = await db.execute(
-        select(DeliveryJob).options(selectinload(DeliveryJob.order)).where(DeliveryJob.id == job_id)
-    )
-    job = result.scalar_one()
-    order = job.order
-    await _set_order_driver(order, profile)
-    await db.commit()
-
-    vrow = await db.execute(select(Vendor).where(Vendor.id == job.vendor_id))
-    vendor = vrow.scalar_one_or_none()
-    if vendor:
-        _notify(db, vendor.user_id, "Delivery accepted",
-                f"Driver {profile.full_name} accepted delivery {job.job_number} for order {order.order_number}.",
-                "/supplier-dashboard?tab=orders")
-    await db.commit()
-
-    return _job_dict(job, order_number=(order.order_number if order else None))
+# The legacy `offer` (first-come claim) driver endpoints were retired along
+# with the offer dispatch mode: delivery is arranged through the bid jobs a
+# paid order opens automatically (`POST /delivery/jobs` with `bid` plus the
+# `/delivery/bids/*` routes).
 
 
 # NOTE: the driver-scoped GET /jobs/mine handler was removed - it duplicated the
@@ -1142,6 +1121,17 @@ async def _driver_transition(db: AsyncSession, profile: DriverProfile, job_id: U
         raise HTTPException(http_status.HTTP_404_NOT_FOUND, detail="Job not found or not assigned to you")
     if job.status in _TERMINAL:
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, detail="Job already finished")
+
+    # Money gate: the goods may not leave the vendor until the delivery fee this
+    # group's arrangement produced has been paid. Legacy jobs default to paid.
+    if target in ("picked_up", "in_transit") and not job.shipping_paid:
+        raise HTTPException(
+            http_status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "The buyer has not paid the delivery fee yet. Pickup unlocks as soon "
+                "as the delivery payment is confirmed."
+            ),
+        )
 
     if target == "picked_up":
         if job.status not in ("accepted", "picked_up"):

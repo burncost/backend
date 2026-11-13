@@ -12,7 +12,7 @@ Location-forward:
   later phases can do distance matching, ETA and live map views without a rewrite.
 - job lifecycle timestamps give a clean timeline for tracking/live-progress.
 """
-from sqlalchemy import Column, String, DateTime, Numeric, ForeignKey
+from sqlalchemy import Column, String, DateTime, Numeric, ForeignKey, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -39,7 +39,7 @@ class DeliveryJob(Base):
         nullable=False,
         index=True,
     )
-    # Set once a driver is assigned (auto for `direct`, on accept for `offer`).
+    # Set once a driver is assigned (auto for `direct`, on bid accept for `bid`).
     driver_profile_id = Column(
         UUID(as_uuid=True),
         ForeignKey("driver_profiles.id", ondelete="SET NULL"),
@@ -47,7 +47,7 @@ class DeliveryJob(Base):
         index=True,
     )
 
-    assignment_type = Column(String(20), default="offer", nullable=False)  # direct | offer
+    assignment_type = Column(String(20), default="bid", nullable=False)  # direct | bid
     # available | accepted | picked_up | in_transit | delivered | cancelled | expired
     status = Column(String(20), default="available", nullable=False, index=True)
 
@@ -72,6 +72,23 @@ class DeliveryJob(Base):
     # Delivery fee snapshot (charged/settled to driver in a later phase).
     delivery_fee = Column(Numeric(15, 2), default=0)
 
+    # ── Post-confirmation delivery arrangement ──────────────────────────────
+    # `bid` jobs collect driver bids until this moment (default: confirmed + 48h).
+    # The buyer may also accept the vendor's quote at any point before that.
+    bidding_closes_at = Column(DateTime, index=True)
+    # False until the buyer pays the delivery invoice covering this job. A job with
+    # a zero fee (free vendor delivery) is paid by definition. Legacy rows default
+    # to True so pre-existing dispatched jobs keep working untouched.
+    shipping_paid = Column(Boolean, default=True, nullable=False, server_default="true", index=True)
+    # Invoice that settled this job (audit trail for the consolidated payment).
+    shipping_invoice_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("shipping_invoices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Buyer declined the vendor's transport quote; a vendor may re-quote once.
+    vendor_fee_declined_at = Column(DateTime)
+
     # Lifecycle timestamps (progress timeline / live tracking).
     accepted_at = Column(DateTime)
     picked_up_at = Column(DateTime)
@@ -86,6 +103,7 @@ class DeliveryJob(Base):
     order = relationship("Order")
     driver = relationship("DriverProfile", back_populates="delivery_jobs")
     location_updates = relationship("DriverLocationUpdate", back_populates="delivery_job")
+    bids = relationship("DeliveryBid", back_populates="job", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<DeliveryJob id={self.id} status={self.status}>"

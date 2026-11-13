@@ -10,6 +10,8 @@ from app.models.brand import Brand
 from app.models.order import Order, OrderItem
 from app.models.driver import DriverProfile, DriverLocationUpdate
 from app.models.delivery import DeliveryJob
+from app.models.delivery_bid import DeliveryBid
+from app.models.shipping_invoice import ShippingInvoice
 from app.models.delivery_event import DeliveryJobEvent
 from app.models.delivery_proof import DeliveryProof
 from app.models.delivery_rating import DeliveryRating
@@ -65,6 +67,8 @@ __all__ = [
     "DriverProfile",
     "DriverLocationUpdate",
     "DeliveryJob",
+    "DeliveryBid",
+    "ShippingInvoice",
     "DeliveryJobEvent",
     "DeliveryProof",
     "DeliveryRating",

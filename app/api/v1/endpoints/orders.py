@@ -34,7 +34,6 @@ from app.api.v1.endpoints.deliveries import (
 )
 from app.core.database import get_db
 from app.services.notification_service import NotificationService
-from app.services.shipping_service import ShippingService
 # Used by the escrow release below. Was referenced without being imported, so the
 # transfer raised NameError and was swallowed by the function's broad `except`
 # (the payout silently never happened).
@@ -468,14 +467,11 @@ async def create_order(
         db, [item_data.get("category_id") for item_data in order_items]
     )
 
-    # Calculate shipping (dev: flat rate, prod: zone+weight)
-    shipping_service = ShippingService()
-    shipping_result = await shipping_service.calculate_shipping(
-        db=db,
-        vendor_id=order_items[0]["vendor_id"],
-        items=[{"base_price": i["base_price"], "discount_price": i["unit_price"], "quantity": i["quantity"]} for i in order_items],
-    )
-    shipping_fee = shipping_result["shipping_fee"]
+    # Delivery is arranged AND paid after confirmation: the vendor quotes a fee or
+    # drivers bid per vendor group, then the buyer pays that delivery invoice
+    # separately. Checkout therefore charges goods + platform fee + VAT only, and
+    # the historical `shipping_fee` estimate is never billed here.
+    shipping_fee = 0.0
 
     # Product discount (base_price - unit_price)
     discount_amount = round(sum(item["base_price"] * item["quantity"] - item["total_price"] for item in order_items), 2)

@@ -45,6 +45,9 @@ class VendorSettlementLedger(Base):
     gross_amount = Column(Numeric(15, 2), nullable=False)
     gateway_fee = Column(Numeric(15, 2), default=0, nullable=False)
     commission_amount = Column(Numeric(15, 2), default=0, nullable=False)
+    # Vendor-fleet transport the buyer paid separately (not part of gross_amount,
+    # so it is added to the payout only when the vendor actually delivered it).
+    delivery_amount = Column(Numeric(15, 2), default=0, nullable=False, server_default="0")
     net_amount = Column(Numeric(15, 2), nullable=False)
 
     # pending | paid | cancelled

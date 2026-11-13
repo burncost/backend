@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     documents,
     drivers,
     deliveries,
+    delivery_bidding,
     orders,
     categories,
     cart,
@@ -65,6 +66,7 @@ api_router.include_router(boqs.router, prefix="/boqs", tags=["BOQs"])
 api_router.include_router(documents.router, prefix="/documents", tags=["Documents"])
 api_router.include_router(drivers.router, prefix="/drivers", tags=["Drivers"])
 api_router.include_router(deliveries.router, prefix="/delivery", tags=["Delivery"])
+api_router.include_router(delivery_bidding.router, prefix="/delivery", tags=["Delivery Bidding"])
 api_router.include_router(orders.router, prefix="/orders", tags=["Orders"])
 api_router.include_router(categories.router, prefix="/categories", tags=["Categories"])
 api_router.include_router(cart.router, prefix="/cart", tags=["Cart"])

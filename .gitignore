@@ -96,4 +96,4 @@ celerybeat.pid
 # Jupyter Notebook
 .ipynb_checkpoints
 
-tests/
+# tests/

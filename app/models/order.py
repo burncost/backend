@@ -93,6 +93,18 @@ class Order(Base):
     escrow_released_at = Column(DateTime)
     # One buyer-requested extension per order (policy: +24h on request).
     inspection_extension_requested_at = Column(DateTime)
+    # ── Delivery payment (post-confirmation, charged separately from checkout) ─
+    # not_due | pending | paid. Delivery is arranged after the vendor confirms, so
+    # checkout only charges goods + platform fee + VAT and this flips to `pending`
+    # as soon as a vendor quote / accepted bid is waiting to be paid.
+    shipping_payment_status = Column(
+        String(20), default="not_due", nullable=False, server_default="not_due", index=True
+    )
+    shipping_paid_at = Column(DateTime)
+    # Total delivery money actually collected for this order (sum of completed
+    # shipping invoices). `shipping_fee` stays the checkout-time amount and is no
+    # longer used, kept as-is so historical order totals keep reconciling.
+    delivery_fee_total = Column(Numeric(15, 2), default=0.00, server_default="0")
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

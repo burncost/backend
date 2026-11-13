@@ -209,6 +209,15 @@ async def _apply_payment_side_effects(db, order) -> None:
     # the dashboard shows this paid order only.
     await _cancel_duplicate_drafts(db, order, items)
 
+    # Delivery is arranged after confirmation: open one bid job per vendor group
+    # so vendors can quote and drivers can bid. Idempotent and non-fatal - a
+    # failure here must never roll back an already-captured payment.
+    from app.services import bid_dispatch_service
+    try:
+        await bid_dispatch_service.create_bid_jobs_for_order(db, order)
+    except Exception:  # pragma: no cover - defensive (money already captured)
+        logger.exception("Could not open delivery bidding for %s", order.order_number)
+
 
 ### List payments for the current user
 @router.get("/")
@@ -663,6 +672,28 @@ async def verify_payment(
     gateway = (provider or "flutterwave").strip().lower()
     result = await payment_service.verify_payment(reference, provider=gateway)
 
+    # Delivery-fee payments (SHP-...) settle a ShippingInvoice, never an order.
+    if reference.startswith("SHP-") and result.get("success"):
+        from app.api.v1.endpoints.delivery_bidding import _SETTLEMENT_MESSAGES
+        from app.services import shipping_payment_service
+        is_mock_provider = str(result.get("provider") or "").lower() == "mock"
+        settlement = await shipping_payment_service.confirm_reference(
+            db,
+            reference,
+            provider=str(result.get("provider") or gateway),
+            paid_amount=None if is_mock_provider else _gateway_amount(result.get("amount")),
+            provider_reference=str(result.get("id") or reference),
+            user_id=str(current_user.id),
+        )
+        settlement_status = settlement.get("status")
+        return {
+            **result,
+            "applied": settlement_status in ("settled", "already_settled"),
+            "shipping": settlement,
+            # Same copy as `/delivery/shipping/verify` so both return paths read alike.
+            "message": _SETTLEMENT_MESSAGES.get(settlement_status, "Delivery payment recorded."),
+        }
+
     if result.get("success"):
         # Update order status if found. `order` stays None when the reference
         # cannot be mapped, so the response below reports the truth instead of
@@ -789,6 +820,17 @@ async def flutterwave_webhook(
             logger.info(f"Flutterwave webhook: token purchase {tx_ref} -> {outcome.get('status')}")
             return {"status": "ok", "token_purchase": outcome.get("status")}
 
+        # Delivery-fee payments settle a ShippingInvoice (separate from checkout).
+        if tx_ref.startswith("SHP-"):
+            from app.services import shipping_payment_service
+            outcome = await shipping_payment_service.confirm_reference(
+                db, tx_ref, provider="flutterwave",
+                paid_amount=float(data.get("amount") or 0) or None,
+                provider_reference=str(data.get("id") or tx_ref),
+            )
+            logger.info(f"Flutterwave webhook: shipping payment {tx_ref} -> {outcome.get('status')}")
+            return {"status": "ok", "shipping": outcome.get("status")}
+
         # Extract order reference from tx_ref
         # (format: BURNCOST-{order_number}-{timestamp}; the order number itself
         # contains hyphens, so it must never be recovered by splitting on "-").
@@ -846,6 +888,18 @@ async def flutterwave_webhook(
                         gateway_fee=float(data.get("app_fee") or 0),
                     )
 
+    # A failed delivery-fee charge must release the pending invoice: the buyer's
+    # next "Pay delivery fee" would otherwise be superseded into a stale row while
+    # the UI kept offering a link that can never settle.
+    if event == "charge.completed" and data.get("status") != "successful":
+        failed_ref = str(data.get("tx_ref") or "")
+        if failed_ref.startswith("SHP-"):
+            from app.services import shipping_payment_service
+            await shipping_payment_service.mark_failed(db, failed_ref)
+            await db.commit()
+            logger.info("Flutterwave webhook: shipping payment %s failed", failed_ref)
+            return {"status": "ok", "shipping": "failed"}
+
     return {"status": "ok"}
 
 
@@ -899,6 +953,15 @@ async def monnify_webhook(
     if is_success:
         tx_ref = (data.get("paymentReference") or data.get("transactionReference")
                   or data.get("tx_ref") or data.get("paymentReference") or "")
+        if str(tx_ref).startswith("SHP-"):
+            from app.services import shipping_payment_service
+            outcome = await shipping_payment_service.confirm_reference(
+                db, str(tx_ref), provider="monnify",
+                paid_amount=float(data.get("amount") or data.get("amountPaid") or 0) or None,
+                provider_reference=str(data.get("transactionReference") or tx_ref),
+            )
+            logger.info(f"Monnify webhook: shipping payment {tx_ref} -> {outcome.get('status')}")
+            return {"status": "ok", "shipping": outcome.get("status")}
         if str(tx_ref).startswith("BURNCOST-"):
             order_number = _order_number_from_reference(str(tx_ref)) or _order_number_from_metadata(data)
             if order_number:
@@ -935,6 +998,17 @@ async def monnify_webhook(
                             gateway_fee=float(data.get("fee") or data.get("totalFees") or 0),
                         )
                         logger.info("Monnify: Payment confirmed for order %s", order.order_number)
+
+    # Failed delivery-fee charge: free the pending invoice so the buyer can retry.
+    if not is_success:
+        failed_ref = str(data.get("paymentReference") or data.get("transactionReference")
+                         or data.get("tx_ref") or "")
+        if failed_ref.startswith("SHP-"):
+            from app.services import shipping_payment_service
+            await shipping_payment_service.mark_failed(db, failed_ref)
+            await db.commit()
+            logger.info("Monnify webhook: shipping payment %s failed", failed_ref)
+            return {"status": "ok", "shipping": "failed"}
 
     return {"status": "ok"}
 
@@ -979,6 +1053,17 @@ async def paystack_webhook(
             )
             logger.info(f"Paystack webhook: token purchase {reference} -> {outcome.get('status')}")
             return {"status": "ok", "token_purchase": outcome.get("status")}
+
+        # Delivery-fee payments settle a ShippingInvoice (separate from checkout).
+        if reference.startswith("SHP-"):
+            from app.services import shipping_payment_service
+            outcome = await shipping_payment_service.confirm_reference(
+                db, reference, provider="paystack",
+                paid_amount=float(data.get("amount") or 0) / 100.0 or None,  # kobo -> naira
+                provider_reference=str(data.get("id") or reference),
+            )
+            logger.info(f"Paystack webhook: shipping payment {reference} -> {outcome.get('status')}")
+            return {"status": "ok", "shipping": outcome.get("status")}
 
         if reference.startswith("BURNCOST-"):
             order_number = _order_number_from_reference(reference) or _order_number_from_metadata(data)
@@ -1030,6 +1115,16 @@ async def paystack_webhook(
                         gateway_fee=float(data.get("fees") or 0) / 100.0,  # kobo -> naira
                     )
                     logger.info(f"Webhook: Payment confirmed for order {order_number}")
+
+    # Failed delivery-fee charge: free the pending invoice so the buyer can retry.
+    if event == "charge.failed":
+        failed_ref = str(payload.get("data", {}).get("reference") or "")
+        if failed_ref.startswith("SHP-"):
+            from app.services import shipping_payment_service
+            await shipping_payment_service.mark_failed(db, failed_ref)
+            await db.commit()
+            logger.info("Paystack webhook: shipping payment %s failed", failed_ref)
+            return {"status": "ok", "shipping": "failed"}
 
     return {"status": "ok"}
 
