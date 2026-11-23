@@ -1,11 +1,12 @@
 """Public (unauthenticated) endpoints for the marketing/landing experience."""
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select, union_all, literal_column
 
+from app.config import settings
 from app.core.database import get_db
 from app.models.blog_post import BlogPost
-from app.models.product import Review
+from app.models.product import Product, ProductStatus, Review
 from app.models.vendor_review import VendorReview
 from app.services.blog_service import post_to_dict
 
@@ -153,3 +154,123 @@ async def get_public_blog_post(
         logger.warning("Blog view count update failed for %s: %s", slug, exc)
 
     return post_to_dict(post)
+
+
+# ── Sitemap ─────────────────────────────────────────────────────────────────
+# Served by the API (not a build-time file) so newly published products and
+# blog posts appear without a frontend redeploy. Vercel rewrites
+# `/sitemap.xml` here ahead of the SPA catch-all.
+
+_SITEMAP_FALLBACK_HOST = "https://www.burncost.com"
+# Apex requests 308-redirect to www, so an apex `<loc>` would turn every entry
+# into a redirect hop - a stale apex `FRONTEND_URL` is normalised before use.
+_SITEMAP_APEX_HOST = "https://burncost.com"
+
+# path, changefreq, priority
+_STATIC_SITEMAP_ROUTES: list[tuple[str, str, str]] = [
+    ("/", "daily", "1.0"),
+    ("/marketplace", "daily", "0.9"),
+    ("/blog", "weekly", "0.8"),
+    ("/pricing", "monthly", "0.7"),
+    ("/faq", "monthly", "0.6"),
+    ("/legal", "yearly", "0.3"),
+]
+
+_MAX_PRODUCTS = 5000
+_MAX_POSTS = 2000
+
+
+def _xml_escape(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _lastmod(value) -> str | None:
+    """Sitemap `lastmod` is W3C-date; a bad/absent value is simply omitted."""
+    try:
+        return value.strftime("%Y-%m-%d") if value else None
+    except Exception:
+        return None
+
+
+def _sitemap_host() -> str:
+    """Canonical host for sitemap URLs.
+
+    `FRONTEND_URL` is correct in production but points at localhost in local
+    `.env` files; emitting those would invalidate the whole sitemap, so anything
+    that is not a public https host falls back to the canonical domain. Apex is
+    rewritten to `www` because apex serves a 308 redirect.
+    """
+    configured = (settings.FRONTEND_URL or "").strip().rstrip("/")
+    looks_public = (
+        configured.startswith("https://")
+        and "localhost" not in configured
+        and "127.0.0.1" not in configured
+    )
+    if not looks_public or configured == _SITEMAP_APEX_HOST:
+        return _SITEMAP_FALLBACK_HOST
+    return configured
+
+
+@router.get("/sitemap.xml", include_in_schema=False)
+async def sitemap(db: AsyncSession = Depends(get_db)):
+    """XML sitemap of public pages, active products and published posts."""
+    base = _sitemap_host()
+
+    # loc, lastmod, changefreq, priority
+    entries: list[tuple[str, str | None, str, str]] = [
+        (f"{base}{path}", None, changefreq, priority)
+        for path, changefreq, priority in _STATIC_SITEMAP_ROUTES
+    ]
+
+    # A database problem must degrade to the static sitemap, never a 500 -
+    # search engines treat an unreachable sitemap as a site-level error.
+    try:
+        product_rows = (await db.execute(
+            select(Product.id, Product.updated_at)
+            .where(Product.status == ProductStatus.ACTIVE)
+            .order_by(Product.updated_at.desc().nullslast())
+            .limit(_MAX_PRODUCTS)
+        )).all()
+        blog_rows = (await db.execute(
+            select(BlogPost.slug, BlogPost.updated_at, BlogPost.published_at)
+            .where(BlogPost.status == "published")
+            .order_by(BlogPost.published_at.desc().nullslast())
+            .limit(_MAX_POSTS)
+        )).all()
+    except Exception as exc:  # pragma: no cover - sitemap must stay available
+        logger.error("Sitemap database read failed: %s", exc)
+        product_rows, blog_rows = [], []
+
+    for product_id, updated_at in product_rows:
+        entries.append((f"{base}/product/{product_id}", _lastmod(updated_at), "weekly", "0.8"))
+
+    for slug, updated_at, published_at in blog_rows:
+        entries.append(
+            (f"{base}/blog/{slug}", _lastmod(updated_at or published_at), "monthly", "0.6")
+        )
+
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+    for loc, lastmod, changefreq, priority in entries:
+        lines.append("  <url>")
+        lines.append(f"    <loc>{_xml_escape(loc)}</loc>")
+        if lastmod:
+            lines.append(f"    <lastmod>{lastmod}</lastmod>")
+        lines.append(f"    <changefreq>{changefreq}</changefreq>")
+        lines.append(f"    <priority>{priority}</priority>")
+        lines.append("  </url>")
+    lines.append("</urlset>")
+
+    return Response(
+        content="\n".join(lines),
+        media_type="application/xml",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )

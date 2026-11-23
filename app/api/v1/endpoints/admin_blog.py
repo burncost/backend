@@ -33,7 +33,7 @@ admin_guard = require_roles("manager", "support", "marketing")
 
 
 def _base_url() -> str:
-    return (getattr(settings, "FRONTEND_URL", None) or "https://burncost.com").rstrip("/")
+    return (getattr(settings, "FRONTEND_URL", None) or "https://www.burncost.com").rstrip("/")
 
 
 def _clean_slug(raw: Optional[str]) -> Optional[str]:

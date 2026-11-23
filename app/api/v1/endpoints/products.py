@@ -5,6 +5,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from app.core.database import get_db
+from app.core.exceptions import CustomException
 from app.schemas.product import (
     CategoryRequest,
     ProductCreate,
@@ -174,12 +175,17 @@ async def create_product(
 
     except HTTPException:
         raise
+    except CustomException:
+        # ConflictException (409) and friends: keep the status/message instead of
+        # letting the catch-all below flatten them into an opaque 500.
+        raise
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
+        await db.rollback()
         logger.error(f"Failed to create product: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -296,6 +302,14 @@ async def update_product(
 
     except HTTPException:
         raise
+    except CustomException:
+        # ConflictException (409) from brand resolution: keep status/message.
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
     except Exception as e:
         await db.rollback()
         logger.error(f"Failed to update product {product_id}: {str(e)}")

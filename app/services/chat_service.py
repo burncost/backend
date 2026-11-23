@@ -72,7 +72,7 @@ def _name_matches_query(name: str, query: str) -> bool:
     The catalogue matches a token anywhere in name/description/sku/meta_keywords,
     which is right for browsing but wrong for "cheapest X": "Tile Adhesive (25kg)"
     describes itself as "Cement-based tile adhesive", so it used to win the
-    cheapest-cement slot (₦7,500) ahead of actual cement (₦11,500+). Whole words
+    cheapest-cement slot (₦7,500) ahead of actual cement (₦11,300+). Whole words
     (not substrings) also keep "reinfor-cement Rod" out of a "cement" query.
     """
     tokens = _query_tokens(query)

@@ -91,7 +91,7 @@ class CampaignStateError(NewsletterError):
 
 def base_url() -> str:
     """Marketing site root used for links and unsubscribe URLs."""
-    return (getattr(settings, "FRONTEND_URL", None) or "https://burncost.com").rstrip("/")
+    return (getattr(settings, "FRONTEND_URL", None) or "https://www.burncost.com").rstrip("/")
 
 
 def normalize_emails(raw: Any) -> List[str]:

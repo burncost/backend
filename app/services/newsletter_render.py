@@ -32,7 +32,7 @@ MERGE_TAGS: Dict[str, str] = {
     "city": "Vendor city",
     "state": "Vendor state",
     "tier": "Vendor verification tier (starter, verified_vendor, enterprise)",
-    "site_url": "Marketing site root, e.g. https://burncost.com",
+    "site_url": "Marketing site root, e.g. https://www.burncost.com",
     "unsubscribe_url": "One-click unsubscribe link (blank for pasted addresses)",
     "price_table": "Today's material price table (HTML)",
     "year": "Current year",
@@ -242,7 +242,7 @@ def wrap_html(
         f"{html_lib.escape(preview_text)}</div>"
         if preview_text else ""
     )
-    home = html_lib.escape(f"{site}/" if site else "https://burncost.com", quote=True)
+    home = html_lib.escape(f"{site}/" if site else "https://www.burncost.com", quote=True)
     return f"""<!DOCTYPE html>
 <html><body style="margin:0;padding:0;background:#f6f6f6">
 {preheader}

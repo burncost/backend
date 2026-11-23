@@ -11,12 +11,12 @@ class ProductBase(BaseModel):
     short_description: Optional[str] = Field(None, max_length=255)
     category_id: Optional[UUID] = None
     brand_id: Optional[UUID] = None
-    brand_name: Optional[str] = None
+    brand_name: Optional[str] = Field(None, max_length=255)
     sku: str = Field(..., min_length=3, max_length=100)
     base_price: Decimal = Field(..., gt=0)
     discount_price: Optional[Decimal] = Field(None, gt=0)
     quantity: int = Field(default=0, ge=0)
-    unit_of_measure: str = Field(default="piece")
+    unit_of_measure: str = Field(default="piece", max_length=50)
     quality: Optional[str] = Field(None, max_length=50)
     minimum_order_quantity: int = Field(default=1, ge=1)
     shipping_fee: Optional[Decimal] = Field(default=0.00)
@@ -71,7 +71,7 @@ class ProductUpdate(BaseModel):
     brand_id: Optional[UUID] = None
     # Write-only convenience: Product has no brand_name column, the endpoint
     # resolves this to brand_id so an edit can change a product's brand.
-    brand_name: Optional[str] = None
+    brand_name: Optional[str] = Field(None, max_length=255)
     # Editable identity/stock fields. Lengths mirror the columns; minimum_order_quantity
     # matches ProductBase. No min_length on sku so a legacy short SKU submitted
     # unchanged by the edit form is not rejected.

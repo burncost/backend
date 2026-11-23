@@ -45,6 +45,7 @@ class CORSMiddleware(BaseHTTPMiddleware):
             "http://localhost:3000",
             "https://burncost.vercel.app",
             "https://burncost.com",
+            "https://www.burncost.com",
         ]
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_, delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.models.product import Product, ProductImage, ProductSpecification, ProductStatus
@@ -18,6 +19,7 @@ from app.crud import product as product_crud
 from app.config import settings
 from app.utils.image_processing import normalize_image, ImageTooLarge, UnsupportedImage
 from app.utils.storage import StorageService
+from app.core.exceptions import ConflictException
 
 logger = logging.getLogger(__name__)
 
@@ -347,18 +349,50 @@ class ProductService:
 
         Shared by the create and update paths: Product has no brand_name column,
         so an edit that changes the brand has to resolve the name to the FK here.
+
+        Different names can normalise to the same slug ("A&B" vs "A B"), and a
+        brand can be created concurrently by another request. The insert therefore
+        runs inside a savepoint: a unique-constraint collision rolls back only the
+        brand insert (a full rollback would expire the product row the edit path
+        already loaded) and the row the other request created is reused.
         """
+        name = brand_name.strip()
         result = await self.db.execute(
-            select(Brand).where(Brand.name.ilike(brand_name.strip())).limit(1)
+            select(Brand).where(Brand.name.ilike(name)).limit(1)
         )
         brand = result.scalar_one_or_none()
         if brand:
             return brand.id
 
-        logger.warning(f"Brand '{brand_name}' not found, creating new brand")
-        brand = Brand(name=brand_name.strip(), slug=self._brand_slug(brand_name))
-        self.db.add(brand)
-        await self.db.flush()
+        logger.warning(f"Brand '{name}' not found, creating new brand")
+        slug = self._brand_slug(name) or "brand"
+        slug_taken = await self.db.execute(
+            select(Brand.id).where(Brand.slug == slug).limit(1)
+        )
+        if slug_taken.scalar_one_or_none():
+            # Same slug, different display name: keep both rows addressable.
+            slug = f"{slug}-{uuid.uuid4().hex[:6]}"
+
+        brand = Brand(name=name, slug=slug)
+        try:
+            async with self.db.begin_nested():
+                self.db.add(brand)
+                await self.db.flush()
+        except IntegrityError:
+            # Concurrent create won the race; reuse the row it inserted.
+            brand = None
+
+        if brand is not None and brand.id is not None:
+            return brand.id
+
+        result = await self.db.execute(
+            select(Brand).where(Brand.name.ilike(name)).limit(1)
+        )
+        brand = result.scalar_one_or_none()
+        if not brand:
+            raise ValueError(
+                f"Brand '{name}' could not be resolved. Please try again."
+            )
         return brand.id
 
     async def _unique_sku(self, sku: str, max_suffixes: int = 5) -> str:
@@ -386,8 +420,11 @@ class ProductService:
         product_data["slug"] = self._generate_slug(product_data["name"])
 
         # Pull specifications out before constructing the ORM row - they live in
-        # a child table, not on Product itself.
-        specifications = product_data.pop("specifications", None) or []
+        # a child table, not on Product itself. They are read from the schema model:
+        # model_dump() has already turned the nested ProductSpecIn rows into plain
+        # dicts, which would break the `spec.spec_value` access below.
+        product_data.pop("specifications", None)
+        specifications = product_in.specifications or []
 
         # Same for image_url: Product has no such column, so it must be popped
         # before Product(**product_data) or the create raises -> HTTP 500.
@@ -423,7 +460,16 @@ class ProductService:
 
         product = Product(**product_data)
         self.db.add(product)
-        await self.db.flush()  # get product.id without committing yet
+        try:
+            await self.db.flush()  # get product.id without committing yet
+        except IntegrityError:
+            # Lost a SKU race to a concurrent create (the pre-check above cannot
+            # serialise writers; the unique index is the source of truth).
+            await self.db.rollback()
+            attempted_sku = product_data.get("sku")
+            raise ConflictException(
+                f"SKU '{attempted_sku}' was taken while saving. Please try again."
+            )
 
         # Catalog image = primary image (slide 1 of the gallery). Vendor uploads
         # always land after it as non-primary slides.
@@ -438,7 +484,7 @@ class ProductService:
 
         # Upsert specifications in display_order order.
         for idx, spec in enumerate(specifications):
-            if not spec.spec_value.strip():
+            if not (spec.spec_value or "").strip():
                 continue  # skip blank spec rows
             self.db.add(ProductSpecification(
                 product_id=product.id,
@@ -447,7 +493,14 @@ class ProductService:
                 display_order=spec.display_order if spec.display_order is not None else idx,
             ))
 
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except IntegrityError:
+            await self.db.rollback()
+            raise ConflictException(
+                "This listing conflicts with an existing record. "
+                "Please adjust the SKU or brand and try again."
+            )
         await self.db.refresh(product)
         return product
 
@@ -523,7 +576,14 @@ class ProductService:
                     display_order=spec.display_order if spec.display_order is not None else idx,
                 ))
 
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except IntegrityError:
+            await self.db.rollback()
+            raise ConflictException(
+                "This change conflicts with an existing record. "
+                "Please adjust the SKU or brand and try again."
+            )
         await self.db.refresh(product)
         return product
 
